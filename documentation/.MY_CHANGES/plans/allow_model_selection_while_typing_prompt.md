@@ -1,0 +1,1 @@
+allow the model selection UI in the chatbox to stay visible and interactable even while typing a prompt

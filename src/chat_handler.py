@@ -173,14 +173,24 @@ class ChatHandler:
         vision_enabled = False
         main_is_vision = False
         if effective_att_ids:
-            from src.settings import get_setting
-            vision_enabled = get_setting("vision_enabled", True)
+            from src.settings import get_user_setting
+            _owner = getattr(sess, "owner", None) or ""
+            vision_enabled = get_user_setting("vision_enabled", _owner, True)
+            vision_override = get_user_setting("vision_override", _owner, "default")
             if vision_enabled:
                 main_is_vision = await asyncio.to_thread(
                     model_supports_vision,
                     sess.model or "",
                     getattr(sess, "endpoint_url", "") or "",
                 )
+            if vision_override == "force_vision":
+                main_is_vision = True
+            elif vision_override == "force_no_vision":
+                main_is_vision = False
+            logger.info(
+                "[vision-diag] model=%r vision_enabled=%s main_is_vision=%s override=%s att_ids=%s",
+                sess.model, vision_enabled, main_is_vision, vision_override, att_ids,
+            )
 
         if effective_att_ids and vision_enabled:
             meta_by_id = {m["id"]: m for m in attachment_meta}
@@ -219,7 +229,7 @@ class ChatHandler:
                         # editable textarea) overrides what the vision model would say.
                         _vcache = os.path.join(UPLOAD_DIR, ".vision", att_id + ".txt")
                         vl_desc = None
-                        vl_model = get_setting("vision_model", "") or ""
+                        vl_model = get_user_setting("vision_model", _owner, "") or ""
                         if os.path.exists(_vcache):
                             try:
                                 with open(_vcache, encoding="utf-8") as _vf:

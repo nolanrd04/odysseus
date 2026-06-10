@@ -941,6 +941,8 @@ const _TASK_PRESETS = [
   { label: 'Action on schedule',    desc: 'Run tidy/cleanup on a timer',                  taskType: 'action',   triggerType: 'schedule' },
   { label: 'Action on event',       desc: 'Run tidy/cleanup every N sessions or messages', taskType: 'action', triggerType: 'event' },
   { label: 'Webhook triggered',     desc: 'Trigger via external HTTP call',               taskType: 'llm',      triggerType: 'webhook' },
+  { label: 'Manual / on demand',   desc: 'Run from the Quick Run sidebar whenever you like', taskType: 'llm',   triggerType: 'manual' },
+  { label: 'Action on demand',     desc: 'Built-in action you trigger manually',           taskType: 'action',   triggerType: 'manual' },
 ];
 
 // Icon for each preset, keyed off task/trigger type (24x24 stroke SVG).
@@ -1035,6 +1037,7 @@ function _showForm(existing, initTaskType, initTriggerType) {
         <button class="task-toggle-btn ${curTriggerType === 'schedule' ? 'active' : ''}" data-val="schedule" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Schedule</button>
         <button class="task-toggle-btn ${curTriggerType === 'event' ? 'active' : ''}" data-val="event" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Event</button>
         <button class="task-toggle-btn ${curTriggerType === 'webhook' ? 'active' : ''}" data-val="webhook" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Webhook</button>
+        <button class="task-toggle-btn ${curTriggerType === 'manual' ? 'active' : ''}" data-val="manual" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><polygon points="5 3 19 12 5 21 5 3"/></svg>Manual</button>
       </div>
 
       <div id="task-form-trigger-opts"></div>
@@ -1278,6 +1281,8 @@ function _showForm(existing, initTaskType, initTriggerType) {
       } else {
         triggerOpts.innerHTML = '<div style="font-size:11px;opacity:0.5;margin-top:4px;">Webhook URL will be generated when the task is saved.</div>';
       }
+    } else if (triggerType === 'manual') {
+      triggerOpts.innerHTML = '<div style="font-size:11px;opacity:0.5;margin-top:4px;">This task only runs when you click it in the Quick Run sidebar. No schedule needed.</div>';
     }
   }
 
@@ -2649,6 +2654,7 @@ export function closeTasks() {
     document.removeEventListener('keydown', window._tasksFormEsc, true);
     window._tasksFormEsc = null;
   }
+  document.dispatchEvent(new CustomEvent('tasks-panel-closed'));
 }
 
 export function isTasksOpen() { return _open; }

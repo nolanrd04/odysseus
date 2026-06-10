@@ -545,7 +545,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 trigger_count=req.trigger_count,
                 trigger_counter=0,
                 next_run=next_run,
-                status="active" if (req.trigger_type in ("event", "webhook") or next_run) else "completed",
+                status="active" if (req.trigger_type in ("event", "webhook", "manual") or next_run) else "completed",
                 output_target=req.output_target,
                 model=req.model or None,
                 endpoint_url=req.endpoint_url or None,
@@ -649,6 +649,33 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                     pass
 
         return {"ok": True, "action": action, "cleared": cleared, "files": removed_files}
+
+    @router.get("/manual")
+    async def list_manual_tasks(request: Request):
+        """Return tasks with trigger_type='manual' for the Quick Run sidebar."""
+        user = _owner(request)
+        db = SessionLocal()
+        try:
+            q = db.query(ScheduledTask).filter(
+                ScheduledTask.trigger_type == "manual",
+                ScheduledTask.status != "completed",
+            )
+            if user:
+                q = q.filter(ScheduledTask.owner == user)
+            tasks = q.order_by(ScheduledTask.name).all()
+            return {"tasks": [
+                {
+                    "id": t.id,
+                    "name": _display_task_name(t),
+                    "action": t.action,
+                    "task_type": t.task_type or "llm",
+                    "last_run": t.last_run.isoformat() + "Z" if t.last_run else None,
+                    "status": t.status,
+                }
+                for t in tasks
+            ]}
+        finally:
+            db.close()
 
     @router.get("/{task_id}")
     async def get_task(request: Request, task_id: str):

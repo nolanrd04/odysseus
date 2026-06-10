@@ -43,7 +43,7 @@ def extract_urls(text: str) -> List[str]:
 _VISION_MODEL_KEYWORDS = (
     # hosted
     "gpt-4o", "gpt-4.1", "gpt-4.5", "gpt-4-turbo", "gpt-4-vision",
-    "claude-sonnet", "claude-opus", "claude-haiku", "gemini",
+    "claude-sonnet", "claude-opus", "claude-haiku", "claude-fable", "gemini",
     # open / local
     "vision", "multimodal", "llava", "bakllava", "moondream", "pixtral", "minicpm",
     "internvl", "cogvlm", "qwen-vl", "qwen2-vl", "qwen3-vl", "qwen3vl",
@@ -77,7 +77,17 @@ def is_vision_model(model_name: str) -> bool:
     m = (model_name or "").lower()
     if any(kw in m for kw in _VISION_MODEL_KEYWORDS):
         return True
-    return bool(_VISION_VL_RE.search(m))
+    if _VISION_VL_RE.search(m):
+        return True
+    try:
+        from src.settings import get_setting
+        extra = get_setting("vision_model_extra_keywords", "") or ""
+        user_keywords = [kw.strip().lower() for kw in extra.split(",") if kw.strip()]
+        if any(kw in m for kw in user_keywords):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 _PROVIDER_FINGERPRINT_TTL = 60.0

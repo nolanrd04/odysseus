@@ -2203,6 +2203,179 @@ async def action_cookbook_serve(
     return f"Launched {repo_id} (session {sid})", True
 
 
+async def action_get_updates(owner: str, **kwargs) -> Tuple[str, bool]:
+    """Summarize new git commits since last run and email a digest to yourself."""
+    try:
+        import json as _json
+        import asyncio as _asyncio
+        from datetime import datetime as _dt
+        from pathlib import Path as _P
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        from src.endpoint_resolver import resolve_endpoint
+        from src.llm_core import llm_call_async_with_fallback
+
+        _owner_slug = "".join(c if (c.isalnum() or c in "-_.@") else "_" for c in (owner or "default"))
+        state_file = _P(DATA_DIR) / f"updates_{_owner_slug}.json"
+        try:
+            state = _json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
+        except Exception:
+            state = {}
+
+        last_commit = (state.get("last_commit") or "").strip()
+        history = state.get("history") or []
+
+        # Repo root = parent of src/
+        repo_root = str(_P(__file__).parent.parent)
+
+        if last_commit:
+            git_args = ["git", "-C", repo_root, "log", "--oneline", "--no-merges", f"{last_commit}..HEAD"]
+        else:
+            git_args = ["git", "-C", repo_root, "log", "--oneline", "--no-merges", "--since=30 days ago"]
+
+        proc = await _asyncio.create_subprocess_exec(
+            *git_args,
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await _asyncio.wait_for(proc.communicate(), timeout=15)
+        commit_list = stdout.decode("utf-8", errors="replace").strip()
+
+        if not commit_list:
+            raise TaskNoop("no new commits since last check")
+
+        commit_count = len([ln for ln in commit_list.splitlines() if ln.strip()])
+
+        head_proc = await _asyncio.create_subprocess_exec(
+            "git", "-C", repo_root, "rev-parse", "HEAD",
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+        )
+        head_out, _ = await _asyncio.wait_for(head_proc.communicate(), timeout=10)
+        new_last_commit = head_out.decode("utf-8", errors="replace").strip()
+
+        prev_summaries = "\n\n---\n".join(
+            f"[{h.get('date', '')}] {h.get('summary', '')}" for h in history[:3]
+        ) or "None yet."
+
+        url, model, headers = None, None, None
+        for role in ("utility", "default"):
+            try:
+                url, model, headers = resolve_endpoint(role, owner=owner)
+                if url and model:
+                    break
+            except Exception:
+                pass
+        if not url or not model:
+            return "No LLM configured — set a Default or Utility model in Settings.", False
+
+        summary = await llm_call_async_with_fallback(
+            [(url, model, headers)],
+            messages=[
+                {"role": "system", "content": (
+                    "You summarize git commits into a developer digest. "
+                    "Return exactly two sections:\n"
+                    "1. A numbered list of the changes (one concise line each).\n"
+                    "2. A paragraph (2-3 sentences) on what was most important.\n"
+                    "Plain text only — no markdown headers, no bold, no asterisks."
+                )},
+                {"role": "user", "content": (
+                    f"New commits:\n{commit_list}\n\n"
+                    f"Previous digests (context only):\n{prev_summaries}"
+                )},
+            ],
+            temperature=0.3,
+            max_tokens=1024,
+            timeout=60,
+        )
+        if not summary:
+            return "LLM returned an empty summary.", False
+
+        # Send email
+        email_sent = False
+        email_error = ""
+        from_addr = ""
+        try:
+            from routes.email_routes import _get_email_config
+            from routes.email_helpers import _send_smtp_message
+
+            cfg = _get_email_config(owner=owner or "")
+            if not (cfg.get("smtp_host") and cfg.get("smtp_user") and cfg.get("smtp_password")):
+                try:
+                    from core.database import SessionLocal as _SL, EmailAccount as _EA
+                    _db = _SL()
+                    try:
+                        for row in _db.query(_EA).filter(
+                            _EA.enabled == True,  # noqa: E712
+                            _EA.owner == owner,
+                        ).order_by(_EA.is_default.desc()).all():
+                            trial = _get_email_config(account_id=row.id, owner=owner or "")
+                            if trial.get("smtp_host") and trial.get("smtp_user") and trial.get("smtp_password"):
+                                cfg = trial
+                                break
+                    finally:
+                        _db.close()
+                except Exception:
+                    pass
+
+            from_addr = (cfg.get("from_address") or cfg.get("smtp_user") or "").strip()
+            if cfg.get("smtp_host") and cfg.get("smtp_user") and cfg.get("smtp_password") and from_addr:
+                today_str = _dt.now().strftime("%Y-%m-%d")
+                msg = MIMEMultipart("alternative")
+                msg["From"] = from_addr
+                msg["To"] = from_addr
+                msg["Subject"] = f"Odysseus Update Digest — {today_str}"
+                msg["Date"] = _dt.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+                msg["X-Odysseus-Kind"] = "update-digest"
+                plain = (
+                    f"Update Digest — {today_str}\n"
+                    f"{commit_count} new commit{'s' if commit_count != 1 else ''} since last check.\n\n"
+                    f"{summary}"
+                )
+                msg.attach(MIMEText(plain, "plain", "utf-8"))
+                _cfg = dict(cfg)
+                _msg_str = msg.as_string()
+                _from = from_addr
+
+                def _smtp_send():
+                    _send_smtp_message(_cfg, _from, [_from], _msg_str)
+
+                await _asyncio.to_thread(_smtp_send)
+                email_sent = True
+            else:
+                email_error = "No SMTP configured — set up email in Settings to receive digests."
+        except Exception as e:
+            email_error = str(e) or e.__class__.__name__
+            logger.warning(f"get_updates: email send failed: {e}")
+
+        # Save state
+        today_str = _dt.now().strftime("%Y-%m-%d")
+        new_state = {
+            "last_commit": new_last_commit,
+            "history": [{"date": today_str, "summary": summary}] + history[:19],
+        }
+        try:
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            state_file.write_text(_json.dumps(new_state, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"get_updates: state save failed: {e}")
+
+        parts = [f"Summarized {commit_count} commit{'s' if commit_count != 1 else ''}."]
+        if email_sent:
+            parts.append(f"Digest emailed to {from_addr}.")
+        elif email_error:
+            parts.append(f"Email not sent: {email_error}")
+        parts += ["", summary]
+        return "\n".join(parts), True
+
+    except TaskNoop:
+        raise
+    except Exception as e:
+        logger.error(f"get_updates action failed: {e}")
+        return str(e), False
+
+
 BUILTIN_ACTIONS = {
     "tidy_sessions": action_tidy_sessions,
     "tidy_documents": action_tidy_documents,
@@ -2223,6 +2396,7 @@ BUILTIN_ACTIONS = {
     "audit_skills": action_audit_skills,
     "check_email_urgency": action_check_email_urgency,
     "cookbook_serve": action_cookbook_serve,
+    "get_updates": action_get_updates,
     # ping_notes removed from the registry — runs only inside `_note_pings_loop`.
 }
 
@@ -2243,4 +2417,5 @@ BUILTIN_ACTION_INFO = {
     "test_skills": "Run the per-skill Test on every skill: agent run + LLM judge → records verdict on the skill (pass/needs_work/fail/inconclusive). Advisory only — never rewrites or demotes anything.",
     "audit_skills": "Audit unaudited skills after enough new skills are added: test, narrow metadata, self-edit/retry, optional teacher rewrite, tag duplicates/trivial skills, and publish/draft using the auto-approve threshold.",
     "check_email_urgency": "Scan unread emails hourly, tag urgent/reply-soon/newsletter/marketing/spam, and send a reminder when a new email needs a fast reply.",
+    "get_updates": "Summarize new git commits since last run and email a digest to yourself.",
 }

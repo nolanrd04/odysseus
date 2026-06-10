@@ -1,0 +1,1 @@
+find a way to get which models belonging to the same company (e.g. gemini 2.5 flash, gemini 3.1 pro to google and opus and haiku to anthropic) have different usage rates then color them in the ui selection based on usage severity

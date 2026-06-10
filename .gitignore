@@ -90,3 +90,6 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# My shtuff
+documentation/.SESSION_HANDOFFS/

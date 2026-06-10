@@ -916,6 +916,19 @@
           <span class="grow">Theme</span>
         </div>
       </div>
+
+      <div class="section" id="manual-workflows-section">
+        <div class="section-header-flex">
+          <span class="section-title">
+            <svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            <span>Manual Workflows</span>
+          </span>
+          <button type="button" class="section-header-btn list-item-plus-btn" id="manual-workflow-add-btn" title="Add workflow">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+        </div>
+        <div id="manual-workflows-list"></div>
+      </div>
     </div>
     <div class="sidebar-user-bar" id="sidebar-user-bar">
       <div class="user-bar-left" id="user-bar-profile">
@@ -1430,6 +1443,10 @@
               <div id="set-visionFallbacks" class="settings-fallbacks"></div>
               <button type="button" class="settings-fallback-add" id="set-visionAddFallback" title="Add a vision model to try if the one above fails">+ Add fallback</button>
               <div id="set-visionSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+              <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.5rem;">
+                <label class="settings-label" for="set-visionExtraKeywords" title="Comma-separated model name substrings treated as vision-capable (e.g. claude-fable, my-local-vl)">Extra patterns</label>
+                <input type="text" id="set-visionExtraKeywords" class="settings-input" placeholder="e.g. claude-fable, my-local-vl" style="flex:1;font-size:12px;">
+              </div>
             </div>
           </div>
           <div class="admin-card">
@@ -2355,6 +2372,7 @@
 <script type="module" src="/static/app.js"></script>  <!-- app.js must be LAST -->
 <script type="module" src="/static/js/init.js"></script>
 <script type="module" src="/static/js/a11y.js"></script>
+<script type="module" src="/static/js/quickRun.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>
 </body>
 </html>

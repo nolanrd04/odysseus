@@ -446,6 +446,8 @@ def _detect_provider(url: str) -> str:
         return "groq"
     if _host_match(url, "nvidia.com"):
         return "nvidia"
+    if _host_match(url, "googleapis.com"):
+        return "google"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url):
         return "chatgpt-subscription"
@@ -713,8 +715,10 @@ def _convert_openai_content_to_anthropic(content):
                     media_type = header.split(";")[0].replace("data:", "")
                 except (ValueError, IndexError):
                     continue
+                # Anthropic uses "document" for PDFs, "image" for everything else
+                block_type = "document" if media_type == "application/pdf" else "image"
                 converted.append({
-                    "type": "image",
+                    "type": block_type,
                     "source": {
                         "type": "base64",
                         "media_type": media_type,
@@ -1200,8 +1204,9 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         if provider == "copilot":
             from src.copilot import apply_request_headers
             apply_request_headers(h, messages_copy)
+        _send_model = model.removeprefix("models/") if provider == "google" else model
         payload = {
-            "model": model,
+            "model": _send_model,
             "messages": messages_copy,
             "temperature": temperature,
         }
@@ -1394,8 +1399,9 @@ async def llm_call_async(
         if provider == "copilot":
             from src.copilot import apply_request_headers
             apply_request_headers(h, messages_copy)
+        _send_model = model.removeprefix("models/") if provider == "google" else model
         payload = {
-            "model": model,
+            "model": _send_model,
             "messages": messages_copy,
             "temperature": temperature,
         }
@@ -1510,15 +1516,16 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True)
     else:
         target_url = url
+        _send_model = model.removeprefix("models/") if provider == "google" else model
         payload = {
-            "model": model,
+            "model": _send_model,
             "messages": messages_copy,
             "temperature": temperature,
             "stream": True,
         }
         if _restricts_temperature(model):
             payload.pop("temperature", None)
-        if provider not in {"openrouter", "groq"}:
+        if provider not in {"openrouter", "groq", "google"}:
             payload["stream_options"] = {"include_usage": True}
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"

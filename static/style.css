@@ -36606,3 +36606,80 @@ body.theme-frosted .modal {
    the input beside it (.confirm-btn won't stretch on its own). */
 .ask-user-other-send { flex-shrink: 0; white-space: nowrap; min-height: 39px; }
 .ask-user-other-send:disabled { opacity: 0.5; cursor: default; }
+
+/* Quick Run sidebar items */
+.quick-run-item {
+  padding-right: 8px;
+}
+.quick-run-item .quick-run-last-run {
+  font-size: 10px;
+  opacity: 0.4;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.quick-run-item.quick-run-running {
+  opacity: 0.55;
+  pointer-events: none;
+}
+@keyframes qr-spin {
+  to { transform: rotate(360deg); }
+}
+.qr-spin {
+  transform-origin: center;
+  animation: qr-spin 1.4s linear infinite;
+}
+
+/* Quick Run result modal */
+.qr-result-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.qr-result-inner {
+  background: var(--panel, #2c313a);
+  border: 1px solid var(--border, #3e4452);
+  border-radius: 8px;
+  max-width: 560px;
+  width: 100%;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.qr-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border, #3e4452);
+  flex-shrink: 0;
+}
+.qr-result-title {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.9;
+}
+.qr-result-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--fg, #abb2bf);
+  opacity: 0.5;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.qr-result-close:hover { opacity: 1; }
+.qr-result-body {
+  padding: 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  color: var(--fg, #abb2bf);
+}
