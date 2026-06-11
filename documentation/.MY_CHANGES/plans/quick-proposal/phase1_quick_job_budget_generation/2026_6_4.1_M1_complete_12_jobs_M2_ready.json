@@ -1,0 +1,134 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, decided, or built in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session": "2026_6_4.1",
+  "title": "M1 complete — 12 jobs, 11 with proposals; PDF proposal parser added; M2 ready to start.",
+  "date": "2026-06-04",
+  "status": "M1 COMPLETE. Case library needs one final rebuild (forest_grove_ph2.json was built before the PDF parser was added — it has 0 proposal items). Run build_case_library.py once, then start M2.",
+  "phase": "Phase 1 — Quick Job Budget Generation. M1 = build the offline knowledge base (System A case library). M2 = derive the knowledge pack ($/unit distributions, derivation rules, typical-section defaults, job-type signatures). See phase1/PRD_phase1_quick_job_budget_generation.md.",
+
+  "first_thing_next_session": "Run the final case library rebuild: python phase1/ingest/build_case_library.py. Verify Forest Grove PH2 shows proposals_parsed=1, items=35, total~$914k. Then start M2 by building phase1/knowledge_pack/derive_patterns.py.",
+
+  "what_was_done_this_session": {
+    "road_LF_renamed": "Renamed road_LF_ft -> road_LF across jobs_manifest.json (all 12 job entries + hint comment), build_case_library.py (line 229), and CASE_LIBRARY_SCHEMA.md. Handoff files left untouched (historical). LF already means linear feet so 'road_LF_ft' was redundant.",
+
+    "road_LF_for_new_jobs": "User hand-read road_LF from plan stationing for all 4 new jobs and provided values: Raghorn Estates=2786.58, 6th Ave=947.17, Boyds Landing=1213.9, Forest Grove PH2=3342.0. All committed to jobs_manifest.json with road_LF_source='plan_stationing'.",
+
+    "gemini_vision_pass_new_jobs": "Updated gemini_vision_pass.py: added 4 new jobs to PLAN_PDFS, fixed stale folder paths for original 8 jobs (post-rename), set RERUN_ONLY to the 4 new jobs. Results: Raghorn lot_count=27 (no SF), 6th Ave lot_count=9 lot_area_sf=117648, Boyds Landing lot_count=19 (no SF). Forest Grove PH2 failed with 400 INVALID_ARGUMENT (markup PDF — Gemini rejects it at inference even after upload succeeds).",
+
+    "forest_grove_ph2_vision_workaround": "Tried flattening the markup PDF with pypdf (stripped /Annots) — still failed with same error. Added better error handling to surface details (response body). Root cause remains opaque from Google's API. Resolution: hand-read lot_count=78, lot_area_sf=null (SF not labeled). Pre-filled as FOREST_GROVE_PH2_RESULT constant in gemini_vision_pass.py, mirroring the Mountainside pattern. RERUN_ONLY set to None (all jobs complete).",
+
+    "lone_fir_503_recovery": "Full re-run (RERUN_ONLY=None) hit a 503 on Lone Fir (transient model overload). Results JSON was overwritten with error. Patched back using known manifest values: lot_count=11, lot_area_sf=2422402.",
+
+    "manifest_updated_4_new_jobs": "Committed lot_count and lot_area_sf for all 4 new jobs to jobs_manifest.json: Raghorn (27/null/gemini_vision), 6th Ave (9/117648/gemini_vision), Boyds Landing (19/null/gemini_vision), Forest Grove PH2 (78/null/hand_read).",
+
+    "forest_grove_ph2_proposal_found": "User identified a PDF-only proposal: data/24_FOREST_GROVE_PH2/proposals/FORREST GROVE PH2.pdf. Previously missed because build script only found .doc files.",
+
+    "pdf_proposal_parser_added": "Added parse_proposal_pdf() to phase1/ingest/parse_proposal.py. Handles PDF text layout (no Word field codes): anchors on two trailing price values, works backwards to extract qty/unit/description. Handles edge cases: missing $ on unit price ('85.00'), space after $ ('$ 650.00'). Table start detected by full header row 'Unit Price...Ext Price' (not standalone 'Ext Price' line as in .doc). Tested: 35 items, date 2023-04-07, total $914,612.20, grand total $946,446.34 (delta = $31,834 sales tax on TAXED items — expected). Zero warnings.",
+
+    "build_script_updated_for_pdf": "Updated find_proposal_docs() in build_case_library.py to also return PDF files in proposals/ that have no .doc counterpart. Updated the parse loop to call parse_proposal_pdf() for .pdf paths. Imported parse_proposal_pdf from parse_proposal.",
+
+    "case_library_needs_rebuild": "The dry-run with Forest Grove PH2 proposal showed correctly: proposals_parsed=1, items=35. But the actual case library on disk still has the old forest_grove_ph2.json with 0 proposal items. Must run build_case_library.py (not dry-run) before starting M2."
+  },
+
+  "final_job_inventory": {
+    "total_jobs": 12,
+    "jobs_with_proposals": {
+      "count": 11,
+      "list": [
+        {"job": "Settlement Mountain",  "type": "subdivision_road", "date": "2024-08-28", "total": 2123245.75, "lots": 62,  "road_LF": 3694.7},
+        {"job": "Killdeer Meadows",     "type": "subdivision_road", "date": "2025-03-17", "total": 625952.25,  "lots": 18,  "road_LF": 979.62},
+        {"job": "Expo Private Drive",   "type": "private_drive",    "date": "2025-06-26", "total": 372993.20,  "lots": 4,   "road_LF": 575.0},
+        {"job": "Painted Rock",         "type": "subdivision_road", "date": "2025-12-05", "total": 776406.65,  "lots": 21,  "road_LF": 1815.92},
+        {"job": "Lone Fir",             "type": "subdivision_road", "date": "2025-12-22", "total": 419312.10,  "lots": 11,  "road_LF": 2157.91},
+        {"job": "Woodman",              "type": "subdivision_road", "date": "2026-01-12", "total": 612676.50,  "lots": 22,  "road_LF": 927.65},
+        {"job": "Mountainside",         "type": "subdivision_road", "date": "2026-04-27", "total": 439059.55,  "lots": 4,   "road_LF": 679.74},
+        {"job": "Solara PH1",           "type": "subdivision_road", "date": "2026-05-05", "total": 2388012.50, "lots": 44,  "road_LF": 2404.06},
+        {"job": "6th Ave",              "type": "subdivision_road", "date": "2024-05-09", "total": 460608.60,  "lots": 9,   "road_LF": 947.17},
+        {"job": "Boyds Landing",        "type": "subdivision_road", "date": "2024-05-17", "total": 570259.15,  "lots": 19,  "road_LF": 1213.9},
+        {"job": "Forest Grove PH2",     "type": "subdivision_road", "date": "2023-04-07", "total": 914612.20,  "lots": 78,  "road_LF": 3342.0}
+      ]
+    },
+    "jobs_without_proposals": {
+      "count": 1,
+      "list": [
+        {"job": "Raghorn Estates", "type": "subdivision_road", "lots": 27, "road_LF": 2786.58, "note": "PROPOSALS folder is empty — no cost data"}
+      ]
+    }
+  },
+
+  "current_pipeline_state": {
+    "jobs_manifest":       "phase1/ingest/jobs_manifest.json — 12 jobs, all fields populated. road_LF field name (renamed from road_LF_ft this session).",
+    "gemini_vision_pass":  "phase1/ingest/gemini_vision_pass.py — RERUN_ONLY=None (complete). Two hand-read pre-fills: Mountainside and Forest Grove PH2. flat.pdf exists in data/24_FOREST_GROVE_PH2/ (pypdf flatten attempt, not needed).",
+    "gemini_vision_results": "phase1/ingest/gemini_vision_results.json — 12 jobs. Lone Fir result was manually patched (503 overwrote it during full re-run).",
+    "parse_proposal":      "phase1/ingest/parse_proposal.py — parse_proposal() for .doc, parse_proposal_pdf() for PDF-only proposals. Both tested and working.",
+    "build_case_library":  "phase1/ingest/build_case_library.py — updated: find_proposal_docs() returns PDF-only proposals; parse loop routes .pdf to parse_proposal_pdf(). NEEDS ONE FINAL RUN to rebuild forest_grove_ph2.json with proposal data.",
+    "case_library":        "phase1/case_library/ — 12 JSON files. forest_grove_ph2.json STALE (0 proposal items). All others current."
+  },
+
+  "m2_scope": {
+    "what_is_m2": "Knowledge pack — derive reusable patterns from the case library for use by System B at inference time. Output is a machine-readable JSON plus a human-reviewable markdown doc.",
+    "output_files": [
+      "phase1/knowledge_pack/knowledge_pack.json — patterns for System B to load into context",
+      "phase1/knowledge_pack/patterns_review.md — human-readable summary for Nolan to sanity-check"
+    ],
+    "script_to_build": "phase1/knowledge_pack/derive_patterns.py — reads from phase1/case_library/*.json, outputs the above.",
+    "components": {
+      "dollar_per_unit_distributions": "For each line item description/category: median $/unit, min, max, std, job count, date range. Segmented by job_type where data supports it. Only items with non-LS units get meaningful $/unit (LF, EA, SY, SF, CY). LS items recorded as $/job for reference. Source: proposals[primary].line_items across all 11 jobs with proposals.",
+      "derivation_rules": "Rules that let System B fill gaps when a sheet doesn't show a quantity. Key rules to derive: (1) sewer_services = lot_count [check all jobs], (2) water_services = lot_count [check all jobs], (3) driveways = lot_count [check all jobs], (4) fire_hydrants ~ road_LF/500 [rough rule], (5) sewer_manholes ~ sewer_LF/250. Express each rule as {formula, observed_support: 'N/M jobs', confidence}.",
+      "typical_section_defaults": "Stripping depth and ROW_SF/road_LF ratio (implied ROW width) per job type. Already in qty sheet scale_metrics for 8 jobs. Median stripping depth for subdivision_road. ROW width = ROW_SF / road_LF for each job.",
+      "job_type_signatures": "For subdivision_road (the dominant type): dollar_per_lot range, dollar_per_road_LF range, dollar_per_ROW_SF range, characteristic line item categories present. For private_drive: same. Used by System B to sanity-check the total.",
+      "temporal_index": "All $/unit values date-tagged with proposal_date. For M2, just record the dates — do not apply adjustments yet. Flag which items have enough observations (N>=3) for reliable medians."
+    },
+    "data_available_for_m2": {
+      "subdivision_road_jobs": 10,
+      "private_drive_jobs": 1,
+      "date_range": "2023-04 to 2026-05",
+      "note": "Forest Grove PH2 (2023-04-07) is the oldest — prices may be lower. Solara PH1 ($2.39M) and Settlement Mountain ($2.12M) are outliers in scale (62 and 44 lots). Most jobs are 4-22 lots."
+    }
+  },
+
+  "next_steps": [
+    "1. REBUILD (start here): python phase1/ingest/build_case_library.py. Confirm Forest Grove PH2 shows 35 items and total ~$914k.",
+    "2. CREATE phase1/knowledge_pack/ directory and derive_patterns.py script.",
+    "3. IMPLEMENT derive_patterns.py: load all 12 case library JSONs, derive $/unit distributions, derivation rules, typical-section defaults, job-type signatures. Write knowledge_pack.json + patterns_review.md.",
+    "4. REVIEW patterns_review.md with Nolan — sanity-check the numbers before moving to M3.",
+    "5. M3 (future): inference prototype — sheet ingest → Gemini extract → analog retrieval → gap-fill → cost → output."
+  ],
+
+  "open_questions": [
+    "6th Ave and Boyds Landing have no client_location in the manifest — job location unknown. Does it matter for M2 grouping? Probably not yet (too few non-Hayden-ID jobs to segment geographically).",
+    "Forest Grove PH2 proposal is from 2023 (oldest in the set) and includes a 9% sales tax on TAXED items (~$31k delta). The line_items_sum ($914,612) is pre-tax and is what's used for total_reconciled. Is the pre-tax total the right comparison for M2 $/unit, or should we use the grand total? Recommendation: use pre-tax (line_items_sum) to keep $/unit consistent across jobs.",
+    "6th Ave job_type is listed as 'subdivision_road' but Gemini noted it uses a private road (Davis Ln). Worth confirming — affects job_type_signature grouping.",
+    "Raghorn Estates has no proposal — scale metrics only. It contributes to lot_count/road_LF distributions but not $/unit. That's fine for M2."
+  ],
+
+  "prior_sessions_summary": {
+    "2026_6_3.2_M1_vision_pass_complete": "Built gemini_vision_pass.py and ran it for all 8 original jobs (lot_count, lot_area_sf). Fixed Expo (counted parcels) and Lone Fir (acres→SF). Added 4 new jobs to manifest (Raghorn, 6th Ave, Boyds, Forest Grove PH2) with nulls pending. Fixed all data/ folder paths to include descriptive suffixes. Build script updated for lot_count/lot_area_sf wiring and case-insensitive PROPOSALS lookup.",
+    "2026_6_3.1_M1_road_LF_complete": "All 8 road_LF values hand-read from plan stationing and committed. Build bug fixed. Scale metric model clarified: cost = sum of independent components (corridor/road_LF, site/lot_area, per-lot/lot_count). ROW_SF collinear with road_LF. lot_area_SF identified as missing metric.",
+    "2026_6_2.7_M1_dwg_extractions_done": "Extracted all 8 DWGs. DWG geometry over-counts road_LF (Lone Fir 7475 vs 2158, 3.5x) — road_LF became hand-read from stationing; DWG demoted to crosscheck. Gap audit: qty sheet is the complete spine, only 10 real gaps in 2 jobs.",
+    "2026_6_2.5_M1_case_library_ingest": "Defined case-library schema. Built M1 ingest: parse_proposal.py, parse_qty_sheet.py, normalize_dwg.py, build_case_library.py. Canonical total = total_reconciled. 7/8 foot to the penny; Settlement Mountain has +$143,900 unitemized markup.",
+    "2026_6_2.4_phase1_kickoff": "Wrote the PRD. Two-system architecture (A = offline knowledge build; B = runtime inference). Output = line items + total + confidence band + provenance; target 10-15% of historical total. RAG deferred (~50 jobs).",
+    "phase0_arc_and_bridge": "Phase 0 = plan files → HeavyBid qty sheet via DWG extractor + Claude qty-sheet generator, validated on Woodman. Bridge: Phase 0's DWG-as-spine premise does NOT carry to Phase 1 — past jobs have finished proposals, so Phase 1's spine is proposals + qty sheets; DWG shrinks to scale metrics + cross-check."
+  }
+}

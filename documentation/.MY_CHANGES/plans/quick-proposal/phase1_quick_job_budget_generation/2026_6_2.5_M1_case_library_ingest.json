@@ -1,0 +1,101 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, decided, or built in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session": "2026_6_2.5",
+  "title": "Phase 1 M1 — Case Library Schema + Ingest (proposals, qty sheets, DWGs)",
+  "date": "2026-06-02",
+  "status": "M1 BUILT, NOT YET WRITTEN TO DISK. All ingest scripts written and validated at the parser level. The final `build_case_library.py` run that writes phase1/case_library/*.json has NOT been executed by Nolan yet (per workflow preference, scripts are handed over to run). Next action: run the build.",
+  "phase": "Phase 1 — Quick Job Budget Generation. M1 = build the offline knowledge base (System A case library). See PRD phase1/PRD_phase1_quick_job_budget_generation.md.",
+
+  "what_was_built_this_session": {
+    "goal": "M1: define the case-library schema and ingest the 8 jobs' proposals + qty sheets + DWG extractions into one structured per-job record each.",
+    "files_created": {
+      "phase1/schema/CASE_LIBRARY_SCHEMA.md": "Per-job case-record data model (identity, classification, proposals[], quantities_dwg, quantities_qty_sheet, derived, flags, links). §4.3 documents the total-reconciliation rule.",
+      "phase1/ingest/jobs_manifest.json": "Non-derivable identity facts for all 8 jobs (job_name=stable key, local_folder, proposal_numbers, true_job_number, client, client_location, tentative job_type) + DWG locations (dwg_dir, dwg_files, dwg_test_name). Edit by hand.",
+      "phase1/ingest/parse_proposal.py": "Parses a HeavyBid Word proposal .doc -> line items + totals. Uses textutil (mac) to expose Word field codes. Importable + CLI.",
+      "phase1/ingest/parse_qty_sheet.py": "Parses qty_tbl_*.txt (uniform markdown table) -> quantity rows + scale_metrics (ROW_SF, stripping_depth_in). Importable + CLI.",
+      "phase1/ingest/normalize_dwg.py": "Reads Phase 0 dwg_extraction.json -> normalized quantity items (positive-match-only) + raw passthrough. find_latest_extraction(dwg_test_name) locates newest TEST run.",
+      "phase1/ingest/build_case_library.py": "Orchestrator. Walks manifest, joins proposal+qty+DWG into phase1/case_library/<job_slug>.json, prints per-job summary. Flags: --job <name>, --dry-run.",
+      "phase1/ingest/README.md": "Run guide + per-job py1 DWG commands + version caveat."
+    },
+    "files_edited": {
+      "phase1/PRD_...md": "Added §16 risks row: Source version drift (manual verification).",
+      "memory/version_alignment_caveat.md + MEMORY.md": "Persistent caveat that PDF/DWG/qty/proposal may be different revisions."
+    }
+  },
+
+  "key_findings_and_decisions": [
+    "PROPOSAL PARSING (validated against signed PDFs): the RENDERED value of a Word field is cost truth; the raw `=N` formula can be stale in EITHER direction (line items AND grand totals). Parser stores both and flags mismatches. Also handled: OPTIONAL items listed BELOW 'Grand Total:' are excluded from it; quantity cells that are bare numbers with no field code (Mountainside); grand totals that are bare '$...' text several blank lines below the label (Killdeer). Header client/address is inconsistently FORMTEXT-marked, so IDENTITY COMES FROM THE MANIFEST, not the proposal header.",
+    "CANONICAL JOB TOTAL = total_reconciled (sum of line items). grand_total (the as-quoted / signed-PDF bid) is preserved alongside, plus total_unreconciled_delta. 7 of 8 jobs foot to the penny ($0.00). Only Settlement Mountain diverges: reconciled 2,123,245.75 vs quoted 2,267,145.75, delta +143,900 (an unitemized markup in Brian's doc) -> flagged total_unreconciled. Rule documented in schema §4.3.",
+    "DWG EXTRACTION IS UNRELIABLE FOR COUNTS/CURB but this is NOT a Phase-1 blocker. Diagnosis on Painted Rock (generated qty sheet vs ground truth data/25068-2/qty_tbl_25068.txt): clean pipe lengths ~1% (sewer 806 vs 802, water 837 vs 830) and road alignment good; BUT 4 defects -> (1) anonymous dynamic-block explosion: 94 phantom *U### inserts (42 storm / 28 water / 22 sewer) vs truth 5 drywells / 4 manholes / 5 valves; (2) curb exactly 3.0x over (SF-CURB-PROP-LIN 7,109 LF vs truth 2,360 — multiple parallel curb lines on one layer); (3) multi-file double-count (BASE+DESIGN+TOPO merged); (4) ROW width / lot count / stripping depth / scuppers genuinely not in basemap geometry. REFRAME: the proposal already carries the as-bid quantity AND price for every line item, so for Phase 1 the trustworthy spine is PROPOSALS + QTY SHEETS; DWG is tertiary (good only for pipe LF + road-alignment LF as scale metrics / cross-check). DWG deep fixes (resolve dynamic-block names, curb-line dedup, design-file-only) are DEFERRED/PARKED at Nolan's direction.",
+    "normalize_dwg currently still PROMOTES the bad curb (7,109) and inflated named manhole/drywell counts. Acceptable for now because DWG quantities are clearly source-tagged and kept separate from the proposal; do NOT trust those specific DWG fields until the DWG extraction is fixed.",
+    "QTY SHEET PARSING added to M1. qty_tbl_*.txt is a uniform clean markdown table (group | work type | unit | TAKEOFF | QTY | notes). Parsed for all 8: ROW_SF extracted for all (Woodman 81,757 / Painted Rock 84,558 match ground truth), stripping depth for 7/8 (Mountainside has none stated; Expo label says 2\" but its own note says 18\" — inconsistency preserved in the row's notes for manual review). The .xlsx is left UNPARSED by design — the .txt is quantities-only (has_pricing=false), which answers PRD open question 17.4.",
+    "VERSION ALIGNMENT is a MANUAL gate (Nolan's call): per job the plan PDF, DWG, qty sheet, and proposal may be different design revisions (several plan PDFs are explicitly PRELIM/Preliminary). NOT automated (file mtimes are unreliable copy-dates; filename dates partial). Recorded in PRD §16 + memory + README.",
+    "DWGs are now LOCALLY AVAILABLE FOR ALL 8 JOBS (Nolan added them this session) in varied layouts: job-folder root (Settlement/Killdeer/Expo/Lone Fir/Solara), nested 'CAD FILES/...' (Mountainside), test_copies/ (Woodman/Painted Rock). py1 derives its TESTS output folder name from basename(dwg_dir) = dwg_test_name. XREFs (VBASE) count as a single insert in py1, so processing them as separate --files is additive, not double-counting."
+  ],
+
+  "data_inventory": {
+    "jobs": "8 resolved jobs (Foundry 24066 excluded). Folders under data/<local_folder>/.",
+    "proposals": "data/<folder>/proposals/*.doc (15 .doc total, most with revisions) + .pdf cross-check. Parser picks latest by date as primary; keeps all.",
+    "qty_sheets": "data/<folder>/qty_tbl_<num>.txt (clean, parsed) + *BID QTY*.xlsx (unparsed).",
+    "dwg_extractions_existing": "Only Woodman (phase0_new/TESTS/WOODMAN_TEST/WOODMAN_TEST_8) and Painted Rock (PAINTED_ROCK_TEST_1) have been extracted. The other 6 jobs have DWGs on disk but NO extraction yet — run py1 (commands in phase1/ingest/README.md).",
+    "canonical_reconciled_totals": {
+      "Settlement Mountain": "2,123,245.75 (quoted 2,267,145.75, delta +143,900)",
+      "Killdeer Meadows": "625,952.25",
+      "Expo Private Drive": "372,993.20",
+      "Painted Rock": "776,406.65",
+      "Lone Fir": "419,312.10",
+      "Woodman": "612,676.50",
+      "Mountainside": "439,059.55",
+      "Solara PH1": "2,388,012.50"
+    }
+  },
+
+  "current_pipeline_state": {
+    "validated": "parse_proposal (all 8 parse; 7/8 foot to the penny; Killdeer + Settlement anomalies understood). parse_qty_sheet (all 8; ROW_SF + stripping verified). normalize_dwg (Woodman 17 / Painted Rock 13 items promoted). Path bug fixed: job folders live under data/<local_folder> (DWG was unaffected since it keys off dwg_test_name).",
+    "not_yet_done": "The final `python phase1/ingest/build_case_library.py` has NOT been run, so phase1/case_library/*.json does NOT exist yet. Run --dry-run first, then the real build.",
+    "phase0_machinery_reused": "phase0_new/py1_dwg_extract.py (DWG->extraction.json). Other py-steps not used by Phase 1 M1."
+  },
+
+  "next_steps": [
+    "1. RUN THE BUILD: `python phase1/ingest/build_case_library.py --dry-run` (eyeball totals + scale metrics + flags), then `python phase1/ingest/build_case_library.py` to write phase1/case_library/*.json. This completes M1.",
+    "2. (Optional, DWG is tertiary) Run py1 for the 6 jobs lacking extractions using the per-job commands in phase1/ingest/README.md, then rebuild to fold in DWG scale metrics (road_LF). Do NOT trust DWG curb/structure counts.",
+    "3. M2 — Knowledge pack: from the case library derive $/unit distributions (segmented by job type / region / date with recency weighting), typical-section defaults (ROW width, stripping depth, paving section), job-type signatures, and derivation rules (e.g. services = lot_count). Exit: a reviewable patterns document.",
+    "4. (Parked) DWG extraction fixes if/when needed: resolve anonymous dynamic-block names, dedupe parallel curb lines, process design-file-only or dedupe across merged files.",
+    "Reminder: per workflow preference, DELIVER SCRIPTS AS COMMANDS for Nolan to run; do not auto-execute Python pipeline scripts."
+  ],
+
+  "open_questions": [
+    "LOT COUNT source: not present in proposal, qty sheet, or DWG basemap geometry. Needed for derivation rules like services=lots and per-lot rollups. Where do lot counts come from (plat sheet)? Add to manifest manually?",
+    "job_type is TENTATIVE in the manifest (all subdivision_road except Expo=private_drive), flagged job_type_unconfirmed. Confirm against plans.",
+    "Do proposal quantities ever differ from qty-sheet quantities (scope negotiation)? Now cross-checkable once records are written.",
+    "Which single sheet does Brian usually get handed? (carries from prior session — affects System B extractable signal)",
+    "Will Brian optionally type priors (job type + location)? Cheap, stabilizing — in scope for v1?"
+  ],
+
+  "prior_sessions_summary": {
+    "2026_6_2.4_phase1_kickoff": "Conversation-first requirements identification for Phase 1. Wrote the PRD (phase1/PRD_phase1_quick_job_budget_generation.md). Established: TWO-SYSTEM architecture (A = offline knowledge building from DWG+proposal+qty/plans into a case library + knowledge pack; B = runtime single-sheet inference by analogy + pattern gap-fill). 'Learning' = persist knowledge as data + retrieve into context (RAG/in-context), NO model training. Output = line-item + total + confidence band + provenance; target 10-15% of historical total. RAG deferred (load all cases in context until ~50 jobs). Confirmed proposals are parseable .doc form exports. Job NAME is the stable key (folder numbers are proposal numbers). Foundry excluded.",
+    "phase0_arc": "Phase 0 = plan files -> HeavyBid quantity sheet (quantities only). Built a blind firm-agnostic DWG extractor (phase0_new/py1) + Claude qty-sheet generator (py4); validated on Woodman (block counts exact, pipe lengths ~3%). Plan PDFs are fully rasterized so DWG is the geometry path. Typical-section facts (ROW width, stripping depth, paving) are the historically hardest to extract from geometry. Full detail: _handoffs/phase0_qty_sheet_generation/2026_6_2.FINAL_summary_handoff.json.",
+    "phase0_to_phase1_bridge_finding_this_session": "Phase 0's premise that DWG extraction is 'the trustworthy spine' does NOT carry to Phase 1: because past jobs already have finished proposals (as-bid quantities + prices), Phase 1's spine is proposals + qty sheets, and the DWG's role shrinks to scale metrics + cross-check. This is why DWG extraction defects, while real, do not block M1."
+  }
+}

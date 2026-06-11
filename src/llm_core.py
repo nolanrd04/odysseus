@@ -1901,6 +1901,21 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                     _c0 = (j["choices"] or [None])[0]
                                     if _c0 is None:
                                         continue
+                                    finish_reason = _c0.get("finish_reason")
+                                    if finish_reason and finish_reason not in ("stop", "length", "tool_calls", "function_call", "content_filter", None):
+                                        # Gemini (and some other providers) silently block responses
+                                        # with finish_reason = "SAFETY" or "RECITATION" — the stream
+                                        # ends with empty content and no error event, leaving the UI
+                                        # blank. Surface it so the user knows why nothing appeared.
+                                        yield f'event: error\ndata: {json.dumps({"error": f"Response blocked by provider (finish_reason: {finish_reason})", "status": 200})}\n\n'
+                                        return
+                                    finish_reason = _c0.get("finish_reason")
+                                    if finish_reason and finish_reason not in ("stop", "length", "tool_calls", "function_call", "content_filter", None):
+                                        # Gemini (and some other providers) silently block responses
+                                        # with finish_reason="SAFETY" or "RECITATION" — stream ends
+                                        # with empty content and no HTTP error, leaving the UI blank.
+                                        yield f'event: error\ndata: {json.dumps({"error": f"Response blocked by provider (finish_reason: {finish_reason})", "status": 200})}\n\n'
+                                        return
                                     delta = _c0.get("delta") or {}
                                     if isinstance(delta, dict):
                                         # Text content

@@ -1,0 +1,371 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, decided, or built in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session_context": {
+    "purpose": "Architecture upgrade session. Killdeer fully converged (test 10: -1.1%). Solara (44-lot, $2.3M) exposed structural limitations of the current flat-rules approach. The next session's primary task is to implement the statistical knowledge pack extension so the pipeline self-updates as jobs are added — without breaking the small-job accuracy already achieved.",
+    "first_thing_next_session": "Read this handoff fully. Then read derive_patterns.py (phase1/knowledge_pack/derive_patterns.py) and m3_infer.py (phase1/inference/m3_infer.py) to understand the current structure before touching anything. The checkpoint is at phase1/inference/checkpoint1/ — confirm it exists before making any changes."
+  },
+
+  "this_session": {
+    "date": "2026-06-05",
+
+    "killdeer_final_tests": {
+      "test_9": {
+        "total": 605720,
+        "error_pct": "-3.2%",
+        "key_change": "lot_count prompt fix (boundary constraint + prefer lot table) worked — Gemini returned 18 correctly. Error flipped to undershoot because DEMO and IRR SERVICE still missing.",
+        "remaining_misses": [
+          "DEMO: missing (-$7k+)",
+          "1\" IRR SERVICE: missing (-$7,320)",
+          "EXC TO EMBANK: $12,500 vs $38,000 actual (-$25,500)",
+          "Paving: 4,798 SY vs 3,056 actual — overcounts collector widening"
+        ]
+      },
+      "test_10": {
+        "total": 618885,
+        "error_pct": "-1.1%",
+        "actual": 625952,
+        "verdict": "CONVERGED. Best result across all 10 tests. demo_scope_present and irrigation_service_present fields both fired correctly. 6\" CONCRETE APPROACH correctly dropped. C&G improved from 666 LF to 375 LF.",
+        "key_changes_that_worked": [
+          "demo_scope_present=true → DEMO $28,000 included",
+          "irrigation_service_present=true → 1\" IRR SERVICE 1 EA $4,250 included",
+          "C&G scaled from Boyds Landing intersection pattern instead of 'both sides of collector'",
+          "6\" CONCRETE APPROACH gating rule dropped it correctly (Painted Rock excludes, Woodman includes — but Claude reasoned it out differently this run)"
+        ],
+        "remaining_known_errors": [
+          "EXC TO EMBANK: $12,500 vs $38,000 actual — Gemini classifies as roughly_balanced but actual has confirmed import. Persistent Gemini perception gap.",
+          "Fire hydrants: 3 EA (Gemini) vs 2 EA actual — same instability risk as lot_count",
+          "Paving: structural overcount on collector widening (full C-to-C width applied to widening LF)"
+        ]
+      }
+    },
+
+    "gemini_extraction_fields_added": {
+      "demo_scope_present": "true/false/null. Fires from sheet index title 'Existing Conditions, Demolition', callouts 'Demo Permit Required', 'Remove & Dispose', structure removal notes.",
+      "irrigation_service_present": "true/false/null. Fires from construction notes 'Install 1\" Irrigation Service', service table row typed IRRIGATION, plan key notes, legal description 'Irrigated Tracts'.",
+      "both_added_to": ["GEMINI_PROMPT_PDF extraction guidance", "GEMINI_PROMPT_PDF JSON schema", "GEMINI_PROMPT_IMAGE sheet hints", "GEMINI_PROMPT_IMAGE JSON schema", "sidecar Scope Flags table", "system prompt DEMO rule", "system prompt IRR SERVICE rule", "CLI override path"]
+    },
+
+    "lot_count_prompt_fix": {
+      "change": "Added boundary constraint (only count lots INSIDE the bold project boundary) and priority rule (prefer cover-sheet lot table over visual counting on plat).",
+      "result": "Gemini returned 18 on tests 9 and 10 (was 26 on test 8). Confidence note cited 'cross-referenced utility table on Sheet 10'."
+    },
+
+    "pdf_reading_verification": {
+      "what_we_did": "Manually read Killdeer PDF pages 1-10 using the Read tool to verify what signals exist for DEMO and IRR SERVICE.",
+      "demo_finding": "Sheet 2 titled 'EXISTING CONDITIONS, DEMOLITION & ESC PLAN'. Clear callouts: EX GARAGE (demo permit required), EX SHED (demo permit required), EX SEPTIC TANK (remove to fill), EX ASPHALT DRIVEWAY, EX BARB WIRE FENCE.",
+      "irr_service_finding": "Construction notes 36-37 on Sheets 7/8/9: 'Install 1\" Irrigation Service per Ross Point Water District Standards'. Sheet 10 Domestic Water Service Table: one row typed '1\" IRRIGATION' on Killdeer Ave. Qty = 1 EA (fixed, not per-lot). System prompt rule updated accordingly.",
+      "conclusion": "Claude can read PDFs reliably. Gemini missed both because schema didn't ask for them — not a perceptual gap. The new boolean fields fix both."
+    },
+
+    "solara_test": {
+      "job": "Solara PH1 (26006-2_SOLARA)",
+      "actual_total": 2388012,
+      "estimate": 1458178,
+      "error_pct": "-38.9%",
+      "lot_count": 44,
+      "road_LF": 2644,
+      "ROW_SF": 158640,
+      "gemini_extraction": "Clean — lot_count=44, road_LF=2644, earthwork_balance=export_needed, earthwork_CY=10000, demo_scope_present=true, irrigation_service_present=true. All correct.",
+      "items_that_worked": [
+        "4\" SEWER SERVICES: $57,200 vs $56,540 actual (essentially perfect)",
+        "8\" WATER MAIN: $125,832 vs $128,744 actual",
+        "8\" SEWER MAIN: $61,190 vs $65,236 actual",
+        "UTILITY TRENCHING: $36,925 vs $38,160 actual",
+        "SUBGRADE ROAD: $15,500 vs $16,500 actual"
+      ],
+      "major_misses": [
+        {
+          "item": "STRIP ROW INCL HAUL OFF",
+          "estimate": 24800,
+          "actual": 178000,
+          "delta": -153200,
+          "root_cause": "Our formula assumes stockpile ($2.81/CY). Solara specifies haul-off to waste — 6-7x more expensive. These are fundamentally different scope items. Need a Gemini flag: strip_haul_off_required."
+        },
+        {
+          "item": "12\" BALLAST (false positive)",
+          "estimate": 176094,
+          "actual": 0,
+          "delta": 176094,
+          "root_cause": "Ballast rule fired because typical section mentions base course. But Solara's paving is 2/6\" (6\" base bundled in unit price, not a separate pay item). Rule needs to gate on whether ballast is an explicit separate bid item vs bundled in paving spec."
+        },
+        {
+          "item": "LOT PREP EARTHWORK (missing)",
+          "estimate": 0,
+          "actual": 172050,
+          "note": "STRIP LOTS $61,100 + LOT EXC TO EMBANK PH5 $55,500 + PLACE TOPSOIL $30,450 + STRIP LOTS PH5 $25,000. Lot pad prep items — not in our model at all. Appear on larger developer-prep subdivisions. Need Gemini flag: lot_grading_in_scope."
+        },
+        {
+          "item": "12\" WATER MAIN (missing)",
+          "estimate": 0,
+          "actual": 86876,
+          "root_cause": "Larger subdivisions sometimes require 12\" transmission main in addition to 8\" distribution. Not in our model. Need Gemini flag: large_diameter_water_main_present."
+        },
+        {
+          "item": "EXC TO EMBANK",
+          "estimate": 42000,
+          "actual": 127000,
+          "delta": -85000,
+          "root_cause": "Even the large export tier ($38k+) is 3x too low for 10,000 CY. The tier needs CY-based scaling, not just a floor."
+        },
+        {
+          "item": "SWALES W/4\" TOPSOIL",
+          "estimate": 30000,
+          "actual": 88250,
+          "delta": -58250,
+          "root_cause": "Swales is non-linear with ROW_SF. Small jobs: $0.19-0.30/ROW_SF. Solara: $0.56/ROW_SF. ROW_SF scaling assumption breaks on large jobs."
+        },
+        {
+          "item": "SIGNS & STRIPING",
+          "estimate": 14900,
+          "actual": 103500,
+          "delta": -88600,
+          "root_cause": "Solara is the portfolio outlier ($103,500 vs typical $12-15k). Likely includes community signage package + crosswalk beacon systems. High-variance item (CV > 1.0) — cannot be reliably estimated from analogs."
+        },
+        {
+          "item": "SIDEWALKS (4\", 6\", ped ramps)",
+          "estimate_total": 85730,
+          "actual_total": 267748,
+          "note": "65-67% of actual across all types. ROW_SF scaling does not extrapolate well from small analogs to large jobs."
+        }
+      ]
+    }
+  },
+
+  "architecture_decision": {
+    "problem": "Hard-coded thresholds and rules in the system prompt do not scale. When you add more jobs, the rules need to be re-derived manually. The system needs to self-update.",
+    "agreed_solution": "Move all statistical findings out of the system prompt and into the knowledge pack (computed by derive_patterns.py). System prompt describes methodology only. LLM reads statistical thresholds from the knowledge pack at inference time. When a job is added, run derive_patterns.py — everything updates automatically.",
+    "architecture_diagram": {
+      "current": "derive_patterns.py → knowledge_pack.json → Claude context\n                                                     +\n                        system_prompt (hard-coded rules) → Claude instructions",
+      "target": "derive_patterns.py → knowledge_pack.json (full stats) → Claude context\n                              ↑\n                    recomputes on every new job\n\n                   system_prompt → methodology only (stable, no specific numbers)"
+    },
+    "key_principle": "System prompt = HOW to use statistics. Knowledge pack = THE statistics. Numbers never live in the system prompt."
+  },
+
+  "implementation_plan": {
+    "overview": "Three parallel work streams. Do them in order — each depends on the previous.",
+
+    "stream_1_derive_patterns_extension": {
+      "file": "phase1/knowledge_pack/derive_patterns.py",
+      "goal": "Add three new top-level sections to knowledge_pack.json output",
+
+      "section_1_item_prevalence": {
+        "description": "For every distinct line item description in the portfolio, compute prevalence stats and conditional prevalence by job-level buckets.",
+        "output_structure": {
+          "item_prevalence": {
+            "EXAMPLE_ITEM": {
+              "jobs_present": "int — how many jobs include this item",
+              "jobs_total": "int — total jobs in portfolio",
+              "prevalence": "float — jobs_present / jobs_total",
+              "conditional": {
+                "ROW_SF_gt_130k": {"jobs_present": "int", "jobs_total": "int", "prevalence": "float"},
+                "ROW_SF_lte_130k": {"jobs_present": "int", "jobs_total": "int", "prevalence": "float"},
+                "lot_count_gt_35": {"jobs_present": "int", "jobs_total": "int", "prevalence": "float"},
+                "lot_count_lte_35": {"jobs_present": "int", "jobs_total": "int", "prevalence": "float"}
+              }
+            }
+          }
+        },
+        "implementation_notes": [
+          "Normalize item descriptions before comparison (lowercase, strip trailing spaces/punctuation) to avoid duplicates",
+          "Thresholds for conditional buckets: ROW_SF split at 130,000 SF (separates Lone Fir/Settlement/Solara from small jobs); lot_count split at 35 (separates Solara from others)",
+          "These thresholds are hard-coded in derive_patterns.py as named constants so they can be updated as portfolio grows",
+          "When portfolio grows beyond ~20 jobs, these thresholds should be recomputed as actual percentiles (median ROW_SF etc.) rather than fixed values — add a TODO comment for this"
+        ]
+      },
+
+      "section_2_ls_item_variance": {
+        "description": "For LS (lump sum) line items, compute coefficient of variation across jobs that include the item. High CV = high uncertainty = Claude should flag and widen confidence band.",
+        "output_structure": {
+          "ls_item_variance": {
+            "EXAMPLE_LS_ITEM": {
+              "n": "int — number of jobs with this item",
+              "mean": "float — mean ext_price",
+              "std": "float — std dev of ext_price",
+              "cv": "float — std/mean (coefficient of variation)",
+              "min": "float",
+              "max": "float",
+              "per_ROW_SF": {
+                "slope": "float — $/SF regression coefficient",
+                "r2": "float",
+                "note": "string — e.g. 'moderate — scaling unreliable above 130k ROW_SF'"
+              },
+              "per_lot": {
+                "slope": "float",
+                "r2": "float"
+              }
+            }
+          }
+        },
+        "which_items": "Any line item with unit=LS and n>=3. Key ones: SWALES, EXC TO EMBANK, DEMO, SIGNS & STRIPING, TRAFFIC CONTROL, MOBILIZATION, STRIP ROW.",
+        "cv_thresholds_for_system_prompt": "CV < 0.3 = low variance (scale confidently); CV 0.3-0.7 = moderate (scale with caution, flag); CV > 0.7 = high variance (do not rely on analog scaling — flag as ±40%+ uncertainty)"
+      },
+
+      "section_3_item_scaling": {
+        "description": "For measurable (non-LS) line items, compute OLS regression against the top candidate drivers and report best-fit formula. This replaces hard-coded formulas in the system prompt.",
+        "candidate_drivers": ["ROW_SF", "lot_count", "road_LF"],
+        "output_structure": {
+          "item_scaling": {
+            "EXAMPLE_MEASURABLE_ITEM": {
+              "unit": "string — LF, SF, SY, EA",
+              "best_driver": "string — ROW_SF | lot_count | road_LF",
+              "r2": "float",
+              "n": "int",
+              "slope": "float — qty per unit of driver",
+              "formula": "string — e.g. 'qty = ROW_SF * 0.0453'",
+              "rmse": "float",
+              "secondary_driver": "string — second best if r2 within 0.05 of best",
+              "note": "string — any caveats (e.g. 'Phase 2 jobs excluded')"
+            }
+          }
+        },
+        "implementation_notes": [
+          "Exclude Phase 2 jobs (forest_grove_ph2) from all regressions — they're outliers",
+          "Minimum n=3 for any regression; report null slopes for items with n<3",
+          "For items where lot_count rule gives r2=1.0 (SEWER SERVICES, WATER SERVICES, IRRIGATION SLEEVES), still include them here but note as 'derivation rule'",
+          "Run regression for all three drivers, pick the one with highest r2"
+        ]
+      }
+    },
+
+    "stream_2_new_gemini_flags": {
+      "file": "phase1/inference/m3_infer.py — both GEMINI_PROMPT_PDF and GEMINI_PROMPT_IMAGE",
+      "goal": "Add 4 new boolean extraction fields that gate the 4 structural problem items",
+
+      "fields_to_add": [
+        {
+          "field": "ballast_is_separate_pay_item",
+          "type": "true | false | null",
+          "gemini_guidance": "Set true ONLY if the spec sheet or quantity notes list ballast or crushed aggregate base as a SEPARATE bid item with its own pay quantity (e.g., '12\" BALLAST', 'CRUSHED AGGREGATE BASE COURSE'). Set false if the base course is described as part of the paving spec (e.g., '2/4\" paving' or '3/6\" paving' — the '/4' or '/6' denotes the base thickness bundled into the paving unit price). The distinction is: is there a separate line item for base rock, or is it folded into the paving price?",
+          "system_prompt_change": "Change ballast rule from 'include if typical section mentions ballast' to 'include only if ballast_is_separate_pay_item = true'. This fixes the $176k Solara false positive."
+        },
+        {
+          "field": "strip_haul_off_required",
+          "type": "true | false | null",
+          "gemini_guidance": "Set true if the stripping or clearing notes specify material must be hauled off-site to a waste or disposal area. Look for: 'INCL HAUL OFF', 'haul to waste', 'haul to off-site disposal', 'remove and dispose', 'export to waste site'. Set false if notes say 'stockpile', 'stockpile on-site', 'spread and compact', or no disposal instruction is given (default = stockpile). This distinction is critical for pricing — haul-off stripping costs 6-8x more than stockpile stripping.",
+          "system_prompt_change": "Add a strip haul-off rate tier. If strip_haul_off_required=true, use LS item priced from haul-off analogs (Solara: $178,000 for 8,813 CY = ~$20/CY). If false, use existing stockpile formula ($2.81/CY median)."
+        },
+        {
+          "field": "lot_grading_in_scope",
+          "type": "true | false | null",
+          "gemini_guidance": "Set true if the plans include work on the individual lots beyond the road ROW. Look for: grading plans that extend into lot interiors, notes like 'strip lots', 'lot grading', 'rough grade lots', 'place topsoil on lots', 'lot excavation', 'import fill to lots'. Set false if grading work is confined to the road ROW and utility corridors only.",
+          "system_prompt_change": "If lot_grading_in_scope=true, include LOT PREP EARTHWORK as a separate LS item. Pricing: scale from analogs that include lot prep; flag as high-uncertainty LS item. Killdeer/Woodman have lot_grading_in_scope=false and are unaffected."
+        },
+        {
+          "field": "large_diameter_water_main_present",
+          "type": "true | false | null",
+          "gemini_guidance": "Set true if the utility plan shows a water main larger than 8\" diameter (10\", 12\", or larger) in addition to or instead of the standard 8\" distribution main. These are typically transmission mains required for larger subdivisions or fire flow. Look for: '10\" WATER MAIN', '12\" WATER MAIN PVC', large-diameter pipe shown on the utility plan with a separate symbol/label from the 8\" distribution lines.",
+          "system_prompt_change": "If large_diameter_water_main_present=true, include a separate large-diameter water main line item. Pricing from the 1-2 analogs that have it (Solara: 592 LF of 12\" @ $146.75 = $86,876). Quantity from ROW_SF scaling against those analogs. Flag as thin data."
+        }
+      ],
+
+      "also_add_to_sidecar": "Add all 4 new fields to the Scope Flags table in the .gemini_extraction.md sidecar (already has demo_scope_present and irrigation_service_present — extend that table)."
+    },
+
+    "stream_3_system_prompt_methodology_shift": {
+      "file": "phase1/inference/m3_infer.py — CLAUDE_SYSTEM_PROMPT constant",
+      "goal": "Replace hard-coded numbers with references to knowledge pack fields. Do NOT rewrite the whole prompt — make surgical replacements.",
+      "specific_changes": [
+        {
+          "what": "Scaling formulas (rolled curb LF, sidewalk SF, scupper EA, etc.)",
+          "from": "Hard-coded: 'ROLLED CURB: road_LF × 1.43'",
+          "to": "Knowledge pack reference: 'ROLLED CURB: use item_scaling.ROLLED_CURB.formula from knowledge pack (currently road_LF × 1.43, r2=0.999)'",
+          "why": "When more jobs are added, derive_patterns.py updates the slope automatically"
+        },
+        {
+          "what": "Item inclusion logic for prevalence-driven items",
+          "from": "Hard-coded: 'Include BALLAST if any of 2 closest analogs include it'",
+          "to": "Knowledge pack + flag: 'Include BALLAST if ballast_is_separate_pay_item=true (from Gemini) AND item_prevalence.BALLAST.prevalence > 0.2'",
+          "why": "Prevalence gate + Gemini flag together prevent false positives"
+        },
+        {
+          "what": "LS item uncertainty guidance",
+          "from": "Not currently stated",
+          "to": "Read ls_item_variance.CV from knowledge pack. If CV > 0.7, flag as high-uncertainty and state ±40% on that line item. If CV > 1.0 (SIGNS & STRIPING), state that analog scaling is unreliable and use the portfolio median with explicit high-uncertainty flag."
+        },
+        {
+          "what": "Large-job items (12\" water main, lot prep)",
+          "from": "Not mentioned in system prompt",
+          "to": "Add rules gated on new Gemini flags, using item_prevalence conditional stats to confirm inclusion logic"
+        }
+      ],
+      "do_not_change": [
+        "The lot_count derivation rules for sewer/water services (r2=1.0, n=9+, these work perfectly)",
+        "The analog selection methodology (ROW_SF primary, lot_count secondary)",
+        "The earthwork tier structure (keep the tiers, just add CY-based scaling for large export)",
+        "The co-occurrence rules (already in knowledge pack)"
+      ]
+    },
+
+    "validation_plan": {
+      "step_1": "After stream 1: run derive_patterns.py --holdout data/25016-2_KILDERE_MEADOWS and inspect the new knowledge_pack sections. Verify item_prevalence, ls_item_variance, item_scaling are populated correctly.",
+      "step_2": "After stream 2: run a test on Killdeer with the new Gemini flags. Verify ballast_is_separate_pay_item=false (Killdeer has no separate ballast). Verify strip_haul_off_required=false. Verify lot_grading_in_scope=false. Verify large_diameter_water_main_present=false.",
+      "step_3": "After stream 3: run inference on Killdeer holdout. Target: within ±5% of $625,952. If it regresses beyond that, the system prompt changes broke something — compare against checkpoint1.",
+      "step_4": "Run Solara holdout. Target: improvement from -38.9%. With ballast false positive fixed (+$176k) and strip haul-off tier, expect estimate to move toward $1.7-1.9M range. Remaining gap will be lot prep earthwork, swales non-linearity, S&S variance.",
+      "checkpoint_restore_command": "cp phase1/inference/checkpoint1/m3_infer.py phase1/inference/m3_infer.py && cp phase1/inference/checkpoint1/derive_patterns.py phase1/knowledge_pack/derive_patterns.py && cp phase1/inference/checkpoint1/knowledge_pack.json phase1/knowledge_pack/knowledge_pack.json"
+    }
+  },
+
+  "current_pipeline_state": {
+    "checkpoint": "phase1/inference/checkpoint1/ — m3_infer.py, derive_patterns.py, knowledge_pack.json as of test 10 (Killdeer -1.1%). RESTORE FROM HERE if architecture work regresses.",
+    "case_library": "phase1/case_library/ — 12 JSONs. Raghorn has no proposal.",
+    "knowledge_pack_main": "phase1/knowledge_pack/knowledge_pack.json — current production version. Has item_pairs (93 pairs), paving_rates, per-item pricing stats.",
+    "derive_patterns": "phase1/knowledge_pack/derive_patterns.py — accepts --holdout. Does NOT yet compute item_prevalence, ls_item_variance, or item_scaling (these are the next session's additions).",
+    "m3_infer": "phase1/inference/m3_infer.py — current production version. Has all Killdeer improvements + demo_scope_present + irrigation_service_present fields.",
+    "test_outputs": {
+      "killdeer_best": "phase1/inference/output_test_10_KILDERE/ — -1.1%, converged",
+      "solara_test_1": "phase1/inference/output_test_11_SOLARA/ — -38.9%, structural gaps identified"
+    }
+  },
+
+  "file_locations": {
+    "main_inference_script": "phase1/inference/m3_infer.py",
+    "derive_patterns_script": "phase1/knowledge_pack/derive_patterns.py",
+    "knowledge_pack": "phase1/knowledge_pack/knowledge_pack.json",
+    "checkpoint": "phase1/inference/checkpoint1/",
+    "case_library_dir": "phase1/case_library/",
+    "solara_pdf": "data/26006-2_SOLARA/20-24-046_SOLARA_SubdivisionPhase1 (1).pdf",
+    "killdeer_pdf": "data/25016-2_KILDERE_MEADOWS/24-027.1 Killdeer Meadows Prelim Const Plans 2-25-25.pdf"
+  },
+
+  "open_questions": [
+    "Solara actual is $2,388,012 in the case library — Nolan mentioned $2.3M. Small discrepancy, probably rounding or optional items. Clarify at start of next session if it matters for validation.",
+    "EXC TO EMBANK: Gemini classified Killdeer as roughly_balanced but actual has confirmed import ($38k). Needs a skepticism/validation mechanism — possibly ask Claude to cross-check Gemini's earthwork_balance against the profile grade delta described in earthwork_notes.",
+    "SWALES non-linearity: $0.19-0.30/ROW_SF for small jobs vs $0.56/ROW_SF for Solara. The ls_item_variance regression will expose this. May need a breakpoint model or a lot_count driver instead of ROW_SF for large jobs.",
+    "SIGNS & STRIPING at CV>1.0: fundamentally unpredictable from plans. Should probably ask Gemini to flag community_signage_in_scope (entry monuments, wayfinding signs, crosswalk beacons) as a separate field to triage this variance.",
+    "Collector widening paving overcounting: when road_LF includes a collector widening segment, applying full curb-to-curb width overcounts paving SY. Gemini already extracts road_LF_segments — could split internal_LF from widening_LF to apply different width assumptions."
+  ],
+
+  "prior_sessions_summary": {
+    "2026_6_5.3_test7_converged_gemini_instability": "Killdeer converged at test 7 (+2.2%). Test 8 regressed from lot_count=26 Gemini error. Added earthwork_balance tiers, split sewer/water connection rules, analog-gated concrete approach. Identified lot_count instability and IRR SERVICE extraction gap.",
+    "2026_6_5.2_co_occurrence_system_ready_test7_next": "Added co-occurrence item_pairs system to derive_patterns.py and system prompt. Added IRR SERVICE rule, DEMOLITION rule, EXC TO EMBANK floor, C&G+rolled coexistence fix. Rewrote Gemini road_LF prompt with 5-priority order. Tests 5 (+19.8%) and 6 (+6.1%) on Killdeer.",
+    "2026_6_5.1_M3_line_item_tuning": "Tuned m3_infer.py through tests 1-4 on Woodman. Best result: +2.8%. Arc-loop sewer LF rule, analog exclusions_text, ballast thin-data rule, 6\" Concrete Approach.",
+    "2026_6_4.5_M3_built_tested": "Built m3_infer.py. First Woodman tests. Two-stage pipeline: Gemini extraction + Claude inference with extended thinking.",
+    "2026_6_4.4_M2_extended": "Added EDA text, 3 derivation rules, Sections 7-8 to knowledge pack. ROW_SF confirmed as best analog metric.",
+    "2026_6_4.3_M2_complete": "Qty sheet parsing extended. All 12 jobs rebuilt.",
+    "2026_6_4.2_M2_EDA": "Built derive_patterns.py and eda.ipynb (37-cell analysis). LS item inference framework.",
+    "2026_6_4.1_M1_complete": "Case library complete: 12 jobs, 11 with proposals.",
+    "2026_6_3.x": "Gemini vision pass. Hand-read road_LF from plan stationing. DWG geometry rejected.",
+    "2026_6_2.x": "PRD. Two-system architecture. Schema. Parse scripts."
+  }
+}

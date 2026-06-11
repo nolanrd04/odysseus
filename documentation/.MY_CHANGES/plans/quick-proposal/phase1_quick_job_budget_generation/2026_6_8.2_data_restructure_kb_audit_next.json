@@ -1,0 +1,200 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, built, or decided in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session_context": {
+    "date": "2026-06-08",
+    "session_number": "2026_6_8.2",
+    "focus": "Data directory restructure + pipeline script updates. Knowledge base audit against new structure NOT yet done — that is the entire next session.",
+    "immediate_next_action": "Audit jobs_manifest.json, all case library JSONs, and holdout knowledge packs against the new data/ directory structure. See the checklist below."
+  },
+
+  "this_session": {
+    "summary": "Nolan fully restructured the data/ directory. Every job folder now has newest/ and legacy/1,2,3/ subdirectories each containing plans/, plan_images/, proposal/, qty_sheet/, and dwg_files/. Nolan manually placed the correct files into each version folder. The DATA_STRUCTURE.md at data/.DATA_STRUCTURE.md is the authoritative reference for what 'most complete version' to use per job and which DWGs are valid vs invalid. The py1_pdf_to_images.py script was rewritten to match the new structure. The knowledge base and case library have NOT been audited or updated yet — all old file paths in the pipeline are stale.",
+
+    "changes_made": [
+      "Created newest/ and legacy/1/, legacy/2/, legacy/3/ directory structure inside every job folder (13 jobs total)",
+      "data/.DATA_STRUCTURE.md updated with ASCII tree visual and per-job metadata (most complete version, valid/invalid DWGs)",
+      "phase0_new/py1_pdf_to_images.py rewritten: now takes a version directory (e.g. .../newest/ or .../legacy/1/), reads plans/*.pdf, outputs to plan_images/. Native aspect ratio, no square-stretch. DEFAULT_DPI=224.",
+      "Analyzed 4 Expo proposal PDFs — determined chronological order: Template (Jun 12) → rev → rev2 → rev4 (rev4 = rev2 + Exhibit A stamp, newest billable = rev2/rev4 at $372,993.20)"
+    ],
+
+    "what_did_not_happen": "The knowledge base audit. jobs_manifest.json, case library JSONs, holdout knowledge packs, and inference test commands all still reference old flat file paths. Nothing has been regenerated."
+  },
+
+  "data_restructure_reference": {
+    "authoritative_file": "data/.DATA_STRUCTURE.md",
+    "note": "Read this file at the start of next session. It contains: (1) the folder schema, (2) per-job 'Most Complete Version' which determines which version folder the pipeline should read from, (3) valid vs invalid DWGs per job.",
+
+    "most_complete_version_per_job": {
+      "SOLARA [26013]":              { "version": "newest",   "notes": null },
+      "WOODMAN [26008]":             { "version": "legacy/1", "notes": "missing proposal + qty sheet for newest" },
+      "PAINTED ROCK [26007]":        { "version": "legacy/1", "notes": "confusing file locations — just use version 1 for testing" },
+      "LONE FIR RANCH [26006]":      { "version": "legacy/2", "notes": "newest only has plans, missing everything else" },
+      "MOUNTAINSIDE [26003]":        { "version": "newest",   "notes": null },
+      "SETTLEMENT MT / RAGHORN [25022]": { "version": "newest", "notes": "Proposal now present in newest/ after restructure. Folder name on disk: 22055-1_RAGHORN" },
+      "EXPO PRIVATE DRIVE [25016]":  { "version": "newest",   "notes": null },
+      "KILDERE MEADOWS [25012]":     { "version": "legacy/1", "notes": "newest missing qty sheet update and new proposals" },
+      "SETTLEMENT MOUNTAIN [25007]": { "version": "legacy/1", "notes": "too many confusing versions — use version 1 only" },
+      "BOYDS LANDING [24035]":       { "version": "legacy/1", "notes": "only one proposal set exists despite qty revisions" },
+      "6TH AVE [24033]":             { "version": "newest",   "notes": "WARNING: proposal dates predate plans — version alignment is off" },
+      "FOREST GROVE PH2 [23042]":    { "version": "newest",   "notes": null }
+    },
+
+    "job_folder_renames": {
+      "note": "Nolan may have renamed some job folders during restructure. Old names were the data/ subdirectory names from before (e.g. 26_RAGHORN, 25037-2_EXPO). The DATA_STRUCTURE.md job numbers are the authoritative new identifiers. Verify jobs_manifest.json local_folder values match what is actually on disk before running anything.",
+      "known_rename": "26_RAGHORN is now called SETTLEMENT MOUNTAIN [25022] in DATA_STRUCTURE.md — verify the actual folder name on disk with: ls data/"
+    }
+  },
+
+  "full_audit_checklist": {
+    "purpose": "Complete this checklist next session to bring the knowledge base in sync with the restructured data/. Do NOT re-run inference tests until this is complete — the old paths will produce wrong results or silent failures.",
+
+    "step_1_verify_folder_names_on_disk": {
+      "action": "Run: ls /Users/nolan/Desktop/TERRA_UNDERGROUND/HEAVY_BID_RAG_PROJECT/data/",
+      "what_to_check": "Confirm which job folders exist and what they are named. The old names (26_RAGHORN, 25037-2_EXPO, etc.) may have changed.",
+      "critical": "jobs_manifest.json local_folder values must match the actual folder names exactly"
+    },
+
+    "step_2_verify_files_are_in_version_subfolders": {
+      "action": "For each job, confirm the 'most complete version' folder contains the right files.",
+      "check_per_job": [
+        "plans/ has exactly one .pdf",
+        "proposal/ has the correct proposal files (docx and/or pdf)",
+        "qty_sheet/ has the .xlsx and .txt",
+        "dwg_files/ has the correct DWGs (valid DWGs only per DATA_STRUCTURE.md)"
+      ],
+      "spot_check_command": "find data/<JOB_FOLDER>/newest -type f | sort   (or legacy/1, etc.)"
+    },
+
+    "step_3_update_jobs_manifest": {
+      "file": "phase1/ingest/jobs_manifest.json",
+      "fields_to_update_per_job": [
+        "local_folder: must match actual folder name on disk",
+        "dwg_dir: must point to <local_folder>/<most_complete_version>/dwg_files/",
+        "dwg_files: must list only VALID DWGs (per DATA_STRUCTURE.md 'Valid DWGs' section per job)"
+      ],
+      "critical_changes": [
+        "Raghorn / Settlement MT [25022]: folder is 22055-1_RAGHORN, proposal now exists in newest/ — should be treated as a normal priced job after rebuild",
+        "6th Ave: date mismatch warning is Nolan's note for awareness only — include in KP as-is",
+        "Woodman: DWG files are 22066-C-BASE.dwg and ACAD-22066-C-BASE-Model 04-30-26.dwg (both valid per DATA_STRUCTURE.md)"
+      ]
+    },
+
+    "step_4_rebuild_case_library": {
+      "action": "After jobs_manifest.json is updated, re-run build_case_library.py for each job to regenerate the case library JSONs with correct file paths.",
+      "command_template": "python3 phase1/ingest/build_case_library.py   (check script for exact CLI)",
+      "output": "phase1/case_library/<job_name>.json",
+      "spot_check": "Open raghorn_estates.json (or whatever it is now named) — proposals should be [], has_pricing should be false, dollar_per_unit should be empty. If it has pricing data, something is wrong."
+    },
+
+    "step_5_regenerate_knowledge_packs": {
+      "action": "After case library is rebuilt, regenerate all holdout knowledge packs.",
+      "command_template": "python3 phase1/knowledge_pack/derive_patterns.py --holdout data/<JOB_FOLDER>",
+      "holdout_kps_to_regenerate": [
+        "phase1/knowledge_pack/holdout_26006-2_solara/",
+        "phase1/knowledge_pack/holdout_26003-1_mountainside_at_canfield/",
+        "phase1/knowledge_pack/holdout_25071-1_lone_fir_ranch/",
+        "phase1/knowledge_pack/holdout_25068-2_painted_rock/",
+        "phase1/knowledge_pack/holdout_25037-2_expo/",
+        "phase1/knowledge_pack/holdout_24053-3_settlement_mt/",
+        "phase1/knowledge_pack/holdout_25016-2_kildere_meadows/",
+        "phase1/knowledge_pack/knowledge_pack.json (full KP, no holdout)"
+      ],
+      "note": "The full knowledge_pack.json should exclude jobs with no pricing (Raghorn/Settlement MT [25022], 6th Ave if date mismatch disqualifies it) — verify derive_patterns.py handles has_pricing=false jobs correctly before regenerating."
+    },
+
+    "step_6_update_inference_test_commands": {
+      "action": "The m3_infer.py test commands in handoff 2026_6_8.1 reference old flat file paths. After rebuilding the KPs, update the --job paths to use the correct version subdirectory.",
+      "example_old": "python3 phase1/inference/m3_infer.py --job data/26006-2_SOLARA --knowledge-pack ...",
+      "example_new": "python3 phase1/inference/m3_infer.py --job data/26006-2_SOLARA/newest --knowledge-pack ...   (if --job means the version folder)",
+      "note": "Check what m3_infer.py actually expects for --job: does it want the job root folder or the version subfolder? Read the argparse section at the top of the script before running."
+    },
+
+    "step_7_verify_proposal_paths_in_case_library": {
+      "action": "Open 2-3 case library JSONs and confirm the proposal file paths resolve to actual files on disk.",
+      "jobs_to_spot_check": ["woodman.json", "expo_private_drive.json", "killdeer_meadows.json"],
+      "what_to_look_for": "links.proposal_files[] and quantities_qty_sheet.xlsx_path should point to files that actually exist in the correct version subfolder",
+      "command": "ls \"data/<JOB_FOLDER>/<version>/proposal/\"   to confirm files are there"
+    }
+  },
+
+  "raghorn_note": {
+    "situation": "Raghorn Estates (now Settlement Mountain [25022], folder: 22055-1_RAGHORN) did NOT have a proposal before the restructure. After restructure, a proposal is now present in newest/proposal/. The case library entry (raghorn_estates.json) was built before the restructure and still shows has_pricing=false with empty dollar_per_unit.",
+    "action_for_next_session": "When rebuilding the case library, Raghorn should now be treated as a normal priced job. Verify has_pricing becomes true after rebuild and dollar_per_unit is populated."
+  },
+
+  "current_pipeline_state": {
+    "phase0_new/py1_pdf_to_images.py": {
+      "status": "updated this session",
+      "behavior": "Takes <version_dir> (e.g. .../newest/), reads plans/*.pdf, outputs to plan_images/. Native aspect ratio. DEFAULT_DPI=224.",
+      "cli": "python phase0_new/py1_pdf_to_images.py <version_dir> [dpi]"
+    },
+    "phase1/ingest/jobs_manifest.json": {
+      "status": "STALE — still has old flat file paths, pre-restructure folder names",
+      "action_needed": "Update local_folder values and dwg_dir paths to match new structure"
+    },
+    "phase1/case_library/*.json": {
+      "status": "STALE — built from old flat paths",
+      "action_needed": "Rebuild after jobs_manifest.json is corrected"
+    },
+    "phase1/knowledge_pack/knowledge_pack.json": {
+      "status": "STALE",
+      "action_needed": "Regenerate after case library rebuild"
+    },
+    "phase1/knowledge_pack/holdout_*/knowledge_pack.json": {
+      "status": "STALE",
+      "action_needed": "Regenerate after case library rebuild"
+    },
+    "phase1/inference/m3_infer.py": {
+      "status": "Updated last session (2026_6_8.1) with 9 improvements. NOT yet re-tested. Re-test is step 2 after the audit is complete.",
+      "note": "Do NOT re-run inference tests until the audit checklist above is complete"
+    }
+  },
+
+  "prior_sessions_summary": {
+    "sessions_2026_6_1_through_2026_6_4.5": "Built the full Phase 1 pipeline from scratch: Gemini PDF/image extraction, case library in JSON, knowledge pack derivation (derive_patterns.py), and Claude inference system prompt. Case library has 11 jobs (10 with proposals). KP covers unit price distributions, item pairs, derivation rules, LS earthwork rates, paving rates, qty scale correlations, and price trends.",
+    "session_2026_6_5.1": "Tuned m3_infer.py line-item generation — fixed stripping, earthwork, ballast, sewer/water line items.",
+    "session_2026_6_5.2": "Built co-occurrence system in KP (item_pairs). Ballast bundled-vs-separate identified as key error source.",
+    "session_2026_6_5.3": "Test T7 converged on Killdeer within ±5%. Solara identified as next test.",
+    "session_2026_6_5.4": "Killdeer fully converged. Solara $176K ballast false positive surfaced. Architecture rewrite planned.",
+    "session_2026_6_5.5": "Architecture streams completed. Fixed Solara case library metrics (ROW_SF, road_LF corrected). KP regen deferred.",
+    "session_2026_6_5.6": "Regenerated KP. Killdeer T12 (-4.2%) and T13 (+3.5%) both pass ±5%. Fixed three prompt issues. Solara T14: -30.2% fail.",
+    "session_2026_6_8.1": "Multi-job validation T15–T19. All 6 jobs failed ±10% (0/6 pass). Root causes identified per job. Implemented 9 improvements to m3_infer.py. Tests not yet re-run.",
+    "session_2026_6_8.2_this_session": "Full data directory restructure. Every job folder now has newest/ and legacy/1-3/ with 5 standard subfolders. DATA_STRUCTURE.md is the source of truth for per-job version selection and DWG validity. py1_pdf_to_images.py rewritten for new structure. Knowledge base NOT yet audited — all pipeline paths are stale. Audit checklist written above."
+  },
+
+  "open_questions": [
+    "Raghorn/Settlement MT [25022]: proposal now exists in newest/ — verify has_pricing=true after case library rebuild.",
+    "6th Ave date mismatch: Nolan wrote the warning for his own awareness, still wants this job included in the KP as-is.",
+    "m3_infer.py --job argument: does it expect the job root folder or the version subfolder (newest/ or legacy/N/)? Check argparse before running tests.",
+    "After audit + KP regen, re-run T14–T19 to get post-improvement baseline. This was the original next step from 2026_6_8.1 and is still pending.",
+    "Lone Fir job_type extraction: did Gemini return 'private_drive'? Check .gemini_extraction.md to confirm — this determines whether the utility suppression fix works.",
+    "Solara ROW_SF: Gemini undercounts by missing Meyer Road frontage polygon. Still unresolved."
+  ],
+
+  "operational_constraints": {
+    "never_run_python_scripts_directly": "Tell the user the command and wait for them to paste output. Never execute python scripts.",
+    "gemini_model_string": "Do not change the GEMINI_MODEL string in any script. Nolan sets it and it stays as-is.",
+    "version_alignment": "PDF/DWG/qty-sheet/proposal per job may be different revisions. Nolan verifies manually — do not automate cross-document version matching."
+  }
+}

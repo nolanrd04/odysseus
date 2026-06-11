@@ -1,0 +1,86 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, decided, or built in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session": "2026_6_2.7",
+  "title": "Phase 1 M1 — all 8 DWGs extracted; road_LF reversed to plan-stationing (manifest-authoritative); build wired to phase1 extractions. Build NOT yet re-run.",
+  "date": "2026-06-02",
+  "status": "ALL CODE CHANGES DONE and compile-clean, but the case library on disk is STALE — build_case_library.py has NOT been re-run this session. The phase1_dwg_extractions/ for all 7 non-Woodman jobs exist and were verified. road_LF sourcing was REVERSED: it is now hand-entered from plan-sheet stationing into jobs_manifest.json (authoritative), with DWG geometry kept only as a cross-check. Manifest seeded for Lone Fir (2157.91) and Mountainside (679.74); the other 6 road_LF_ft are null and await hand-reading off the plans. IMMEDIATE NEXT ACTION: run build_case_library.py to persist (road_LF from manifest, road_LF_dwg_crosscheck, new flags, and DWG quantities from the phase1 extractions).",
+  "phase": "Phase 1 — Quick Job Budget Generation. M1 = build the offline knowledge base (System A case library). Spine = proposals + qty sheets; DWG is tertiary (scale metrics + cross-check). See phase1/PRD_phase1_quick_job_budget_generation.md.",
+
+  "what_was_done_this_session": {
+    "phase1_extractor_built": "NEW phase1/ingest/py1_dwg_extract_phase1.py — thin wrapper that IMPORTS the extraction logic from phase0_new/py1_dwg_extract.py (single source of truth, no drift). NO FLAGS by design (Nolan's request): `python phase1/ingest/py1_dwg_extract_phase1.py <input_dir>`. It looks the dir up in jobs_manifest.json, uses that job's dwg_files (incl. XREF subpaths) and slug, and writes flat to phase1_dwg_extractions/<job_slug>/dwg_extraction.json + .md (overwrites in place; no _N versioning). Falls back to 'all .dwg in folder, name=basename' if dir not in manifest.",
+    "all_extractions_run": "All 7 non-Woodman jobs extracted into phase1_dwg_extractions/ (Woodman is the 8th, reused from phase0_new/TESTS/WOODMAN_TEST/). All succeeded.",
+    "extractor_bugfix": "Fixed a crash in the SHARED phase0_new/py1_dwg_extract.py (extract_from_dxf, ~line 511): legacy/unsupported entities like ARCALIGNEDTEXT (found in Mountainside's VBASE2 xref) have no 'layer' DXF attribute, so entity.dxf.get('layer','0') RAISED instead of returning the default. Wrapped in try/except → 'layer'='0'. Protects both pipelines.",
+    "extraction_verification": "Confirmed geometry is sound (linear utilities match qty sheet closely on Solara: sewer services 2390 vs 2391, sewer main 2382 vs 2350, water main 2997 vs 2884). Known DWG failure modes present as expected and IGNORED for M1 (curb ~3x from parallel TBC/LIP/FL lines; anonymous *U### dynamic-block explosion; C-SITE_SIGN catch-all 58 vs ~6 real). These do not matter because qty sheet is the quantity spine.",
+    "gap_audit": "Audited all 8 case records. The qty sheet IS the complete as-bid quantity spine: only 10 REAL quantity gaps (rows with estimator takeoff initials BR/CPH but blank qty), in just 2 jobs — Solara (6: the 12\" water main run + its fittings) and Settlement Mountain (4: driveways along roads/cul-de-sacs SF, lot cut/fill CY). Other 6 jobs have ZERO. Everything else blank = untouched template rows.",
+    "geometry_only_discovery": "Non-Woodman DWGs are MODEL-SPACE GEOMETRY ONLY (0 paper-space sheets/keynotes/legends/leaders). Woodman is the exception (13 sheets, 15 keynotes, 63 leaders). This loses NO quantities (qty sheet has them); it only removes the redundant paper-space keynote data.",
+    "road_LF_reversal": "MAJOR: DWG geometry is NOT a reliable road_LF source — it over-counts. Nolan read true road_LF off plan STATIONING: Lone Fir 33+57.95-12+00.04 = 2157.91 LF (DWG C-ROAD-CNTR said 7475.8, 3.5x over); Mountainside 16+79.74-10+00 = 679.74 LF (DWG civil C-ROAD-CNTR said 1179.7; survey/xref V-ROAD-CNTR said 800 — closer but still over). Station-label text is NOT in these geometry-only DWGs (Nolan checked the viewer). DECISION: road_LF is hand-entered from plan stationing into the manifest; DWG demoted to cross-check.",
+    "build_integration_wired": "build_case_library.py now (a) prefers phase1_dwg_extractions/<slug>/ via new normalize_dwg.find_phase1_extraction(slug), falling back to phase0_new/TESTS; (b) sources road_LF from manifest road_LF_ft (road_LF_source defaults 'plan_stationing'); (c) stores the DWG estimate as scale_metrics.road_LF_dwg_crosscheck (+ _source); (d) adds flags road_LF_unset (manifest null) and road_LF_dwg_mismatch:<pct> (>25% divergence).",
+    "crosscheck_matcher_refined": "The DWG cross-check matcher (build_case_library _road_lf_from_dwg / _is_road_centerline_layer) was refined: exclude stationing-tick layers (*-STA, e.g. Expo's C-ROAD-ALGN-STA = 37 ticks), and PREFER civil C-* centerline over survey V-/P- to avoid double-counting the same road across merged files. Plat fallback tier (dwg_plat_centerline: e.g. Solara V-PLAT-CNTR) retained. NOTE: this only affects the cross-check now, not the authoritative value.",
+    "manifest_seeded": "jobs_manifest.json: added road_LF_ft + road_LF_source to all 8 jobs. Seeded Lone Fir=2157.91 and Mountainside=679.74 (plan_stationing). Other 6 are null (await hand-reading).",
+    "schema_updated": "phase1/schema/CASE_LIBRARY_SCHEMA.md §7 + §7.1 rewritten: road_LF is plan-stationing/manifest-authoritative; documents road_LF_dwg_crosscheck and the mismatch flag.",
+    "memory_logged": "Two cross-session memories written: project_phase1_dwg_geometryonly_and_gap_audit + project_phase1_road_lf_from_stationing."
+  },
+
+  "key_findings_and_decisions": [
+    "road_LF = sum of each street alignment's stationing span (end_sta - start_sta), HAND-ENTERED from plan sheets. DWG geometry over-counts (offset/construction lines, profile copies, cul-de-sac/intersection centerlines) and which layer is least-bad flips per job; station text isn't in these DWGs. So DWG is cross-check only.",
+    "Entity-count tell: Woodman's clean centerline was a single LWPOLYLINE (n=1). Contaminated layers have many entities (Lone Fir C-ROAD-CNTR n=11). Use as a smell test, not a rule.",
+    "The qty sheet + proposal are the COMPLETE spine for as-bid quantities/prices. Geometry-only DWGs do not create quantity holes. DWG stays tertiary (confirms the Phase 0->1 pivot).",
+    "Two firms use a non-NCS layer scheme (SV-/SF-/SS-/CNTL) — Settlement Mountain and Painted Rock. They have NO clean road centerline layer (Settlement SV-CNTL-PROP-LIN=11851 is inflated, ~= property-line length; not road centerline). road_LF for these MUST be hand-read. Did NOT add 'CNTL' to the matcher (ambiguous control-vs-centerline, would inject bad numbers).",
+    "Lone Fir & Mountainside are single-main-road jobs (road + lots; Mountainside has minor parking slits), so the single station span = full road_LF. Other jobs' single-vs-multi-street status is unconfirmed — multi-street jobs need EACH street's span summed.",
+    "Mountainside DWG path: only two DWGs exist (CBASE_SENT CAD.dwg + XREF/VBASE2.dwg); BOTH are processed by the manifest entry. No third file. The survey xref's V-ROAD-CNTR (800) was closer to the 680 stationing truth than the civil C-ROAD-CNTR (1180) — reinforces 'DWG unreliable for road_LF'.",
+    "The road_LF_dwg_mismatch flags that will appear on Lone Fir (~246%) and Mountainside (~74%) are EXPECTED and CORRECT — they prove the geometry was wrong and the stationing is right.",
+    "WORKFLOW: Nolan runs all Python PIPELINE scripts himself and pastes output; deliver scripts as commands, do not auto-execute. (Read-only JSON inspection / py_compile during a session is fine.)"
+  ],
+
+  "current_pipeline_state": {
+    "case_library_on_disk": "phase1/case_library/<slug>.json for all 8 — STALE. Written before this session's road_LF reversal and build wiring. Does NOT yet contain manifest road_LF, road_LF_dwg_crosscheck, new flags, or DWG quantities from phase1_dwg_extractions. MUST rebuild.",
+    "phase1_extractions": "phase1_dwg_extractions/<slug>/dwg_extraction.json + .md present for: expo_private_drive, killdeer_meadows, lone_fir, mountainside, painted_rock, settlement_mountain, solara_ph1. Woodman uses phase0_new/TESTS/WOODMAN_TEST/ (latest run).",
+    "scripts": "phase1/ingest/py1_dwg_extract_phase1.py (NEW, extraction wrapper). build_case_library.py + normalize_dwg.py (MODIFIED, integration + road_LF). jobs_manifest.json (MODIFIED, road_LF fields). phase0_new/py1_dwg_extract.py (MODIFIED, ARCALIGNEDTEXT guard). All compile clean (py_compile passed).",
+    "dwg_crosscheck_values_for_reference": "Available DWG-geometry road_LF (cross-check, for sanity only — NOT truth): Woodman 937.5 (C-ROAD-CNTR, clean n=1), Solara 2704.6 (V-PLAT-CNTR plat), Killdeer 942.3 (P-ROAD-CNTR), Expo 1566.8 (C-ROAD-ALGN-CNTR), Painted Rock 2641.3 (station_labels, low trust), Settlement Mountain none, Lone Fir 7475.8 (3.5x over), Mountainside 1179.7."
+  },
+
+  "next_steps": [
+    "1. PERSIST THE BUILD (immediate): `python phase1/ingest/build_case_library.py --dry-run` then `python phase1/ingest/build_case_library.py`. Expect Lone Fir road_LF=2157.91 + flag road_LF_dwg_mismatch:~246%; Mountainside 679.74 + ~74%; the other 6 road_LF=None + flag road_LF_unset with a DWG crosscheck shown. Paste dry-run output to sanity-check before committing.",
+    "2. HAND-READ road_LF for the remaining 6 jobs off plan stationing and enter into jobs_manifest.json road_LF_ft (currently null): Woodman, Solara PH1, Killdeer Meadows, Expo Private Drive, Settlement Mountain, Painted Rock. Confirm each is single-road vs multi-street (sum all street spans if multi). Rebuild after.",
+    "3. BATCHED VISION/MANUAL PASS (one focused pass over plan PDFs, fixed target list): lot_count (8 jobs), road_LF stationing (the 6 above, if not done by hand), the 10 quantity gaps (Solara 6 + Settlement 4), stripping_depth_in (Mountainside, currently null), job_type confirmation (all 8 TENTATIVE). Do NOT build a per-job 4-source LLM synthesis — that is System B.",
+    "4. M2 — Knowledge pack (after scale metrics are populated): $/unit distributions (segmented by job type/region/date, recency-weighted), typical-section defaults, job-type signatures, derivation rules. Exit: a reviewable patterns doc.",
+    "Reminder: deliver PIPELINE scripts as COMMANDS for Nolan to run; do not auto-execute."
+  ],
+
+  "open_questions": [
+    "Which jobs are multi-street (road_LF must sum each alignment's stationing span)? Lone Fir + Mountainside confirmed single-road. Others unknown.",
+    "Settlement Mountain & Painted Rock (SV-/SF-/CNTL firm scheme): road_LF has no clean DWG source — must be hand-read; Painted Rock's earlier extraction was also flagged BAD in prior sessions.",
+    "lot_count source workflow: vision model vs manual hand-entry into the manifest.",
+    "job_type still TENTATIVE/unconfirmed on all 8; confirm vs plans.",
+    "Do proposal quantities ever differ from qty-sheet quantities? (proposals carry prices but mostly null quantities; qty sheet carries quantities.)",
+    "System B carry-overs: which single sheet does Brian get handed; will Brian type priors (job type + location)."
+  ],
+
+  "prior_sessions_summary": {
+    "2026_6_2.6_M1_road_LF_first_attempt": "Wired road_LF from DWG centerline geometry into build_case_library.py (then believed reliable) and validated Woodman=937.5 (C-ROAD-CNTR). NOTE: this session's road_LF approach was SUPERSEDED in 2.7 — DWG geometry proved unreliable; road_LF moved to plan-stationing/manifest. The centerline matcher work survives only as the DWG cross-check. Also wrote diag_dwg_coverage.py (xref-coverage auditor) and documented the py1 model-space-top-level-only limitation (Fix B: descend into xrefs/blocks — still PARKED; did not bite any job since geometry was top-level).",
+    "2026_6_2.5_M1_case_library_ingest": "Defined case-library schema and built M1 ingest: parse_proposal.py (rendered Word field = cost truth; OPTIONAL items excluded from grand total), parse_qty_sheet.py (clean qty_tbl_*.txt -> rows + ROW_SF/stripping; .xlsx unparsed by design), normalize_dwg.py (positive-match-only), build_case_library.py (orchestrator). Canonical total = total_reconciled (sum of line items); 7/8 foot to the penny, Settlement Mountain +143,900 unitemized markup. Manifest holds non-derivable identity facts.",
+    "2026_6_2.4_phase1_kickoff": "Wrote the PRD. TWO-SYSTEM architecture (A = offline knowledge build; B = runtime single-sheet inference by analogy + gap-fill). 'Learning' = persist + retrieve into context (RAG/in-context), NO training. Output = line items + total + confidence band + provenance; target 10-15% of historical total. RAG deferred (~50 jobs). Job NAME is the stable key; Foundry excluded.",
+    "phase0_arc_and_bridge": "Phase 0 = plan files -> HeavyBid quantity sheet via a blind DWG extractor (py1) + Claude qty-sheet generator (py4), validated on Woodman; plan PDFs are fully rasterized so DWG is the geometry path. BRIDGE: Phase 0's premise that DWG is the trustworthy spine does NOT carry to Phase 1 — past jobs have finished proposals (as-bid quantities + prices), so Phase 1's spine is proposals + qty sheets and DWG shrinks to scale metrics + cross-check. Detail: _handoffs/phase0_qty_sheet_generation/2026_6_2.FINAL_summary_handoff.json."
+  }
+}

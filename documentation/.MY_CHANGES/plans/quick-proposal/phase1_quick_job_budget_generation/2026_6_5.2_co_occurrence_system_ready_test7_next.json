@@ -1,0 +1,158 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, decided, or built in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session_context": {
+    "purpose": "Resume Phase 1 pipeline tuning for Killdeer Meadows. Two tasks: (1) review the system prompt in m3_infer.py for any additional co-occurrence rules to add, then (2) run test 7.",
+    "first_thing_next_session": "Read phase1/inference/m3_infer.py SYSTEM_PROMPT (approx lines 200–600) and cross-reference the item_pairs in the holdout knowledge pack at phase1/knowledge_pack/holdout_25016-2_kildere_meadows/knowledge_pack.json. Look for: (a) high-co_occurrence pairs (>=0.75) not yet handled by the current Item Pairs rule, and (b) any remaining hardcoded item rules that could be replaced with statistical co-occurrence guidance. Then run test 7 per the commands below.",
+    "test_7_commands": {
+      "step_1_holdout_pack": "python3 phase1/knowledge_pack/derive_patterns.py --holdout data/25055-1_KILLDEER_MEADOWS",
+      "step_2_inference": "python3 phase1/inference/m3_infer.py --input 'data/25055-1_KILLDEER_MEADOWS/25016-2_KILDERE_MEADOWS.pdf' --holdout data/25055-1_KILLDEER_MEADOWS --out phase1/inference/output_test_7_KILDERE/output_test_7_KILDERE.md",
+      "note": "Never run Python scripts directly. Tell Nolan the command and wait for him to paste output back."
+    },
+    "after_test_7": "Compare line-by-line against actual Killdeer Meadows proposal. Actuals are in phase1/case_library/25055-1_KILLDEER_MEADOWS.json. Pay special attention to: 6\" SIDEWALKS (was missing in test 6), 1\" IRR SERVICE (was 18 EA in test 6, actual is 2 EA), DEMOLITION (was missing in test 6), EXC TO EMBANK (was undercounted in test 6), and road_LF accuracy (new 5-priority Gemini prompt was updated this session)."
+  },
+
+  "this_session": {
+    "date": "2026-06-05",
+    "job_tested": "Killdeer Meadows (25016-2)",
+    "actual_total": 625952,
+    "test_results": {
+      "test_5": {
+        "total": 750000,
+        "error_pct": "+19.8%",
+        "verdict": "First Killdeer test. Major overcount on 1\" IRR SERVICE (18 EA vs actual 2 EA). Missing DEMOLITION. road_LF over-extracted by Gemini."
+      },
+      "test_6": {
+        "total": 664000,
+        "error_pct": "+6.1%",
+        "verdict": "Improved. Remaining gap: IRR SERVICE still overcounted (18 vs 2), DEMO still missing, 6\" SIDEWALKS missing, EXC TO EMBANK underestimated. Opposing errors partially cancel."
+      }
+    },
+
+    "changes_made": {
+
+      "gemini_road_LF_prompt": {
+        "what": "Replaced the original profile-first road_LF extraction with a 5-source priority order",
+        "why": "Gemini was summing all profiled road segments including existing roads, yielding ~1,700 LF vs ~1,309 LF. The new priority puts explicit title/callout labels first, profile view last, and adds caution about PVI/BVC/EVC annotations being mistaken for construction limits.",
+        "new_priority_order": [
+          "1. ROAD NAME + STATIONING on title/prominent label — e.g. 'KILLDEER AVE STA:10+50 TO STA:21+00'",
+          "2. EXPLICIT LF CALLOUT — e.g. 'L=979.62\\'' or 'TOTAL LENGTH = 475 LF'",
+          "3. BEGIN/END CONSTRUCTION text paired with station numbers",
+          "4. PLAN VIEW station tick marks along centerline",
+          "5. PROFILE VIEW x-axis — proposed (solid) portion only; ignore PVI/BVC/EVC annotations"
+        ],
+        "road_LF_segments_schema": "road_LF_segments field added to Gemini JSON schema: [{road_name, lf_source, start_sta, end_sta, proposed_LF}] for auditability",
+        "gemini_extraction_sidecar": "gemini_extract() now writes a .gemini_extraction.md sidecar file showing all extracted scale metrics plus each road segment's LF, source, and station range"
+      },
+
+      "system_prompt_changes": {
+        "curb_type": "Removed 'mutually exclusive' language. C&G and rolled curb can coexist on the same job (e.g. C&G at intersections, rolled curb on residential streets). Killdeer had both.",
+        "irrigation_services": "NEW: 1\" IRR SERVICE is a district connection at the road right-of-way, never per-lot. Max 1–3 EA total; default to road_connection_count. This was the source of the +18 EA overcount.",
+        "demolition": "NEW: always include a DEMOLITION line item if scope_notes mentions demolition. Was missing entirely in tests 5 and 6.",
+        "item_pairs_rule": {
+          "what": "Replaced the hardcoded 6\" SIDEWALKS rule with a statistical co-occurrence rule",
+          "rule": "When computing any line item, scan item_pairs for a partner where co_occurrence_rate >= 0.75. If partner is not already in estimate and not excluded by 2+ closest analogs, include it. Derive partner_qty using median_ratio_a_to_b.",
+          "why": "Self-updating as case library grows. 4\" SIDEWALKS ↔ 6\" SIDEWALKS pair has r=0.975, co_occurrence_rate=0.80 — will trigger auto-include of 6\" when 4\" is computed."
+        },
+        "exc_to_embank": "NEW: floor $20,000, flag [EST], removed no-borrow assumption. Was being underestimated.",
+        "signs_and_striping": "Removed from auto-exclude list. Check analogs first — some jobs genuinely include it."
+      },
+
+      "derive_patterns_py": {
+        "what": "Added derive_item_pairs() function",
+        "filters": "EA, LF, SF, SY units only; |r| >= 0.85; N >= 4 shared jobs",
+        "output_per_pair": "item_a, item_b, unit_a, unit_b, r, n_shared_jobs, n_jobs_a, n_jobs_b, co_occurrence_rate, median_ratio_a_to_b, shared_jobs",
+        "item_pairs_now_in_knowledge_pack": true
+      },
+
+      "eda_notebook": {
+        "cell_14": "Markdown updated: 'EA and LF items only' → 'EA, LF, SF, and SY items'",
+        "cell_15": "Filter changed from {EA, LF} to {EA, LF, SF, SY}. Variable ea_lf → all_meas. Heatmap title updated."
+      },
+
+      "knowledge_packs_regenerated": [
+        "phase1/knowledge_pack/knowledge_pack.json — 93 item pairs",
+        "phase1/knowledge_pack/holdout_25016-2_kildere_meadows/knowledge_pack.json — 85 item pairs (holdout excludes Killdeer jobs)"
+      ]
+    },
+
+    "known_state_of_killdeer_extraction": {
+      "road_LF_test6_gemini": 1308.56,
+      "road_LF_segments_test6": [
+        {"road": "Killdeer Avenue", "lf": 333.02, "sta_range": "1657.67 → 1990.69", "source": "profile_xaxis"},
+        {"road": "May Ella Lane", "lf": 645.92, "sta_range": "1018.0 → 1663.92", "source": "profile_xaxis"},
+        {"road": "Luverne Lane", "lf": 329.62, "sta_range": "1194.6 → 1524.22", "source": "profile_xaxis"}
+      ],
+      "road_LF_in_case_library": 979.62,
+      "note": "The case library road_LF=979.62 was hand-read by Nolan as the single main road. Gemini is summing all three branch roads. The 5-priority prompt may shift extraction to title-label stationing — test 7 will show the new value. The ground truth remains ambiguous (one road vs three)."
+    },
+
+    "key_decisions_made": [
+      "No hardcoded sewer/water connection count rules — leave as-is until we know better how to instruct the model",
+      "Co-occurrence system is statistical and self-updating — do not add new hardcoded item rules; instead verify pairs data covers the case and trust the ratio inference",
+      "The Gemini model string in m3_infer.py must not be changed — Nolan sets it"
+    ]
+  },
+
+  "current_pipeline_state": {
+    "case_library": "phase1/case_library/ — 12 JSONs. Raghorn has no proposal (no total).",
+    "knowledge_pack_main": "phase1/knowledge_pack/knowledge_pack.json — COMPLETE with item_pairs (93 pairs).",
+    "knowledge_pack_holdout_killdeer": "phase1/knowledge_pack/holdout_25016-2_kildere_meadows/knowledge_pack.json — built, 85 pairs.",
+    "derive_patterns": "phase1/knowledge_pack/derive_patterns.py — item_pairs added, accepts --holdout as folder path.",
+    "m3_infer": "phase1/inference/m3_infer.py — updated Gemini prompt (5-priority road_LF), sidecar, road_LF_segments, system prompt all updated.",
+    "test_outputs": {
+      "test_5": "phase1/inference/output_test_5_KILDERE/ — +19.8%",
+      "test_6": "phase1/inference/output_test_6_KILDERE/ — +6.1%, includes .gemini_extraction.md sidecar"
+    }
+  },
+
+  "file_locations": {
+    "main_inference_script": "phase1/inference/m3_infer.py",
+    "derive_patterns_script": "phase1/knowledge_pack/derive_patterns.py",
+    "killdeer_case_library": "phase1/case_library/25055-1_KILLDEER_MEADOWS.json",
+    "holdout_knowledge_pack": "phase1/knowledge_pack/holdout_25016-2_kildere_meadows/knowledge_pack.json",
+    "killdeer_pdf": "data/25055-1_KILLDEER_MEADOWS/25016-2_KILDERE_MEADOWS.pdf",
+    "test_6_output": "phase1/inference/output_test_6_KILDERE/output_test_6_KILDERE.md",
+    "test_6_gemini_extraction": "phase1/inference/output_test_6_KILDERE/output_test_6_KILDERE.gemini_extraction.md",
+    "eda_notebook": "phase1/knowledge_pack/eda.ipynb"
+  },
+
+  "open_questions": [
+    "What will Gemini read for road_LF with the new 5-priority prompt? Will it hit Source 1 (title label) or fall through to profile view again?",
+    "Does the co-occurrence rule correctly trigger 6\" SIDEWALKS from 4\" SIDEWALKS in test 7? The pair has r=0.975 and co=0.80 (above 0.75 threshold).",
+    "Does the 1\" IRR SERVICE fix (district connection, not per-lot) bring it down to 2–3 EA?",
+    "Does adding DEMOLITION floor produce a realistic line item from scope_notes?",
+    "After Killdeer converges, which job to test next? Boyds Landing and 6th Ave are recommended simple jobs."
+  ],
+
+  "prior_sessions_summary": {
+    "2026_6_5.1_M3_line_item_tuning": "Tuned m3_infer.py through tests 5 and 6 on Killdeer Meadows. Added IRR SERVICE rule, DEMOLITION rule, co-occurrence item pairs system, EXC floor, C&G+rolled coexistence fix, signs exclusion removal. Gemini road_LF prompt rewritten with 5-priority order. derive_patterns.py extended to produce item_pairs. Both knowledge packs regenerated.",
+    "2026_6_4.5_M3_built_tested": "Built m3_infer.py. Tested on Woodman through tests 2–4. Best result: +2.8%. Arc-loop sewer LF rule, analog exclusions_text, ballast thin-data rule, 6\" Concrete Approach.",
+    "2026_6_4.4_M2_extended": "Added EDA text, 3 derivation rules, Sections 7-8 to knowledge pack. ROW_SF confirmed as best analog metric.",
+    "2026_6_4.3_M2_complete": "Qty sheet parsing extended (subgrade, paving, ballast). All 12 jobs rebuilt.",
+    "2026_6_4.2_M2_EDA": "Built derive_patterns.py and eda.ipynb (37-cell analysis). LS item inference framework.",
+    "2026_6_4.1_M1_complete": "Case library complete: 12 jobs, 11 with proposals.",
+    "2026_6_3.x": "Gemini vision pass. Hand-read road_LF from plan stationing. DWG geometry rejected.",
+    "2026_6_2.x": "PRD. Two-system architecture. Schema. Parse scripts."
+  }
+}

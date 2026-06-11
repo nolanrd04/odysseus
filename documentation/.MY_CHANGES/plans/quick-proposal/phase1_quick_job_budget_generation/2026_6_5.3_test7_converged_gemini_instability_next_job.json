@@ -1,0 +1,174 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, decided, or built in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session_context": {
+    "purpose": "Resume Phase 1 pipeline tuning. Killdeer Meadows converged at test 7 (+2.2%). Test 8 regressed due to Gemini lot_count instability. Next session: decide whether to investigate the lot_count issue, then move to next test job.",
+    "first_thing_next_session": "Read the test 8 output at phase1/inference/output_test_8_KILDERE/output_test_8_KILDERE.md and the Gemini sidecar at output_test_8_KILDERE.gemini_extraction.md. Gemini read lot_count=26 on the same PDF that returned 18 in tests 5–7. Decide with Nolan: (1) accept Gemini variance and add lot_count as a user-verifiable input, or (2) investigate the Gemini prompt to see if lot_count extraction can be made more reliable. Then move to the next test job (Boyds Landing or 6th Ave recommended as simpler jobs).",
+    "next_job_commands": {
+      "note": "Never run Python scripts directly. Tell Nolan the command and wait for him to paste output back.",
+      "boyds_landing_step1": "python3 phase1/knowledge_pack/derive_patterns.py --holdout data/25017-1_BOYDS_LANDING",
+      "boyds_landing_step2": "python3 phase1/inference/m3_infer.py --input 'data/25017-1_BOYDS_LANDING/<pdf_name>.pdf' --holdout data/25017-1_BOYDS_LANDING --out phase1/inference/output_test_1_BOYDS/output_test_1_BOYDS.md",
+      "verify_folder": "Check data/ for the actual Boyds Landing folder name before running"
+    }
+  },
+
+  "this_session": {
+    "date": "2026-06-05",
+    "job_tested": "Killdeer Meadows (25016-2)",
+    "actual_total": 625952,
+
+    "test_results": {
+      "test_7": {
+        "total": 639867,
+        "error_pct": "+2.2%",
+        "verdict": "Best result yet. All five tracked items improved: 6\" SIDEWALKS now included, DEMO included, EXC TO EMBANK floored. 1\" IRR SERVICE still missing (Gemini scope_notes didn't mention irrigation). Opposing errors cancel cleanly. Killdeer effectively converged."
+      },
+      "test_8": {
+        "total": 675348,
+        "error_pct": "+7.9%",
+        "verdict": "Regression from test 7. Root cause: Gemini misread lot_count as 26 (actual 18), cascading +$50k through water services, sewer services, irrigation sleeves, and driveway approaches. Also missed DEMO in scope_notes this run. EXC TO EMBANK correctly used roughly_balanced tier but Gemini's earthwork assessment was wrong (actual has confirmed import at $38k)."
+      }
+    },
+
+    "pre_test7_review": {
+      "what": "Reviewed system prompt co-occurrence rules against holdout knowledge pack item_pairs",
+      "finding": "All pairs with co_occurrence_rate >= 0.75 are covered by the general scanning rule. No new rules needed. Key items confirmed to be triggered: SCUPPERS (co=0.889 with 4\" SEWER SERVICES), UTILITY TRENCHING (co=0.9 with 4\" SIDEWALKS), 6\" SIDEWALKS (co=0.875 with 4\" SEWER SERVICES), FIRE HYDRANTS (co=0.889 with 48\" SEWER MANHOLE).",
+      "conclusion": "System prompt ready for test 7 as-is"
+    },
+
+    "changes_made": {
+
+      "gemini_earthwork_extraction": {
+        "what": "Added three new fields to Gemini PDF prompt schema and extraction guidance",
+        "fields": [
+          "earthwork_balance: import_needed | export_needed | roughly_balanced | unknown",
+          "earthwork_import_export_CY: estimated CY if determinable, else null",
+          "earthwork_notes: what was observed on profiles/grading plan"
+        ],
+        "guidance_added": "Instructs Gemini to compare proposed grade vs existing ground on profile views, look for fill/cut labels on grading plan, and check for import/export notes",
+        "sidecar": "Earthwork Assessment section added to .gemini_extraction.md sidecar"
+      },
+
+      "system_prompt_utility_connections": {
+        "what": "Split CONNECT TO EXIST SEWER and CONNECT TO EXIST WATER rules",
+        "sewer_rule": "Default 1 EA. Use 2 EA only if sewer main clearly runs full corridor to both ends. Do not use road_connection_count.",
+        "water_rule": "Use min(road_connection_count, 2). Cap at 2 — a Gemini count of 3 on multi-branch layouts is an overcount artifact.",
+        "why": "Test 7 had road_connection_count=3 applied to both, yielding 3 sewer connects (actual 1) and 3 water connects (actual 2). Portfolio data: sewer=1 EA in 7/9 jobs, sewer=2 EA in 2/9 (arc/full-corridor layouts only); water=2 EA in 6/10 jobs."
+      },
+
+      "system_prompt_concrete_approach": {
+        "what": "Changed 6\" Concrete Approach from unconditional include to analog-gated include",
+        "old_rule": "Include as standard line item; omit only if 2+ analogs omit AND no scope mention",
+        "new_rule": "Include only if at least 1 of the 2 closest analogs includes it, OR scope_notes explicitly mentions driveway approaches",
+        "why": "Test 7 had $16,740 false positive — Boyds Landing and Painted Rock (closest analogs) both omit it. Test 8 correctly included it because scope_notes said '24' wide driveway approaches'."
+      },
+
+      "system_prompt_exc_to_embank": {
+        "what": "Replaced flat $20k floor with four-tier logic driven by Gemini earthwork_balance",
+        "tiers": {
+          "roughly_balanced": "Scale from balanced analogs (e.g. Woodman $12,500). No floor.",
+          "import_or_export_no_CY": "Floor $30,000. Weight toward highest analogs.",
+          "import_or_export_with_CY": "CY-bracketed: <500 CY → $28k-$32k; 500-1500 CY → $32k-$38k; >1500 CY → $38k+",
+          "unknown": "Floor $25,000. Weight toward import analogs."
+        },
+        "note": "Import and export assumed equal cost. Test 8 showed a new risk: Gemini assessed Killdeer as roughly_balanced but the actual line item is 'INCL IMPORT' at $38k. The EXC TO EMBANK assessment from Gemini needs skeptical review."
+      }
+    },
+
+    "test_7_line_item_accuracy": {
+      "excellent_within_5pct": ["4\" SEWER SERVICES", "FIRE HYDRANTS", "SINGLE DRYWELLS", "SWALES W/4\" TOPSOIL", "ROLLED CURB", "4\" SIDEWALKS", "6\" SIDEWALKS", "PED RAMPS", "UTILITY TRENCHING", "SIGNS & STRIPING", "CONSTRUCTION ENTRANCE", "IRRIGATION SLEEVES"],
+      "notable_misses": {
+        "1_IRR_SERVICE": "MISSING entirely (-$7,320). Fix: Gemini scope_notes didn't mention irrigation district. Rule is correct; Gemini extraction gap.",
+        "EXC_TO_EMBANK": "$25,000 vs actual $38,000 (-34%). Actual says INCL IMPORT. New tiered rule helps but only if Gemini detects import correctly.",
+        "CONNECT_TO_EXIST_SEWER": "3 EA vs 1 actual (+205%). Fixed in new rule.",
+        "CONNECT_TO_EXIST_WATER": "3 EA vs 2 actual (+69%). Fixed in new rule.",
+        "8_SEWER_MAIN": "790 LF vs 577 actual (+44%). Analog scaling overcounts; Killdeer sewer is unusually short for its ROW_SF.",
+        "CURB_AND_GUTTER": "666 LF vs 344 actual (+54%). Model doubled (both sides of collector); actual is one side or intersections only.",
+        "2_4_PAVING": "3,577 SY vs 3,056 actual (+20%). road_LF overcounting cascades into paving.",
+        "3_4_PAVING": "$29,304 vs $38,304 (-23%). SY overcounted, unit price way off ($24 vs $48/SY — no portfolio data for 3/4\" paving price).",
+        "6_CONCRETE_APPROACH": "$16,740 false positive. Fixed in new rule."
+      }
+    },
+
+    "gemini_instability_finding": {
+      "observation": "Gemini returned lot_count=26 on test 8 for the same PDF that returned 18 on tests 5, 6, and 7. This is non-deterministic extraction variance, not a prompt logic error.",
+      "impact": "lot_count cascades into sewer services, water services, irrigation sleeves, and driveway approaches — the highest-value per-lot items. A 8-lot error = ~$50k error.",
+      "mitigation_discussed": "User-verifiable input override (UI layer) is the right long-term fix. Before building that, investigate whether the lot_count prompt guidance can be tightened to reduce variance."
+    },
+
+    "architecture_discussion": {
+      "topic": "Hooking the pipeline to a conversational UI (e.g. LibreChat)",
+      "conclusion": "Fully feasible. Three paths: (1) --chat flag on CLI (~50 lines, afternoon of work), (2) save/resume session JSON for persistence, (3) MCP server for LibreChat integration. The core insight: Claude already has all context (extracted facts, knowledge pack, analogs, estimate) in the messages array — it just gets discarded after the one-shot run. Keeping it alive enables natural follow-up. Path 1 recommended as the first step.",
+      "complication": "LibreChat currently talks to Ollama, not Anthropic API. Post-estimate conversation through Ollama would lose the extended thinking context. MCP path required to keep it on Claude."
+    },
+
+    "key_decisions_made": [
+      "Killdeer is converged at test 7 (+2.2%) — do not run more Killdeer tests unless investigating a specific regression",
+      "Gemini lot_count instability is a known risk; flag for investigation or user-override before moving on",
+      "Co-occurrence rule is comprehensive — no new pairs needed beyond the existing scan rule",
+      "EXC TO EMBANK: the tiered earthwork_balance rule is the right architecture, but Gemini's field assessment needs validation on new jobs",
+      "Do not change the Gemini model string"
+    ]
+  },
+
+  "current_pipeline_state": {
+    "case_library": "phase1/case_library/ — 12 JSONs. Raghorn has no proposal.",
+    "knowledge_pack_main": "phase1/knowledge_pack/knowledge_pack.json — COMPLETE, 93 item pairs.",
+    "derive_patterns": "phase1/knowledge_pack/derive_patterns.py — accepts --holdout as folder path.",
+    "m3_infer": "phase1/inference/m3_infer.py — all test 8 changes applied. See changes_made above.",
+    "test_outputs": {
+      "test_7": "phase1/inference/output_test_7_KILDERE/ — +2.2%, best result",
+      "test_8": "phase1/inference/output_test_8_KILDERE/ — +7.9%, regression from lot_count=26 Gemini error"
+    }
+  },
+
+  "file_locations": {
+    "main_inference_script": "phase1/inference/m3_infer.py",
+    "derive_patterns_script": "phase1/knowledge_pack/derive_patterns.py",
+    "killdeer_case_library": "phase1/case_library/killdeer_meadows.json",
+    "killdeer_pdf": "data/25055-1_KILLDEER_MEADOWS/25016-2_KILDERE_MEADOWS.pdf",
+    "test_7_output": "phase1/inference/output_test_7_KILDERE/output_test_7_KILDERE.md",
+    "test_8_output": "phase1/inference/output_test_8_KILDERE/output_test_8_KILDERE.md",
+    "test_8_gemini_extraction": "phase1/inference/output_test_8_KILDERE/output_test_8_KILDERE.gemini_extraction.md"
+  },
+
+  "open_questions": [
+    "Can Gemini lot_count extraction be made more reliable? Or should lot_count be treated as a user-verified input with an override flag on the CLI?",
+    "Is Gemini's earthwork_balance assessment reliable enough to use for EXC TO EMBANK pricing? Test 8 called Killdeer 'roughly_balanced' but the actual has confirmed import. Need to validate on other jobs.",
+    "Does 1\" IRR SERVICE need a Gemini extraction field (e.g. irrigation_district_present: bool) to reliably trigger the rule? Scope_notes is too inconsistent.",
+    "3/4\" paving unit price has no portfolio data. Killdeer actual was $48/SY vs our $24 estimate. Need to flag this as high-uncertainty when a collector-road paving spec is detected.",
+    "Next test job: Boyds Landing and 6th Ave recommended as simpler jobs to validate generalizability."
+  ],
+
+  "prior_sessions_summary": {
+    "2026_6_5.2_co_occurrence_system_ready_test7_next": "Added co-occurrence item_pairs system to derive_patterns.py and system prompt. Added IRR SERVICE rule, DEMOLITION rule, EXC TO EMBANK floor, C&G+rolled coexistence fix. Rewrote Gemini road_LF prompt with 5-priority order. Both knowledge packs regenerated. Tests 5 (+19.8%) and 6 (+6.1%) on Killdeer.",
+    "2026_6_5.1_M3_line_item_tuning": "Tuned m3_infer.py through tests 1-4 on Woodman. Best result: +2.8%. Arc-loop sewer LF rule, analog exclusions_text, ballast thin-data rule, 6\" Concrete Approach.",
+    "2026_6_4.5_M3_built_tested": "Built m3_infer.py. First Woodman tests. Two-stage pipeline: Gemini extraction + Claude inference with extended thinking.",
+    "2026_6_4.4_M2_extended": "Added EDA text, 3 derivation rules, Sections 7-8 to knowledge pack. ROW_SF confirmed as best analog metric.",
+    "2026_6_4.3_M2_complete": "Qty sheet parsing extended. All 12 jobs rebuilt.",
+    "2026_6_4.2_M2_EDA": "Built derive_patterns.py and eda.ipynb (37-cell analysis). LS item inference framework.",
+    "2026_6_4.1_M1_complete": "Case library complete: 12 jobs, 11 with proposals.",
+    "2026_6_3.x": "Gemini vision pass. Hand-read road_LF from plan stationing. DWG geometry rejected.",
+    "2026_6_2.x": "PRD. Two-system architecture. Schema. Parse scripts."
+  }
+}

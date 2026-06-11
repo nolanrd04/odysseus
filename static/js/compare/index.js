@@ -33,6 +33,7 @@ import { showScoreboard } from './scoreboard.js';
 
 // ── External dependency imports ──
 import Storage from '../storage.js';
+import fileHandlerModule from '../fileHandler.js';
 import uiModule from '../ui.js';
 import sessionModule from '../sessions.js';
 import spinnerModule from '../spinner.js';
@@ -466,7 +467,13 @@ async function _buildCompareUI() {
 
   if (state._blindMode && n > 1) shufflePanePositions();
 
-  // 11. Move chat input bar to the bottom of the container
+  // 11. Move attach strip + chat input bar to the bottom of the container
+  const attachStrip = document.getElementById('attach-strip');
+  if (attachStrip) {
+    attachStrip.style.display = '';
+    if (attachStrip.dataset.cmpHidden) delete attachStrip.dataset.cmpHidden;
+    container.appendChild(attachStrip);
+  }
   const inputBar = document.querySelector('.chat-input-bar');
   if (inputBar) {
     inputBar.style.display = '';
@@ -485,7 +492,8 @@ async function _buildCompareUI() {
   _setupEvalPicker();
 
   // 12. Hide tool buttons that don't apply during compare
-  ['overflow-tts-btn', 'overflow-attach-btn', 'overflow-rag-btn', 'overflow-research-btn', 'overflow-doc-btn', 'rag-indicator-btn', 'web-toggle-btn', 'bash-toggle-btn', 'overflow-plus-btn'].forEach(id => {
+  // overflow-plus-btn and overflow-attach-btn stay visible so files can be attached
+  ['overflow-tts-btn', 'overflow-rag-btn', 'overflow-research-btn', 'overflow-doc-btn', 'rag-indicator-btn', 'web-toggle-btn', 'bash-toggle-btn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) { el.style.display = 'none'; el.style.pointerEvents = 'none'; }
   });
@@ -527,7 +535,7 @@ function _setSendBtn(mode) {
  * Handle submit from the main chat input while compare is active.
  * Called by app.js submit guard.
  */
-function handleCompareSubmit(e) {
+async function handleCompareSubmit(e) {
   // If streaming, act as stop button
   if (state._streaming) {
     stopAll();
@@ -535,7 +543,8 @@ function handleCompareSubmit(e) {
   }
   const input = document.getElementById('message');
   const message = input ? input.value.trim() : '';
-  if (!message) return;
+  const hasPendingFiles = fileHandlerModule.getPendingCount() > 0;
+  if (!message && !hasPendingFiles) return;
   input.value = '';
   // Reset textarea height
   input.style.height = '';
@@ -577,7 +586,24 @@ function handleCompareSubmit(e) {
       }, 120);
     } catch {}
   }
-  _executeCompare(message);
+
+  // Capture file display info before upload clears pending list
+  const pendingInfo = hasPendingFiles ? fileHandlerModule.getPendingInfo() : [];
+  let attachmentIds = [];
+  if (hasPendingFiles) {
+    try {
+      attachmentIds = await fileHandlerModule.uploadPending();
+    } catch (err) {
+      console.error('Compare: attachment upload failed:', err);
+      if (uiModule) uiModule.showError('File upload failed: ' + err.message);
+      return;
+    }
+    // uploadPending() shows a toast and returns [] on server error; bail if
+    // files were expected but none uploaded and there's no text to send either.
+    if (!attachmentIds.length && !message) return;
+  }
+
+  _executeCompare(message, attachmentIds, pendingInfo);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -588,7 +614,9 @@ function handleCompareSubmit(e) {
  * Send prompt to all panes, stream responses.
  * Works for both first and follow-up messages.
  */
-async function _executeCompare(message) {
+async function _executeCompare(message, attachmentIds, pendingInfo) {
+  attachmentIds = attachmentIds || [];
+  pendingInfo = pendingInfo || [];
   if (state._streaming) return;
   if (state._selectedModels.length < 1) return;
 
@@ -858,7 +886,20 @@ async function _executeCompare(message) {
       const userMsg = document.createElement('div');
       userMsg.className = 'msg msg-user';
       userMsg.innerHTML = '<div class="role">You</div><div class="body"></div>';
-      userMsg.querySelector('.body').textContent = message;
+      const _msgBody = userMsg.querySelector('.body');
+      if (message) _msgBody.textContent = message;
+      if (pendingInfo.length > 0) {
+        const _attachRow = document.createElement('div');
+        _attachRow.className = 'attach-cards';
+        _attachRow.style.marginTop = message ? '6px' : '0';
+        pendingInfo.forEach(att => {
+          const _chip = document.createElement('span');
+          _chip.className = 'attach-card';
+          _chip.textContent = att.name;
+          _attachRow.appendChild(_chip);
+        });
+        _msgBody.appendChild(_attachRow);
+      }
       hist.appendChild(userMsg);
 
       const aiMsg = document.createElement('div');
@@ -922,7 +963,7 @@ async function _executeCompare(message) {
     if (state._parallel) {
       // Run all panes at once
       await Promise.all(state._paneSessionIds.map((sid, i) =>
-        streamToPane(i, sid, message, aiElements[i], { searchContext: sharedSearchContext, timeout: runTimeout })
+        streamToPane(i, sid, message, aiElements[i], { searchContext: sharedSearchContext, timeout: runTimeout, attachmentIds })
       ));
     } else {
       // Run one pane at a time (sequential) — active pane full opacity, others dimmed
@@ -937,7 +978,7 @@ async function _executeCompare(message) {
           aiElements[i]._spinner.updateLabel('Processing...');
         }
 
-        await streamToPane(i, state._paneSessionIds[i], message, aiElements[i], { searchContext: sharedSearchContext, timeout: runTimeout });
+        await streamToPane(i, state._paneSessionIds[i], message, aiElements[i], { searchContext: sharedSearchContext, timeout: runTimeout, attachmentIds });
 
         // Swap opacity: dim current, brighten next
         if (allPanes[i]) allPanes[i].style.opacity = '0.35';

@@ -1,0 +1,165 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, decided, or built in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session": "2026_6_4.2",
+  "title": "M2 EDA complete — derive_patterns.py + eda.ipynb built; LS item inference framework established; M2 blocked on qty sheet parsing.",
+  "date": "2026-06-04",
+  "status": "M2 PARTIALLY COMPLETE. Proposal-backed $/unit patterns are done (derive_patterns.py). Qty-sheet-backed $/base_unit rates (LS earthwork) are blocked until qty sheets are more fully parsed. The EDA notebook is the analysis framework — run it to see all findings. Next work: enhance qty sheet parsing to extract TOTAL AREA ROW + structured quantities.",
+  "phase": "Phase 1 — Quick Job Budget Generation. M1 = case library (done). M2 = knowledge pack (partially done — see scope below). M3 = inference prototype (not started). See phase1/PRD_phase1_quick_job_budget_generation.md.",
+
+  "first_thing_next_session": "Open phase1/knowledge_pack/eda.ipynb and run all cells to orient on the current analysis state. Then read the M2 revised scope section below and the open questions before deciding whether to tackle qty sheet parsing or move forward with M3 using what we have.",
+
+  "what_was_done_this_session": {
+
+    "case_library_rebuild": "User had already run build_case_library.py before the session started. Forest Grove PH2 confirmed: 35 items, $914,612. All 12 case library JSONs are current.",
+
+    "derive_patterns_py_built": "Built phase1/knowledge_pack/derive_patterns.py — M2's offline pattern derivation script. Outputs: knowledge_pack.json (machine-readable for System B) and patterns_review.md (human-readable). Computes: $/unit distributions for measurable items (EA, LF, SF, SY), derivation rules with Pearson-r-style support, typical section defaults (stripping depth, ROW width), job-type signatures ($/lot, $/road_LF). Script runs clean, no errors.",
+
+    "derive_patterns_key_outputs": {
+      "unique_descriptions": 141,
+      "descriptions_N_gte_3": 35,
+      "measurable_N_gte_3": 28,
+      "derivation_rules": {
+        "sewer_services_from_lot_count": "7/9 jobs within 10% — HIGH confidence. Forest Grove PH2 (phase 2 job) and 6th Ave are exceptions.",
+        "water_services_from_lot_count": "7/8 jobs within 10% — HIGH confidence. Same exceptions.",
+        "drywells_from_lot_count": "0/10 jobs — BROKEN RULE. Drywells do not track lot_count (actual ratio 0.09–0.50 per job). They track road drainage, not lots.",
+        "sewer_manholes_from_sewer_LF": "9/10 jobs within 25% of qty = sewer_main_LF / 250 — MEDIUM confidence."
+      }
+    },
+
+    "eda_notebook_built": "Built phase1/knowledge_pack/generate_eda_notebook.py — a generator script that produces eda.ipynb. The notebook has 37 cells, all passing (0 errors). Covers 9 analysis sections. To regenerate: python phase1/knowledge_pack/generate_eda_notebook.py. To run the notebook: open eda.ipynb in JupyterLab and run all cells (or: jupyter nbconvert --to notebook --execute --output /tmp/out.ipynb phase1/knowledge_pack/eda.ipynb).",
+
+    "eda_notebook_sections": {
+      "1_job_overview": "Bar charts for total/lots/road_LF. Scatter: total vs lots (r~0.85) and total vs road_LF (r~0.78). Total is better correlated with lot_count than road_LF.",
+      "2_item_presence_matrix": "Heatmap of which items appear in which jobs. Items in ALL 11 jobs: UTILITY TRENCHING, CONSTRUCTION ENTRANCE, INLET PROTECTION.",
+      "3_unit_price_distributions": "Box plots by category + CV% table. Tightest distributions: ROLLED CURB (CV 13.7%), STRIP ROW TO STOCKPILE (CV 13.8%), 8\" WATER MAIN PVC (CV 17.9%). Most variable: SIGNS & STRIPING, SUBGRADE ROAD.",
+      "4_item_scale_pearson_r": "Heatmap of every measurable item qty vs lot_count/road_LF/ROW_SF. Strongest lot_count correlates: 4\" sewer services, 1\" water services, single drywells, fire hydrants. Strongest road_LF correlates: utility trenching, sewer main, water main, curb/gutter.",
+      "5_cross_item_correlations": "Clustered correlation matrix for EA+LF items N>=4. 85 pairs with |r|>=0.70. Top finding: 1\" water services ↔ 4\" sewer services r=1.000 (perfect). Also: 1\" water services ↔ irrigation sleeves r=0.999. These item clusters are the 'travel together' patterns Nolan flagged.",
+      "6_deep_dives": "Sewer vs water scatter (confirms r=1.0). Drywells 4-panel (vs lot_count, road_LF, scuppers, sewer_svc) — road_LF is the best correlate but still noisy. LF items vs road_LF: utility trenching r~0.97, sewer main r~0.95, water main r~0.92, curb r~0.85. Fire hydrants vs road_LF r~0.83.",
+      "7_price_trends": "Unit price vs date for N>=8 items. CONSTRUCTION ENTRANCE, UTILITY TRENCHING, INLET PROTECTION are very stable 2023–2026 (near-zero slope). No strong inflation signal in measurable items — but dataset is only 3 years.",
+      "8_job_type_signatures": "$/lot: min=$11,726, P25=$31,072, median=$35,873, P75=$47,914, max=$109,765. $/road_LF: see patterns_review.md. Slight negative correlation between lot_count and $/lot — possible economies of scale but noisy with only 10 jobs.",
+      "9_cost_contribution": "Added mid-session after user asked about TOTAL AREA ROW. Category-level stacked bar (ROADS_PAVING 15–59%, EARTHWORK 5–20%, WATER 8–12%, CONCRETE_FLATWORK 5–12%). True Pareto (no N filter) showing earthwork LS items that were invisible in the N>=3 table. Bellwether analysis: ext_price Pearson r vs job total."
+    },
+
+    "ls_item_analysis_key_insight": {
+      "trigger": "User noticed TOTAL AREA ROW was missing from the top-30 cost contribution table. This item lives in qty sheets, not proposals. Led to a deep architectural discussion about LS item inference.",
+      "finding": "Many earthwork items are '1 LS $X' in proposals with no exposed quantity. The underlying quantity (ROW_SF × stripping_depth → CY) lives in the qty sheets. Back-calculating $/CY reveals a very tight rate across 5 jobs.",
+      "stripping_rate_table": {
+        "Killdeer_Meadows":    {"ROW_SF": 75869,  "depth_in": 18, "CY": 4215,  "cost": 11000, "per_CY": 2.61},
+        "Lone_Fir":            {"ROW_SF": 134558, "depth_in": 18, "CY": 7475,  "cost": 22000, "per_CY": 2.94},
+        "Settlement_Mountain": {"ROW_SF": 312291, "depth_in": 18, "CY": 17350, "cost": 38200, "per_CY": 2.20},
+        "Woodman":             {"ROW_SF": 81757,  "depth_in": 16, "CY": 4037,  "cost": 9400,  "per_CY": 2.33},
+        "Painted_Rock":        {"ROW_SF": 84558,  "depth_in": 18, "CY": 4698,  "cost": 18000, "per_CY": 3.83}
+      },
+      "conclusion": "Onsite stockpile rate is $2.20–$3.83/CY. Haul-off adds ~3–4x (Solara: $9.24/CY). An LLM with ROW_SF=134,558 and depth=18\" computes 7,475 CY × $2.50–3.00 = $18.6k–$22.4k vs actual $22,000. Bullseye.",
+      "haul_off_flag": "Haul-off vs onsite stockpile is readable from proposal text. Flag it and multiply rate by 3–4x."
+    },
+
+    "ls_item_inference_framework": {
+      "inferable_formula": [
+        "ROW strip (onsite): ROW_SF × depth_ft / 27 × $2.50–3.50/CY",
+        "ROW strip (haul-off): same formula × 3–4x multiplier",
+        "Mobilization: 3–5% of construction subtotal"
+      ],
+      "partially_inferable": [
+        "Exc to Embank: depends on cut/fill volumes from grading plan. Without grading plan, use analog earthwork % (5–15% of total). Wide variance.",
+        "Subgrade Road: risk/contingency item. Range $3k–$21k with NO correlation to any scale metric. Use analog retrieval."
+      ],
+      "not_inferable": [
+        "Clear Trees / Demo Buildings: entirely site-specific",
+        "Rock allowances, contaminated soil items"
+      ],
+      "architectural_implication": "Analog retrieval handles non-inferable LS items better than $/unit formulas. Find the 2–3 closest historical jobs by lot_count + road_LF, use their LS earthwork costs adjusted for scale. Neither analog retrieval alone nor $/unit alone is sufficient — use both."
+    },
+
+    "market_context_established": {
+      "market": "North Idaho / Kootenai County (Hayden, CDA, Post Falls area)",
+      "time_window": "2023-04 to 2026-05",
+      "meaning_of_normal": "Median rates from this specific market in this period. Do NOT apply directly to western WA, Spokane, Ada/Canyon County ID without adjustment.",
+      "fuel_sensitive_items": ["strip topsoil", "exc to embank", "haul-off items", "mobilization", "any BORROW/IMPORT item"],
+      "knowledge_pack_requirement": "Every rate entry should carry market and date_range metadata. Top-level caveat: rates are market-specific."
+    },
+
+    "m2_scope_revised": {
+      "type_1_proposal_backed": "$/unit distributions for measurable items. DONE in derive_patterns.py and knowledge_pack.json.",
+      "type_2_qty_sheet_backed": "$/base_unit for LS earthwork items (stripping $/CY, etc.). BLOCKED on qty sheet parsing. Currently have partial data (ROW_SF, stripping depth) for ~5–6 jobs from scale_metrics. Need it for all 12.",
+      "blocker": "Qty sheets (.xlsx files) are not fully parsed into the case library. The TOTAL AREA ROW, stripping depth, paving SY, ballast SY need to be extracted consistently across all jobs. parse_qty_sheet.py exists but most jobs show has_pricing=null and parsed=null.",
+      "path_forward": "Enhance parse_qty_sheet.py (or write a dedicated extractor) to pull key quantities from all 12 qty sheets. Add them as structured fields to the case library. Then: add eda.ipynb cells to compute $/CY by job and add Type 2 rates to knowledge_pack.json."
+    },
+
+    "memories_saved": [
+      "project_m2_revised_scope.md — two rate classes, current status, blocker",
+      "project_ls_item_inference.md — LS item inference framework with $/CY rates",
+      "project_knowledge_pack_market_context.md — North Idaho market, time calibration",
+      "project_qty_proposal_statistical_pattern_mining.md — UPDATED to reflect what was actually built"
+    ]
+  },
+
+  "current_pipeline_state": {
+    "case_library":            "phase1/case_library/ — 12 JSONs, all current. Forest Grove PH2 has 35 items, $914,612. Raghorn Estates has no proposal.",
+    "derive_patterns":         "phase1/knowledge_pack/derive_patterns.py — runs clean. Outputs knowledge_pack.json + patterns_review.md. Proposal-backed $/unit rates only. No Type 2 (qty-backed) rates yet.",
+    "knowledge_pack_json":     "phase1/knowledge_pack/knowledge_pack.json — proposal-backed rates only. Schema has unit_price_distributions, derivation_rules, typical_section_defaults, job_type_signatures. Does NOT yet have qty-backed LS rates or market/time metadata.",
+    "patterns_review_md":      "phase1/knowledge_pack/patterns_review.md — human-readable summary. Current and accurate for proposal-backed content.",
+    "eda_notebook_generator":  "phase1/knowledge_pack/generate_eda_notebook.py — run to regenerate eda.ipynb from scratch (30 base cells). Do not rely on this for the cost-contribution section — those 7 cells were appended directly to eda.ipynb, not added back to the generator.",
+    "eda_notebook":            "phase1/knowledge_pack/eda.ipynb — 37 cells, all passing. Sections 1–8 come from generator; Section 9 (cost contribution) was appended directly. Run in JupyterLab or via nbconvert.",
+    "qty_sheets":              "data/*/qty_sheets/ — Excel files exist for all 12 jobs. parse_qty_sheet.py exists but most jobs have parsed=null, has_pricing=null in case library. Key quantities NOT yet extracted: TOTAL AREA ROW, stripping depth, paving SY, ballast SY.",
+    "parse_qty_sheet":         "phase1/ingest/parse_qty_sheet.py — exists but incomplete. This is the main blocker for Type 2 rates."
+  },
+
+  "next_steps": [
+    "1. READ THE EDA NOTEBOOK: Open eda.ipynb, run all cells, orient on the findings before doing anything else.",
+    "2. ASSESS QTY SHEET STRUCTURE: Look at 2–3 of the qty sheet .xlsx files directly (data/*/qty_sheets/) to understand their layout. Determine whether parse_qty_sheet.py can be extended or whether a targeted extractor is needed.",
+    "3. EXTRACT KEY QTY SHEET QUANTITIES: For each job, reliably extract: TOTAL AREA ROW (SF), stripping depth (in), paving area (SY), ballast/base rock area (SY), and any other quantities that map to LS proposal items. Add these as structured fields to the case library JSONs.",
+    "4. COMPUTE TYPE 2 RATES: Once qty data is in the case library, add EDA notebook cells and derive_patterns.py logic to compute $/CY for ROW stripping and other LS earthwork items. Compare back-calculated rates across all jobs.",
+    "5. UPDATE KNOWLEDGE PACK: Add Type 2 rates to knowledge_pack.json with market/time metadata on every rate entry. Add a top-level market_context block.",
+    "6. REVIEW WITH NOLAN: patterns_review.md + knowledge_pack.json need a human sanity check before moving to M3.",
+    "7. M3 (future): Inference prototype — plan sheet → Gemini extract → analog retrieval → gap-fill → cost → output."
+  ],
+
+  "open_questions": [
+    "Qty sheet structure: are all 12 qty sheets in a consistent enough Excel layout that one parser can handle them, or are they each unique? This determines whether enhance-parse_qty_sheet.py is feasible vs. job-specific manual extraction.",
+    "Forest Grove PH2 has zero earthwork in its proposal ($0 earthwork category). Is this because it's a Phase 2 job where the ROW was already stripped in Phase 1, or is the earthwork scoped differently? Affects how to interpret its total and $/lot.",
+    "6th Ave and Boyds Landing have no confirmed ROW_SF or stripping depth. Do their qty sheets have TOTAL AREA ROW? Needed to include them in Type 2 rate calculations.",
+    "Subgrade Road LS: ranges $3k–$21k with no correlation to scale metrics. Is this genuinely a risk/contingency allowance, or does Terra Underground have an internal calculation method for it? If the latter, it might be inferable with more context.",
+    "The drywells rule (0/10 on lot_count) needs a replacement rule. EDA shows moderate road_LF correlation. Is there a design standard for drywell spacing (e.g., 1 per X LF of road) that Nolan can confirm?",
+    "Knowledge pack market metadata: should the knowledge pack explicitly list which jobs are confirmed Hayden/Kootenai County vs. uncertain location? 6th Ave and Boyds Landing location unknown — does Nolan know where these are?"
+  ],
+
+  "important_architectural_decisions_made_this_session": {
+    "two_rate_class_model": "The knowledge pack must contain two distinct rate classes: (1) proposal-backed $/unit for measurable items, and (2) qty-sheet-backed $/base_unit for LS items. Without both, LS earthwork items are either wrong or missing from estimates.",
+    "analog_retrieval_is_primary_for_unknowns": "Non-inferable LS items (clear trees, rock allowances, site-specific work) should be handled via analog retrieval, not formula. The formula approach only works for items with a measurable quantity driver.",
+    "market_specificity": "The knowledge pack must be labeled as North Idaho / 2023–2026 baseline. Rates should never be presented as universal. Fuel-sensitive items flagged as most volatile.",
+    "eda_notebook_is_exploratory_not_final": "With 11 jobs, all statistical findings are directional. Patterns will tighten as job count grows toward ~50. The notebook should be re-run as new jobs are added to the case library."
+  },
+
+  "prior_sessions_summary": {
+    "2026_6_4.1_M1_complete_12_jobs_M2_ready": "Final M1 session. Renamed road_LF_ft→road_LF, ran Gemini vision for 4 new jobs (Raghorn, 6th Ave, Boyds Landing, Forest Grove PH2). Forest Grove PH2 had markup PDF Gemini rejected — hand-read lot_count=78. Added PDF proposal parser for Forest Grove PH2 (35 items, $914k). build_case_library.py updated to handle PDF proposals. Case library complete: 12 jobs, 11 with proposals. M2 declared ready.",
+    "2026_6_3.2_M1_vision_pass_complete": "Built gemini_vision_pass.py and ran it for all 8 original jobs. Added 4 new jobs to manifest with nulls. Fixed data/ folder paths.",
+    "2026_6_3.1_M1_road_LF_complete": "All 8 road_LF values hand-read from plan stationing. Build bug fixed. Scale metric model clarified: cost = sum of independent components.",
+    "2026_6_2.7_M1_dwg_extractions_done": "Extracted all 8 DWGs. DWG geometry over-counts road_LF (3.5x on Lone Fir). road_LF demoted to hand-read from stationing. Gap audit: qty sheet is the complete spine.",
+    "2026_6_2.5_M1_case_library_ingest": "Defined case-library schema. Built M1 ingest: parse_proposal.py, parse_qty_sheet.py, normalize_dwg.py, build_case_library.py. Canonical total = total_reconciled.",
+    "2026_6_2.4_phase1_kickoff": "Wrote the PRD. Two-system architecture (A = offline knowledge build; B = runtime inference). Output = line items + total + confidence band + provenance; target 10–15% of historical total.",
+    "phase0_arc_and_bridge": "Phase 0 = plan files → HeavyBid qty sheet via DWG extractor + Claude qty-sheet generator, validated on Woodman. Phase 0's DWG-as-spine premise does NOT carry to Phase 1 — past jobs have finished proposals, so Phase 1's spine is proposals + qty sheets."
+  }
+}

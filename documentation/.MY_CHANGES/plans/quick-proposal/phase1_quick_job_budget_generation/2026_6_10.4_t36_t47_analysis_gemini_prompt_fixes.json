@@ -1,0 +1,257 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, built, or decided in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session_context": {
+    "date": "2026-06-10",
+    "session_number": "2026_6_10.4",
+    "focus": "Analyzed all T36–T47 test results job-by-job. Extracted prompts from m3_infer.py to separate files. Made 4 Gemini prompt fixes based on findings. Identified session 10.3's sidewalk_sides change as the primary regression driver. Also analyzed T50 (Expo) and T55 (Solara) from the new test wave.",
+    "immediate_next_action": "Go through each job one at a time and assess whether the dollar gap is truly detrimental or simply requires estimator verification. The framing: a large % gap is not necessarily a product failure if the reasons are well-explained and an estimator can quickly close the gap. Confirm this is true across all jobs before deciding what to fix next."
+  },
+
+  "this_session": {
+    "summary": "Two parts. First: extracted all three inline prompts from phase1/inference/m3_infer.py into phase1/inference/prompts/ (gemini_prompt_pdf.txt, gemini_prompt_image.txt, system_prompt.txt) and updated the script to load them from files. Second: analyzed T36–T47 test outputs end-to-end — read every Gemini extraction JSON, read case library actuals, and diagnosed root causes for each job. The dominant regression driver was identified as the session 10.3 sidewalk_sides change: Gemini now returns both_sides on 7/12 jobs, doubling sidewalk SF on large jobs and adding $50–$145K in error per job. Four fixes were applied to gemini_prompt_pdf.txt.",
+
+    "prompt_extraction": {
+      "what_changed": "All three prompts moved from inline strings in m3_infer.py to individual .txt files under phase1/inference/prompts/",
+      "files_created": [
+        "phase1/inference/prompts/gemini_prompt_pdf.txt",
+        "phase1/inference/prompts/gemini_prompt_image.txt",
+        "phase1/inference/prompts/system_prompt.txt"
+      ],
+      "m3_infer_changes": "Lines 147–155 and ~515 now load prompts via Path.read_text(). m3_batch.py unchanged — it imports from m3_infer so gets file-loaded versions automatically."
+    },
+
+    "t36_t47_accuracy": {
+      "results": [
+        {"test": "T36", "job": "Settlement Mountain",  "actual": 2123246,  "estimated": 2226927,  "error_pct": "+4.9%",   "status": "GOOD"},
+        {"test": "T37", "job": "Killdeer Meadows",     "actual": 625952,   "estimated": 1019221,  "error_pct": "+62.8%",  "status": "FAIL"},
+        {"test": "T38", "job": "Expo Private Drive",   "actual": 372993,   "estimated": 294172,   "error_pct": "-21.1%",  "status": "FAIL"},
+        {"test": "T39", "job": "Painted Rock",         "actual": 776407,   "estimated": 888959,   "error_pct": "+14.5%",  "status": "WARN"},
+        {"test": "T40", "job": "Lone Fir Ranch",       "actual": 419312,   "estimated": 451515,   "error_pct": "+7.7%",   "status": "GOOD"},
+        {"test": "T41", "job": "Woodman",              "actual": 612677,   "estimated": 728673,   "error_pct": "+18.9%",  "status": "WARN"},
+        {"test": "T42", "job": "Mountainside",         "actual": 439060,   "estimated": 315299,   "error_pct": "-28.2%",  "status": "FAIL"},
+        {"test": "T43", "job": "Solara PH1",           "actual": 2388013,  "estimated": 1591673,  "error_pct": "-33.3%",  "status": "FAIL"},
+        {"test": "T44", "job": "Raghorn Estates",      "actual": 934538,   "estimated": 1484000,  "error_pct": "+58.8%",  "status": "FAIL"},
+        {"test": "T45", "job": "6th Ave",              "actual": 460609,   "estimated": 405609,   "error_pct": "-11.9%",  "status": "WARN"},
+        {"test": "T46", "job": "Boyds Landing",        "actual": 570259,   "estimated": 723127,   "error_pct": "+26.8%",  "status": "FAIL"},
+        {"test": "T47", "job": "Forest Grove PH2",     "actual": 914612,   "estimated": 1835000,  "error_pct": "+100.6%", "status": "FAIL"}
+      ],
+      "jobs_within_15pct": ["T36", "T40"],
+      "jobs_within_30pct": ["T36", "T39", "T40", "T41", "T45"],
+      "note": "Significant regression from T28–T35 wave (7/8 within ±10%). Primary driver was sidewalk_sides regression from session 10.3."
+    },
+
+    "regression_identified": {
+      "source": "Session 10.3 sidewalk_sides fix",
+      "before_10.3": "Sidewalk defaulted to road_LF × 5 (one side always). Conservative and mostly correct.",
+      "after_10.3": "Sidewalk driven by Gemini sidewalk_sides field. Gemini returns both_sides on 7/12 jobs, including Forest Grove where the confidence note explicitly states the typical section does not show a sidewalk slab — inference was from ramp details instead.",
+      "dollar_impact": "On a 3,642 LF road: both_sides = 36,420 SF vs one_side = 18,210 SF. At $4/SF = $72K difference per job. Multiplied across 7 jobs accounts for a large fraction of the observed regression.",
+      "fix_applied": "Restricted sidewalk_sides source to typical section only. All other inference paths (ramp details, ramp counts, plan-view lines, scope notes) explicitly blocked. Ties go to one_side."
+    },
+
+    "gemini_prompt_fixes_applied": [
+      {
+        "field": "lot_grading_in_scope",
+        "issue": "False positives on 5+ jobs (T37, T41, T44, T46, T47). Gemini was triggering on road profile grade changes, pad elevation callouts, demolition scope, and earthwork notes — none of which indicate lot grading.",
+        "fix": "Rewrote guidance with explicit false-trigger list. Requires a dedicated grading sheet showing contours into lot interiors, OR plan notes using exact lot-grading keywords. Added caution that a false positive adds $70,000–$150,000. Reinforced null as the default.",
+        "file": "phase1/inference/prompts/gemini_prompt_pdf.txt"
+      },
+      {
+        "field": "sidewalk_sides",
+        "issue": "both_sides returned on 7/12 jobs based on ramp details and other weak inferences rather than the typical section.",
+        "fix": "Added SOURCE RULE: typical section is the only valid source. Explicitly blocked: ped ramp details, ramp quantities, plan-view sidewalk lines, scope notes. Added tie-breaking rule: when ambiguous between one_side and both_sides, return one_side.",
+        "file": "phase1/inference/prompts/gemini_prompt_pdf.txt"
+      },
+      {
+        "field": "earthwork_balance",
+        "issue": "T43 Solara returned export_needed when actual project required import/borrow fill. Profiles showed proposed grade above existing (= fill needed) but Gemini called it export.",
+        "fix": "Added DIRECTION RULE block before disambiguation notes: proposed grade above existing = import_needed; proposed grade below = export_needed. Added lot grading caveat: when lot_grading_in_scope=true, road profile cuts alone don't represent full balance — default to unknown unless complete cut/fill table present.",
+        "file": "phase1/inference/prompts/gemini_prompt_pdf.txt"
+      },
+      {
+        "field": "road_LF_hint",
+        "issue": "T39 Painted Rock: Gemini counted full length of Midway Ave and McGuire Rd (existing roads being improved) rather than improvement zone only, adding ~78 LF.",
+        "fix": "Added EXISTING ROAD IMPROVEMENTS paragraph at top of road_LF_hint guidance: for improvement work on existing roads, count only the improvement zone using BEGIN/END CONSTRUCTION markers. If improvement extent unclear, set road_LF_confidence to low for that segment.",
+        "file": "phase1/inference/prompts/gemini_prompt_pdf.txt"
+      }
+    ],
+
+    "held_pending_decision": [
+      {
+        "field": "large_diameter_water_main_present",
+        "issue": "False positives on T36, T44 (fired incorrectly); false negative on T43 Solara (12\" water main present but called false). Proposed fix: require explicit pipe diameter label ≥10\" on utility plan — wide ROW, fire flow notes, and connection to existing large main do not qualify.",
+        "status": "User undecided — hold for next session"
+      }
+    ],
+
+    "per_job_root_causes": {
+      "T36_Settlement_MT": "Good result (+4.9%). Lot count undercount (-6) and road_LF undercount (-4%) offset large_diameter_water false positive. No lot_grading false positive saved it.",
+      "T37_Killdeer_Meadows": "Lot_grading false positive (+$110K), lot_count 31 vs 18 (+$59K), utility coverage hallucination 100% vs actual 32%/53% (+$86K), both_sides sidewalk (+$55K). Previously analyzed in full.",
+      "T38_Expo": "Under-estimate. Blow-off assemblies missing, wrong paving class (residential KP on commercial job), sewer coverage 50% vs ~95%, water unit price wrong, FH count 1 vs 2, ped ramps 2 vs 6. Previously analyzed in full.",
+      "T39_Painted_Rock": "Moderate over (+14.5%). Lot count correct. Road_LF slightly high from full Midway/McGuire length measurement. No lot_grading false positive. Earthwork import adds cost. Multi-use path not modeled.",
+      "T40_Lone_Fir": "Good result (+7.7%). Simplest job in set — rural road, no utilities. Road_LF overcount (+9.4%) explains most of the $32K error.",
+      "T41_Woodman": "Moderate over (+18.9%). ROW=88ft inflates all area-based items (ROW_SF = 88,000 vs likely 50×928=46,400). Lot_grading false positive adds ~$50-80K. Ballast=null (missing separate ballast line item).",
+      "T42_Mountainside": "Significant under (-28.2%). ROW=33ft drives area-based costs very low. Actual $439K for 4 lots at $646/LF implies terrain-specific earthwork not captured by standard $/LF rates. Lot_grading=false is correct but the model still misses actual site complexity.",
+      "T43_Solara": "Large under (-33.3%). Three Gemini misses compounded: (1) earthwork=export_needed vs actual import/borrow — import fill is 2-3x more expensive; (2) large_diameter_water=false vs actual 12\" water main; (3) large_diameter_sewer=false vs actual 15\" sewer main. All three now addressable with fixed prompts.",
+      "T44_Raghorn": "Large over (+58.8%). Lot_grading false positive + large_diameter_water false positive (adds premium water main on top of standard 8\" main). Lot count +4 extra. Storm basins possibly overcounted.",
+      "T45_6th_Ave": "Moderate under (-11.9%). Road_LF severely short (700 vs 947 LF, -26%) because Gemini measured only profile grade-change zone on 6th Ave rather than full improvement length. This should improve with road_LF fix. Job is in Spokane Valley WA — KP is North Idaho rates. The undercount and market mismatch partially offset.",
+      "T46_Boyds": "Moderate over (+26.8%). Lot count and road_LF both accurate. Lot_grading false positive is primary driver (+$70-100K). Strip_haul_off=true is partially justified (demo scope) but may be over-costed.",
+      "T47_Forest_Grove_PH2": "Worst result (+100.6%). Lot_grading false positive on 3,642 LF job. Both_sides sidewalk on 3,642 LF = 36,420 SF (now fixed). Job is in Spokane WA — market/rate mismatch. Actual case library shows HAMMER ROCK BUDGET (hard rock excavation) — not a KP concept. Manifest lot_count=78 likely reflects total plat across all phases, not Phase 2 scope — Gemini's 24-lot count may be correct for Phase 2."
+    },
+
+    "manifest_correction_needed": {
+      "job": "Forest Grove PH2",
+      "issue": "jobs_manifest.json shows lot_count=78. This appears to be the total plat lot count across all development phases. Gemini extracted 24 lots for Phase 2 specifically. The system_prompt already has a Phase 2 Warning for FG PH2 (lot_count=78 but only 19 sewer services), but the manifest value itself may be misleading if used for other calibration purposes.",
+      "action": "Nolan to verify: is 78 the total long plat count or Phase 2 only?"
+    }
+  },
+
+  "current_pipeline_state": {
+    "phase1/inference/prompts/gemini_prompt_pdf.txt": {
+      "status": "MODIFIED THIS SESSION — 4 fixes applied. Ready for test run.",
+      "changes": [
+        "lot_grading_in_scope: tightened criteria, explicit false-trigger list, null default reinforced",
+        "sidewalk_sides: restricted to typical section only, all other inference paths blocked",
+        "earthwork_balance: added DIRECTION RULE block, lot grading caveat",
+        "road_LF_hint: added EXISTING ROAD IMPROVEMENTS paragraph"
+      ]
+    },
+    "phase1/inference/prompts/gemini_prompt_image.txt": {"status": "CREATED THIS SESSION — extracted from m3_infer.py. NOT updated with this session's fixes (image prompt was not patched this session — apply same lot_grading, sidewalk_sides, earthwork, road_LF fixes if image-based tests are run)."},
+    "phase1/inference/prompts/system_prompt.txt":       {"status": "CREATED THIS SESSION — extracted from m3_infer.py. No changes this session."},
+    "phase1/inference/m3_infer.py":                    {"status": "MODIFIED THIS SESSION — prompts now loaded from files. Logic unchanged."},
+    "phase1/inference/m3_batch.py":                    {"status": "UNCHANGED — imports prompts from m3_infer, gets file-loaded versions automatically."},
+    "phase1/ingest/jobs_manifest.json":                {"status": "CURRENT — all 12 jobs. Forest Grove PH2 lot_count=78 may need correction (see manifest_correction_needed)."},
+    "phase1/case_library/*.json":                      {"status": "CURRENT — rebuilt 2026-06-09. Note: line item quantities are null in all case library entries — only totals and descriptions are populated."},
+    "phase1/knowledge_pack/knowledge_pack.json":       {"status": "CURRENT — all 12 jobs."},
+    "phase1/inference/m3_infer_fable_experiment.py":   {"status": "EXISTS — NOT updated with any session 10.3 or 10.4 changes. Experimental only."},
+    "data/10001-1_MABREY_ESTATES/newest/job_context.txt": {"status": "EXISTS but INCOMPLETE — missing MEASUREMENT CORRECTION block from session 9.3"},
+    "phase1/inference/output_10001-1_MABREY_ESTATES/":    {"status": "STALE — re-run still pending"}
+  },
+
+  "new_test_wave_analysis": {
+    "note": "Tests T48+ use gemini-3.5-flash (not gemini-2.5-pro). Extraction quality varies — some fields improve, others regress vs prior wave.",
+    "T50_expo": {
+      "actual": 372993,
+      "estimated": 289092,
+      "error_pct": "-22.5%",
+      "gemini_improvements_vs_t38": ["lot_count 0→4 ✅", "FH 1→2 ✅", "sewer coverage 50%→100% ✅"],
+      "root_causes": [
+        "Blow-off assemblies (4 EA) completely missing from estimate — no rule in system_prompt triggers them",
+        "Ped ramps (6 EA) completely missing — no rule triggers from curb_type + sidewalk_sides",
+        "Water main unit price KP median ($55.25/LF) too low vs actual (~$100+/LF for this job type)",
+        "Strip haul-off: null defaulted to stockpile but actual line item is INCL HAUL OFF (~$9K delta)"
+      ],
+      "detrimental": "Partially — missing line items (blow-offs, ped ramps) are Stage 2 rule gaps fixable by adding derivation rules. Water main pricing gap requires KP calibration. Estimator can add these quickly once flagged."
+    },
+    "T55_solara": {
+      "actual": 2388013,
+      "estimated": 1449345,
+      "error_pct": "-39.3%",
+      "root_causes": [
+        "Lot grading excluded (lot_grading_in_scope=null per new tighter rule) — but Solara's case library CONFIRMS lot grading IS in scope (STRIP LOTS, LOT EXC TO EMBANK, PLACE TOPSOIL on lots). New null rule is correct for false-positive jobs but excludes a real scope item here.",
+        "Earthwork: road corridor is export (10,000 CY net, explicit table) but lot areas require import borrow fill — both conditions are true simultaneously. Estimate only prices the road export, missing the lot borrow/fill cost.",
+        "Dual utility mains: actual has 15\" sewer + 8\" sewer AND 12\" water + 8\" water running separate segments. Estimate prices the large-diameter mains but may not correctly price the full dual-main configuration.",
+        "Asphalt pathway paving (separate pay item along Meyer/Railway), 60\" drop manhole, ped ramps, blow-offs, mailbox pads — all missing."
+      ],
+      "detrimental": "No — gap is explainable and verifiable. Lot grading is a known scope item Brian can confirm in 30 seconds. Dual utility mains are flagged by large_diameter fields. Estimator verification closes most of the gap quickly. This is exactly the use case: system surfaces the base estimate + flags, Brian adds lot grading + confirms dual main scope."
+    }
+  },
+
+  "per_job_detrimental_assessment_next_steps": {
+    "goal": "Go through each job one at a time and classify each gap as (A) detrimental — system gave wrong or misleading output that would cause a bad bid, or (B) verifiable — gap is explained, flagged, and an estimator can close it quickly.",
+    "framing": "A large % error is not automatically detrimental. Solara at -39% is non-detrimental if the reasons are transparent and the estimator can adjust. A small % error CAN be detrimental if it comes from a hidden offset of large over and under items that mask each other.",
+    "jobs_to_assess": ["T36 Settlement MT", "T37 Killdeer", "T38/T50 Expo", "T39 Painted Rock", "T40 Lone Fir", "T41 Woodman", "T42 Mountainside", "T43/T55 Solara", "T44 Raghorn", "T45 6th Ave", "T46 Boyds", "T47 Forest Grove PH2"],
+    "status": "NOT STARTED — this is the immediate next task"
+  },
+
+  "open_questions": [
+    {
+      "question": "large_diameter_water_main_present: tighten or not?",
+      "context": "False positives on T36, T44. False negative on T43 (12\" main present, called false). Proposed fix: require explicit diameter label ≥10\" on utility plan pipe symbol or pipe schedule. Wide ROW, fire flow notes, and connections to existing large mains do not qualify. Nolan deferred decision."
+    },
+    {
+      "question": "gemini_prompt_image.txt not patched with this session's fixes.",
+      "context": "The 4 Gemini prompt fixes (lot_grading, sidewalk_sides, earthwork, road_LF) were applied to gemini_prompt_pdf.txt only. If any tests use image-based extraction, apply the same changes to gemini_prompt_image.txt."
+    },
+    {
+      "question": "Forest Grove PH2 manifest lot_count: total plat vs Phase 2 only?",
+      "context": "Manifest shows 78. Gemini extracted 24 for Phase 2. The system_prompt Phase 2 Warning already notes this discrepancy (78 lots, only 19 sewer services). Nolan to verify which count is correct for Phase 2."
+    },
+    {
+      "question": "After new test results: is large_diameter miscalibration still a dominant error?",
+      "context": "T43 Solara: false negative (12\" main present, model missed it). T44 Raghorn: false positive (no 12\" main, model added one). Net effect: one job over, one job under. Worth monitoring whether fixing this moves the needle after other fixes land."
+    },
+    {
+      "question": "Rolled curb LF rule references item_scaling (does not exist in KP).",
+      "context": "system_prompt.txt line: item_scaling[\"ROLLED CURB\"].formula (currently road_LF × 1.43). Should read from qty_scale_correlations. Low priority — hardcoded 1.43 is close to KP median."
+    },
+    {
+      "question": "Irrigation sleeves rule also references item_scaling.",
+      "context": "system_prompt.txt: item_scaling[\"IRRIGATION SLEEVES\"].formula (lot_count × 13.0). Same fix as rolled curb — read from KP dynamically."
+    },
+    {
+      "question": "Street lighting false positive: permanently exclude?",
+      "context": "Settlement Mt included $50K for LED street lighting not in Terra scope. No analog includes it. One-line exclusion rule in system_prompt would prevent this."
+    },
+    {
+      "question": "Sidewalk pricing pollution from Mountainside small-qty outlier.",
+      "context": "Mountainside had $14.25/SF for only 573 SF — inflates the recent-2 mean used for sidewalk pricing. Could add a quantity floor to the recent-2 mean calculation. Painted Rock overestimated by $29K from this alone."
+    },
+    {
+      "question": "Mabrey real test still pending from session 9.3.",
+      "context": "data/10001-1_MABREY_ESTATES/newest/job_context.txt needs MEASUREMENT CORRECTION block. Then re-run m3_infer.py --job data/10001-1_MABREY_ESTATES."
+    },
+    {
+      "question": "WA state market mismatch: T38 Expo, T45 6th Ave, T47 Forest Grove are all Washington State jobs. KP is North Idaho / Kootenai County rates.",
+      "context": "Rate differences between Spokane WA and North Idaho may contribute to systematic errors on WA jobs. No fix planned yet — worth tracking whether WA jobs consistently skew in one direction after prompt fixes."
+    },
+    {
+      "question": "Blow-off assemblies and ped ramps: no derivation rules exist in system_prompt.txt for either item.",
+      "context": "T50 Expo confirmed both missing. Blow-offs are required at every dead-end water main terminus — rule could be: include N EA where N = (road_connection_count subtracted from water stub ends). Ped ramps are required at every intersection corner with C&G + sidewalk — rule could be: 4 EA per intersection × intersection_count. These are ~$15-30K combined on a typical job."
+    }
+  ],
+
+  "prior_sessions_summary": {
+    "sessions_2026_6_1_through_6_4.5": "Built Phase 1 pipeline: Gemini PDF extraction, case library, knowledge pack, Claude inference system prompt. 12 jobs, 11 with proposals.",
+    "sessions_2026_6_5.1_through_5.6": "Tuned m3_infer.py line items. Built co-occurrence system. Architecture rewrite. KP regenerated.",
+    "session_2026_6_8.1": "Multi-job validation T15–T19. All 6 jobs failed ±10%. 9 improvements implemented.",
+    "session_2026_6_8.2": "Full data directory restructure. newest/ and legacy/ with 5 standard subfolders.",
+    "session_2026_6_9.1": "KB audit. Fixed manifest, rebuilt case library and all 12 KPs.",
+    "session_2026_6_9.2": "Designed job_context.txt sidecar architecture. Implemented --job flag.",
+    "session_2026_6_9.3": "Diagnosed Gemini extraction failures on Mabrey. Major prompt improvements.",
+    "session_2026_6_9.4": "Confirmed Fable 5 is real (claude-fable-5, vision + PDF capable). No code changes.",
+    "session_2026_6_10.1": "Analyzed tests T28–T35. 7/8 within ±10% at total level. Identified 9 systematic issues. Settlement Mt +0.1% is misleading — large offsetting errors. No code changes.",
+    "session_2026_6_10.2": "Ideation session. LLM mechanics, ChatGPT critique, provenance-does-not-fix-hallucination, multi-agent council idea. Established 70-80% of dollar error is Stage 2 rules. No code changes.",
+    "session_2026_6_10.3": "8 fixes applied to m3_infer.py inline prompts: lot grading null→exclude, water/sewer main midpoint rules replaced with trust-plan-read, sidewalk driven by new sidewalk_sides field, utility trenching drywell trigger, stripping depth extraction, image prompt sync. Deferred multi-pass Gemini restructure.",
+    "session_2026_6_10.4_this_session": "Extracted prompts to files. Analyzed T36–T47 (7/12 fail). Identified session 10.3 sidewalk_sides change as primary regression. 4 Gemini prompt fixes: lot_grading tightened, sidewalk_sides restricted to typical section, earthwork direction rule added, road_LF existing-road improvement guidance added. Also analyzed T50 Expo (-22.5%) and T55 Solara (-39.3%) from new test wave — both explainable and non-detrimental with estimator review. Nolan's stated next task: go through every job and classify each gap as detrimental vs estimator-verifiable."
+  },
+
+  "operational_constraints": {
+    "never_run_python_scripts_directly": "Tell the user the command and wait for them to paste output.",
+    "never_run_pip_install": "Tell the user the install command and wait for them to run it.",
+    "gemini_model_string": "Do not change the GEMINI_MODEL string in any script. Nolan sets it.",
+    "version_alignment": "PDF/DWG/qty-sheet/proposal per job may be different revisions. Nolan verifies manually.",
+    "use_txt_files": "use_*.txt files in job folder roots are the authoritative version selectors.",
+    "librechat_ollama_setup": "Do not suggest replacing LibreChat — Nolan runs LibreChat on Mac connecting to Ollama on a separate PC."
+  }
+}

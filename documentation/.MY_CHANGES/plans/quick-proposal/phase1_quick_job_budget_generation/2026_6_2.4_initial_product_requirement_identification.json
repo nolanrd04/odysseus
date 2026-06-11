@@ -1,0 +1,167 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, decided, or built in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session": "2026_6_2.4",
+  "title": "Phase 1 Kickoff — Quick Job Budget Generation: Initial Product Requirement Identification",
+  "date": "2026-06-02",
+  "status": "PLANNING — PRD drafted, no code written. Requirements identified through conversation. Pending Nolan review of the PRD and the open questions.",
+  "phase": "Phase 1 — Quick Job Budget Generation (rough whole-job budget from a single plan sheet). Distinct product from Phase 0 (plan -> quantity sheet).",
+  "prd_file": "phase1/PRD_phase1_quick_job_budget_generation.md",
+
+  "foundational_concept_what_learning_means": {
+    "read_first": "This project says the system 'learns typical practices.' Define it precisely so a new session does not misread it.",
+    "core_truth": "There is NO model training or fine-tuning anywhere in this project, now or planned. Claude/Gemini weights are frozen; nothing the system processes ever updates them. Every behavior that looks like 'learning' is ONE mechanism: persist knowledge as data, then retrieve it back into the model's context window at inference time. This is in-context learning / RAG, not weight updates.",
+    "two_halves_map_to_data_operations": [
+      "Learning from the past = System A writes accumulated knowledge to durable data (the CASE LIBRARY of resolved past jobs + the KNOWLEDGE PACK of derivation rules, $/unit distributions, typical-section defaults). System B retrieves the relevant pieces into the prompt when estimating a new sheet. The model appears to 'know' Terra Underground's practices only because we hand it that knowledge every time.",
+      "Learning going forward (feedback loop) = when Brian corrects an estimate, we WRITE THAT CORRECTION BACK into the case library / knowledge pack. Future estimates retrieve the updated data and reflect the correction. This is a file/DB write -- instant, inspectable, reversible -- NOT retraining."
+    ],
+    "build_implications": [
+      "Do NOT pursue fine-tuning. Engineering effort goes into three things only: (a) how knowledge is REPRESENTED (case-library schema), (b) how the right pieces get RETRIEVED into context, (c) the WRITE-BACK loop.",
+      "The 'learning' is debuggable: knowledge is plain data, so you can open a file and see or fix exactly what the system 'believes'. A wrong estimate traces to a wrong record/pattern you edit directly.",
+      "This is the SAME mechanism Claude Code itself uses for continuity (a persistent memory directory reloaded each session + handoff docs). The product is an engineered, domain-specific version: case library ~= memory files, retrieval ~= loading the relevant ones, write-back ~= saving a note after a correction."
+    ],
+    "one_line": "The model never changes -- the knowledge base does, and the model reasons over whatever slice of it we place in context.",
+    "prd_location": "Captured as PRD section 1.1 'What \"learning\" means in this project (foundational)'."
+  },
+
+  "what_nolan_asked_for": {
+    "goal": "Begin Phase 1: generate ROUGH BUDGETS (dollar figures) for a job given a new set of plans or even a single plan sheet. Brian frequently gets handed one sheet and asked 'roughly what will this job cost?'. Believes a RAG + LLM setup is likely the right shape but is not committed; wants thorough planning first.",
+    "learning_intent": "Wants the AI to 'learn' typical past practices (in-context, not retraining) to draw conclusions, both from history and going forward.",
+    "relationships_to_establish": {
+      "quantity": [
+        "What is reasonable for work across all previous plans",
+        "How quantities are derived",
+        "What the quantities are (e.g. row stripping 16\" vs 18\")",
+        "How items on a page work together (notes<->drawings, plan view<->profile view)",
+        "How pages in a plan work together"
+      ],
+      "proposal": [
+        "Context: existing chain plans -> qty sheet -> proposal -> bid",
+        "How generated/known quantities translate to proposal lines",
+        "Cost patterns across plans",
+        "Typical cost per single unit for work",
+        "Types of job proposals (subdivision, commercial, etc.)",
+        "Patterns across job types",
+        "Patterns across geography (based Hayden ID; costs differ for Spokane WA, Athol ID, etc.)"
+      ],
+      "going_forward": [
+        "What is the same vs new in a new plan set",
+        "What is extractable from a new plan set"
+      ]
+    },
+    "use_case": "Given a single page (most likely; maybe more) of a plan set, estimate roughly what it would cost to do the job. Input will most likely be an image or PDF scan; no data available beyond what is visible.",
+    "needs": [
+      "Properly analyze the given input (image/PDF page)",
+      "Have one or more LLMs 'learn' from typical past + future practices",
+      "Detailed reasoning for the budget output totals",
+      "Thoroughly establish relationships",
+      "Proper definitions"
+    ],
+    "assets_on_hand": [
+      "Claude API access, Gemini API access",
+      "Local Ollama on Windows PC (64GB RAM, RTX 5070 Ti 16GB VRAM)",
+      "DWG extraction script (Phase 0 phase0_new/py1)",
+      "Prior visual-analysis testing (not great)",
+      "Company Windows server",
+      "~10 DWG files for prior jobs (Nolan wants THOROUGH, not conservative, extraction — pull all possible data, prune later)",
+      "~40-50 prior jobs total to work with",
+      "~10 qty tables, ~10 proposals, ~10 plan PDFs (all aligned per job)"
+    ],
+    "deliverables_requested": [
+      "An extremely detailed PRD (delivered: phase1/PRD_phase1_quick_job_budget_generation.md)",
+      "This handoff: _handoffs/phase1_quick_job_budget_generation/2026_6_2.4_initial_product_requirement_identification.json"
+    ]
+  },
+
+  "this_session": {
+    "summary": "Conversation-first requirements identification for Phase 1. Read the Phase 0 master summary handoff and project memory. Confirmed proposal data now exists in-repo and is parseable. Verified every proposal is in the correct job folder. Resolved the data naming confusion. Aligned on the product shape (two-system architecture), accuracy target, output format, and the RAG decision. Wrote the PRD and this handoff. NO code written.",
+    "key_findings": [
+      "PROPOSALS ARE PARSEABLE TEXT: located at data/<folder>/proposals/ as .doc + .pdf (most with revisions). The .doc files are HeavyBid/Word form exports with columns Description | Quan | Unit | Unit Price | Ext Price and embedded raw numeric field values (e.g. =21000 -> $21,000.00). Unit prices AND extended prices are directly extractable. NO vision needed for the cost side. This makes dollar output groundable, not guesswork.",
+      "BID PRICES, NOT INTERNAL COST: proposal unit prices blend cost + overhead + profit. That is exactly right for a customer-facing rough budget.",
+      "NUMBERING NUANCE: local folder numbers (26001, 25068, ...) are PROPOSAL/BID numbers, not true job numbers. Woodman's true job number is 26008 (local folder is 26001-1; was previously mislabeled 22066). Numbers also change across revisions (Lone Fir proposal 25038 -> 25071). USE JOB NAME AS THE STABLE KEY; the local folder convention is proposal-number-based.",
+      "FOLDER VERIFICATION (all correct): 24053-3=Settlement Mountain, 25016-2=Killdeer Meadows, 25037-2=Expo Private Drive, 25068-2=Painted Rock, 25071-1=Lone Fir, 26001-1=Woodman, 26003-1=Mountainside, 26006-2=Solara PH1. Foundry (24066-1) excluded for now per Nolan.",
+      "TYPICAL-SECTION GAP IS A FEATURE, NOT A BLOCKER: Nolan corrected an early framing. The fixed DWG pipeline already produced ~88k SF ROW vs 81k ground truth (good). When dimensions are NOT on the sheet, the model should infer from learned patterns ('subdivision roads are almost always 68 ft wide'; section depths follow prior-job patterns). Gap-filling by learned domain regularity is core expected behavior."
+    ],
+    "decisions": [
+      "TWO-SYSTEM ARCHITECTURE. System A (offline knowledge building): join DWG extractions (accurate quantities) + proposals (line-item $/unit + totals) + plans/qty sheets/relation docs into a per-job CASE LIBRARY, then derive PATTERNS (derivation rules, $/unit distributions, typical-section defaults, job-type signatures). System B (runtime inference): given one sheet, classify it, Gemini-extract visible facts, retrieve closest analog cases, gap-fill missing quantities/dimensions from learned patterns, apply learned $/unit, output line-item + total + confidence band + plain-language reasoning + provenance. Phase 0's DWG pipeline is machinery for System A, NOT on the runtime path.",
+      "NO RUNTIME QTY-SHEET GENERATION. Single-sheet input cannot support a real takeoff; Phase 1 reasons by analogy instead. (Phase 0 qty-sheet generation still used as System-A machinery / for DWG jobs.)",
+      "OUTPUT = LINE ITEM + TOTAL, with a confidence band and full traceability (every number tagged 'read from sheet' or 'inferred from job/pattern X').",
+      "ACCURACY TARGET = 10-15% error vs the true historical proposal total. Validation by hold-one-sheet-out (feed System B a single sheet from a known job, compare predicted total/items to actual proposal) and leave-one-job-out.",
+      "RAG DECISION: do NOT build vector/embedding RAG now. At ~10-30 jobs, load ALL compact case records into context. ~30-50: add attribute filtering. ~50+ fully-resolved jobs is the trigger to stand up ChromaDB/embedding RAG. The case-library data model is identical at every scale, so retrieval is a swappable layer with zero upstream rework. Acquiring more jobs is pure upside regardless of retrieval mechanism.",
+      "KEEP ALL PROPOSAL REVISIONS: they encode how/why estimates changed (scope, repricing) — useful signal.",
+      "TIME/GEOGRAPHY: date-tag every $/unit and recency-weight (no heavy modeling with few points). Geography handled as a stated assumption / optional manual knob until data supports a learned multiplier.",
+      "EXTRACTION PHILOSOPHY: thorough not conservative — pull all possible data from all ~10 DWGs and all proposals; prune later (per Nolan)."
+    ],
+    "what_worked": "Conversing before writing produced a much sharper product definition. Verifying proposal structure up front confirmed the costing half is feasible and groundable. Folder verification caught/clarified the numbering confusion.",
+    "what_did_not_work": "N/A — planning session, no execution. One Bash loop initially broke on spaces in filenames (fixed with null-delimited iteration)."
+  },
+
+  "current_pipeline_state": {
+    "phase1_code": "NONE yet. phase1/ contains only the PRD.",
+    "phase0_machinery_reused_by_system_A": {
+      "dwg_extraction": "phase0_new/py1_dwg_extract.py — blind DWG->DXF geometry/block/keynote/area/annotation extraction. Firm-agnostic. Use to populate accurate quantities in the case library.",
+      "qty_sheet_generation": "phase0_new/py4_generate_qty_sheet.py — Claude qty sheet from DWG extraction (validated on Woodman TEST_8).",
+      "image_extraction": "phase0_new/py3_gemini_extract_page.py — Gemini 2.5 Pro per-page vision extraction (the basis for System B's runtime sheet extraction).",
+      "relation_docs": "phase0_new/relationship_diagrams/ — per-job plan-evidence -> quantity mappings.",
+      "cost_codes": "data/COSTCODES.txt — 160 codes, CODE DESCRIPTION - UNIT."
+    },
+    "data_locations": {
+      "jobs_root": "data/<folder>/ (folder = proposal-number-based local convention)",
+      "proposals": "data/<folder>/proposals/*.doc + *.pdf (.doc has parseable form-field values)",
+      "qty_sheets": "data/<folder>/*BID QTY*.xlsx and qty_tbl_*.txt",
+      "plans": "data/<folder>/*.pdf (rasterized) and page_XX.jpg",
+      "dwgs": "data/test_copies/<JOB>_TEST/*.dwg (Woodman, Painted Rock confirmed); ~10 available total",
+      "tests": "phase0_new/TESTS/<JOB>/<JOB>_N/ (versioned extraction + qty sheet runs)"
+    }
+  },
+
+  "next_steps": [
+    "1. Nolan reviews PRD (phase1/PRD_phase1_quick_job_budget_generation.md) and answers the open questions, especially: which sheet does Brian usually receive, and whether Brian may type a few priors (job type/location).",
+    "2. M1 — Build the case-library schema and ingest: parse all proposals (.doc form fields) into structured line items + totals; run DWG extraction on all available DWGs thoroughly; parse qty sheets; join into per-job records with provenance and source-disagreement flags.",
+    "3. M2 — Derive the knowledge pack: derivation rules, $/unit distributions (by job type / region / date), typical-section defaults, job-type signatures.",
+    "4. M3 — Build the System B inference prototype: sheet ingest -> classify -> Gemini extract -> analog retrieval -> gap-fill -> cost -> line-item + total + band + reasoning.",
+    "5. M4 — Validate with hold-one-sheet-out and leave-one-job-out; tune toward 10-15%.",
+    "Note: per workflow preference, deliver scripts as commands for Nolan to run; do not auto-execute Python."
+  ],
+
+  "open_questions": [
+    "Which sheet does Brian typically get handed (cover/overall vs a random plan/profile)? Determines extractable signal. Need real examples.",
+    "Will Brian optionally type priors (job type + location)? Cheap and highly stabilizing — in scope for v1?",
+    "How many more fully-resolved jobs can be acquired, and how fast? Drives the ~50-job RAG timing.",
+    "Do the *BID QTY*.xlsx files already contain pricing, or quantities only? (May reduce proposal-parsing need for some jobs.)",
+    "Do proposal quantities ever differ from qty-sheet/DWG quantities (scope negotiation)? If so, which is 'truth' for learning $/unit?",
+    "Confirm output medium for v1 (markdown report assumed fine)."
+  ],
+
+  "prior_sessions_summary": {
+    "phase0_arc": "Phase 0 = plan files -> HeavyBid-format quantity sheet (quantities only; humans price in HeavyBid). Evolution: May 12 original plan (full RAG over 165 jobs, on-prem) -> May 13 pivot to in-context learning with hand-picked jobs -> May 13-18 multi-step vision pipeline (relation docs, plan orientation, guided extraction, qty sheet) -> May 22 cloud APIs approved, refactor to Claude API (phase0_new/) -> May 22-26 ~9 Woodman test runs (~31% best avg; plateaued on visual-measurement items) -> May 27 targeted-query step (py6); zoom pipeline suspended (LLM can't output reliable bounding boxes) -> May 28 Gemini 2.5 Pro beats Claude on plan imagery; py3 Gemini extractor with context caching -> May 29 Painted Rock added; LLMs can't reliably count small repeated callout symbols -> Jun 1 KEY DISCOVERY: all plan PDFs are fully rasterized (no vector/text), DWG path is primary; built blind firm-agnostic DWG extractor -> Jun 1-2 full DWG pipeline built and validated on Woodman (block counts exact, pipe lengths within ~3%); TESTS/ versioned folders.",
+    "phase0_current_state": "DWG pipeline validated on Woodman (TEST_8 'happy enough'). Paused; next Phase-0 step was to validate generalization on Painted Rock and other jobs. Master summary: _handoffs/phase0_qty_sheet_generation/2026_6_2.FINAL_summary_handoff.json (read that for full Phase 0 detail).",
+    "phase0_key_facts_for_phase1": [
+      "DWG extractor is blind: counts everything, LLM interprets semantics from layer/block names. Firm-agnostic (C- NCS prefix and SS-/WA-/SF- discipline prefix both handled).",
+      "Block insert counts are exact and authoritative for point features (manholes, FH, bends). Keynote callout counts double-count plan/profile views.",
+      "Typical section (ROW width, road width, pavement spec, sidewalk width, swale, stripping depth) lives on the typical-section detail sheet and is the historically hardest thing to extract from geometry — Phase 1 fills these from learned patterns when not visible.",
+      "Gemini 2.5 Pro is the vision model of choice; Claude does reasoning/aggregation.",
+      "Ground-truth example values exist (e.g. Woodman: 48\" manholes 4 EA, 8\" sewer 743 LF, 8\" water 979 LF, curb/gutter 1875 LF, ROW ~81,757 SF, scuppers 31 EA, services 22 EA)."
+    ]
+  }
+}

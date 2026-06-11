@@ -1,0 +1,161 @@
+{
+  "handoff_instructions": {
+    "purpose": "Handoffs document the current state and scope of the project so a new LLM session can pick up exactly where the last one left off. They are the primary continuity mechanism for this project.",
+    "what_to_include": [
+      "A summary of what was done, discussed, built, or decided in this session",
+      "What worked and what did not work",
+      "Current pipeline state — what scripts exist, what their status is, what the next steps are",
+      "A condensed recap of prior sessions so the new LLM has full project context without reading every previous handoff",
+      "Open questions or blockers that carry into the next session"
+    ],
+    "what_not_to_include": [
+      "Exhaustive code listings — reference file paths instead",
+      "Decisions that were reversed or abandoned mid-session — only document final state",
+      "Speculation about distant future work — stay close to what is actually next"
+    ],
+    "format_rules": [
+      "This handoff_instructions block must appear at the top of every future handoff",
+      "When a user says 'create a handoff for this session,' use this block as the template and fill in the session-specific fields",
+      "Prior session summaries should be condensed — one paragraph per session, not a full retelling",
+      "Be brief but complete. A new LLM should be able to start working immediately after reading this file"
+    ]
+  },
+
+  "session_context": {
+    "date": "2026-06-09",
+    "session_number": "2026_6_9.4",
+    "focus": "Confirmed Claude Fable 5 is real and supports vision + PDFs. No code changes.",
+    "immediate_next_action": "Step 0 from 9.3: Add MEASUREMENT CORRECTION block to data/10001-1_MABREY_ESTATES/newest/job_context.txt, then re-run Mabrey test. Commands in phase1/inference/run_commands.md."
+  },
+
+  "this_session": {
+    "summary": "Two short topics. (1) Confirmed Claude Fable 5 exists — the previous session (9.3) incorrectly stated it did not. Model ID is claude-fable-5, released 2026-06-09. All active Claude models support vision and PDF analysis, including Fable 5. (2) Diagnosed why a single message consumed 100k+ tokens: invoking the claude-api skill loads the entire Anthropic SDK documentation suite (~28 doc files) regardless of the question. For model capability questions, skip the skill and use WebFetch directly to the relevant docs pages.",
+
+    "claude_fable_5_facts": {
+      "model_id": "claude-fable-5",
+      "released": "2026-06-09",
+      "context_window": "1M tokens",
+      "max_output": "128K tokens",
+      "pricing": "$10 input / $50 output per MTok",
+      "thinking": "adaptive only (always on — cannot disable with type:disabled, omit the param instead)",
+      "vision": "yes — all current Claude models support image + document input",
+      "pdf_support": "yes — via document content blocks (URL, base64, or Files API file_id)",
+      "pdf_limits": "600 pages per request (100 for 200k-context models), 32 MB max request size",
+      "pdf_mechanism": "Each page is rendered as an image + text extracted. Claude sees both layers. Supports charts, diagrams, tables.",
+      "sampling_params": "temperature, top_p, top_k all removed (will 400 if sent)",
+      "budget_tokens": "fully removed (will 400 if sent)"
+    },
+
+    "anthropic_pdf_api_reference": {
+      "note": "Anthropic does NOT have a separate 'Document AI' section like Gemini. PDF support is built into the standard Messages API via the document content block type.",
+      "url_source": {
+        "type": "document",
+        "source": {"type": "url", "url": "https://example.com/file.pdf"}
+      },
+      "base64_source": {
+        "type": "document",
+        "source": {"type": "base64", "media_type": "application/pdf", "data": "<base64>"}
+      },
+      "files_api_source": {
+        "type": "document",
+        "source": {"type": "file", "file_id": "<file_id>"},
+        "note": "Requires betas=['files-api-2025-04-14']"
+      },
+      "docs_page": "https://platform.claude.com/docs/en/build-with-claude/pdf-support.md"
+    },
+
+    "implication_for_m3_infer": {
+      "current_state": "gemini_extract() uses the Google Generative AI SDK. claude_infer() uses the Anthropic SDK. These are separate APIs.",
+      "to_use_fable5_for_extraction": "Would require rewriting gemini_extract() to use anthropic.Anthropic() client with document content blocks — not a simple env var swap.",
+      "decision": "Not made yet. Option exists if Gemini extraction accuracy remains insufficient after the session 9.3 prompt improvements are tested.",
+      "constraint": "Do not change the GEMINI_MODEL string. Nolan sets it."
+    },
+
+    "token_efficiency_note": {
+      "problem": "Invoking the claude-api skill for a simple model capability question consumed ~80-100k tokens because the skill loads the entire Anthropic SDK documentation suite (28+ doc files) as context.",
+      "fix": "For questions about model capabilities, pricing, or PDF/vision support, use WebFetch directly to the relevant docs pages. The two pages needed for this session were: https://platform.claude.com/docs/en/about-claude/models/overview.md and https://platform.claude.com/docs/en/build-with-claude/pdf-support.md",
+      "when_to_use_claude_api_skill": "Only when actually writing code that calls the Anthropic SDK — not for confirming model capabilities."
+    }
+  },
+
+  "items_not_done": [
+    "Mabrey job_context.txt still missing MEASUREMENT CORRECTION block — must add before re-run.",
+    "Mabrey test has not been re-run with session 9.3 prompt improvements.",
+    "T26-T31 formal baseline tests have not been run."
+  ],
+
+  "immediate_next_steps": {
+    "step_0_update_job_context": {
+      "action": "Add MEASUREMENT CORRECTION block to data/10001-1_MABREY_ESTATES/newest/job_context.txt",
+      "verified_values": {
+        "Mabrey_Ave_total_LF": 956.27,
+        "breakdown": "163.15 (start segment) + 603.14 (Gemini segments) + 189.98 (end segment)",
+        "South_Branch_LF": 109.66,
+        "Swaboda_Road_LF": 163.81,
+        "total_road_LF": 1229.74,
+        "ROW_width_ft": 88,
+        "ROW_source": "68 ft road arrow + 10 ft easement each side"
+      }
+    },
+    "step_1_run_mabrey": {
+      "command": "python3 phase1/inference/m3_infer.py --job data/10001-1_MABREY_ESTATES",
+      "what_to_check": [
+        "Does Gemini now find all 3 roads and both endpoint segments of Mabrey Ave?",
+        "Does ROW_width come back as 88?",
+        "Does the sidewalk line item appear?",
+        "Is manhole count reasonable (~4-6 for ~1,230 LF)?",
+        "Does the sewer section fire NOT ESTIMATED from job_context.txt?"
+      ]
+    },
+    "step_2_run_formal_baseline": {
+      "action": "Run T26-T31 formal baseline tests",
+      "commands_file": "phase1/inference/run_commands.md",
+      "tests": [
+        {"test": "T26", "job": "Solara PH1",   "actual": 2388012.50},
+        {"test": "T27", "job": "Mountainside", "actual": 439059.55},
+        {"test": "T28", "job": "Lone Fir",     "actual": 419312.10},
+        {"test": "T29", "job": "Painted Rock", "actual": 776406.65},
+        {"test": "T30", "job": "Expo",         "actual": 372993.20},
+        {"test": "T31", "job": "Settlement MT","actual": 2123245.75}
+      ]
+    }
+  },
+
+  "current_pipeline_state": {
+    "phase1/ingest/jobs_manifest.json":           {"status": "CURRENT — all 12 jobs"},
+    "phase1/ingest/build_case_library.py":        {"status": "CURRENT"},
+    "phase1/case_library/*.json":                 {"status": "CURRENT — rebuilt 2026-06-09"},
+    "phase1/knowledge_pack/knowledge_pack.json":  {"status": "CURRENT — all 12 jobs"},
+    "phase1/inference/m3_infer.py":               {"status": "UPDATED in session 9.3 — plan-set-type detection, never-return-null, ROW type-B fallback, confidence fields, proposed_manhole_count, Brian's manhole rules, sidewalk rule, curb existing-road caveat. NOT yet re-tested."},
+    "phase1/inference/run_commands.md":           {"status": "Contains T26-T31 commands"},
+    "data/10001-1_MABREY_ESTATES/newest/job_context.txt": {"status": "EXISTS but INCOMPLETE — missing MEASUREMENT CORRECTION block. Add before re-run."},
+    "phase1/inference/output_10001-1_MABREY_ESTATES/":    {"status": "STALE — pre-prompt-improvement run (road_LF=712.8, ROW=50). Re-run needed."}
+  },
+
+  "prior_sessions_summary": {
+    "sessions_2026_6_1_through_6_4.5": "Built Phase 1 pipeline: Gemini PDF extraction, case library, knowledge pack, Claude inference system prompt. 12 jobs, 11 with proposals.",
+    "sessions_2026_6_5.1_through_5.6": "Tuned m3_infer.py line items. Built co-occurrence system. Architecture rewrite. KP regenerated.",
+    "session_2026_6_8.1": "Multi-job validation T15-T19. All 6 jobs failed ±10%. 9 improvements implemented.",
+    "session_2026_6_8.2": "Full data directory restructure. newest/ and legacy/ with 5 standard subfolders. DATA_STRUCTURE.md is source of truth.",
+    "session_2026_6_9.1": "KB audit. Fixed manifest, rebuilt case library and all 12 KPs. T26-T31 commands written.",
+    "session_2026_6_9.2": "Designed job_context.txt sidecar architecture. Implemented --job flag, resolve_job_version(), context injection in m3_infer.py. Created Mabrey test folder.",
+    "session_2026_6_9.3": "Diagnosed Gemini extraction failures on Mabrey (missed road segments, wrong ROW). Met with Brian for domain rules. Major prompt improvements to m3_infer.py. Incorrectly stated Claude Fable 5 does not exist.",
+    "session_2026_6_9.4_this_session": "Confirmed Fable 5 is real (claude-fable-5, vision + PDF capable). Corrected 9.3 error. No code changes."
+  },
+
+  "open_questions": [
+    "After Mabrey re-run: does the new prompt correctly find all 3 roads and correct ROW?",
+    "Lone Fir ballast: if Olson specs it separately, T28 becomes a near-pass. Check with Brian.",
+    "Expo commercial pricing: $102/LF water main and commercial 8\" water services are outside residential KP.",
+    "Settlement MT lot grading: Gemini confidently returns lot_grading_in_scope=false even though $309K of lot prep is in actual.",
+    "If Gemini extraction accuracy stays poor after prompt improvements: Claude Fable 5 is a viable replacement for gemini_extract() but requires rewriting that function to use the Anthropic SDK."
+  ],
+
+  "operational_constraints": {
+    "never_run_python_scripts_directly": "Tell the user the command and wait for them to paste output.",
+    "gemini_model_string": "Do not change the GEMINI_MODEL string in any script. Nolan sets it.",
+    "version_alignment": "PDF/DWG/qty-sheet/proposal per job may be different revisions. Nolan verifies manually.",
+    "use_txt_files": "use_*.txt files in job folder roots are the authoritative version selectors.",
+    "token_efficiency": "Do not invoke the claude-api skill for model capability questions — use WebFetch to docs pages directly. The skill loads ~100k tokens of SDK docs."
+  }
+}
