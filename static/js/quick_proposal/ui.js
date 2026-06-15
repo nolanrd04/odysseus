@@ -223,14 +223,6 @@ const STYLES = `
     user-select: none;
     will-change: transform;
 }
-.qp-jobs-panel {
-    padding: 16px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0;
-}
-.qp-jobs-title {
-    font-size: 12px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.5px; color: color-mix(in srgb, var(--fg) 55%, transparent);
-    margin-bottom: 10px;
-}
 .qp-jobs-grid {
     display: flex; flex-wrap: wrap; gap: 8px;
 }
@@ -261,6 +253,11 @@ const STYLES = `
     font-family: inherit; cursor: pointer;
 }
 .qp-model-select:focus { outline: none; border-color: var(--accent, #0af); }
+.qp-jobs-section {
+    width: 100%; max-width: 480px;
+    display: flex; flex-direction: column; gap: 6px;
+}
+.qp-jobs-section .qp-model-label { width: auto; }
 `;
 
 function injectStyles() {
@@ -313,6 +310,10 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                         <option value="">Loading models…</option>
                     </select>
                 </div>
+                <div class="qp-jobs-section" id="qp-jobs-section">
+                    <div class="qp-model-label">Reference Jobs</div>
+                    <div class="qp-jobs-grid" id="qp-jobs-grid"><span style="opacity:0.5;font-size:11px">Loading…</span></div>
+                </div>
                 <button class="qp-run-btn" id="qp-run-btn" disabled>Start</button>
             </div>
             <div class="qp-status" id="qp-status" style="display:none"></div>
@@ -344,6 +345,25 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
 
     loadModels(modelSelect, { preferClaude: false });
     loadModels(managerSelect, { preferClaude: true });
+
+    // Fetch and render the reference jobs list up front so the selection is fixed before the run starts.
+    const jobsGrid = overlay.querySelector('#qp-jobs-grid');
+    fetch('/api/quick_proposal/jobs', { credentials: 'same-origin' })
+        .then(r => r.ok ? r.json() : [])
+        .then(jobs => {
+            jobsGrid.innerHTML = '';
+            if (!jobs.length) {
+                jobsGrid.innerHTML = '<span style="opacity:0.5;font-size:11px">No reference jobs found</span>';
+                return;
+            }
+            jobs.forEach(job => {
+                const chip = document.createElement('label');
+                chip.className = 'qp-job-chip';
+                chip.innerHTML = `<input type="checkbox" value="${_esc(job.id)}" checked> ${_esc(job.name)}`;
+                jobsGrid.appendChild(chip);
+            });
+        })
+        .catch(() => { jobsGrid.innerHTML = '<span style="opacity:0.5;font-size:11px">Could not load jobs</span>'; });
 
     // Pre-fill from an existing upload (Proposal Runs → Re-run flow)
     if (prefillUploadId) {
@@ -428,9 +448,36 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
     const sidebarPages = overlay.querySelector('#qp-sidebar-pages');
     const mainOutput   = overlay.querySelector('#qp-main-output');
     const notes        = overlay.querySelector('#qp-notes').value;
+    const selectedJobs = [...overlay.querySelectorAll('#qp-jobs-grid input[type=checkbox]:checked')].map(cb => cb.value);
 
     runBtn.disabled = true;
+    runBtn.textContent = 'Validating…';
     statusEl.style.display = 'block';
+    setStatus(statusEl, 'Checking endpoints…', true);
+
+    try {
+        const vRes = await fetch('/api/quick_proposal/validate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ gemini_model: geminiModel, manager_model: managerModel }),
+            credentials: 'same-origin',
+        });
+        if (vRes.ok) {
+            const v = await vRes.json();
+            if (!v.ok) {
+                const msgs = Object.entries(v.errors || {}).map(([k, e]) => `${k}: ${e}`).join('\n');
+                setStatus(statusEl, `Endpoint error:\n${msgs}`);
+                runBtn.disabled = false;
+                runBtn.textContent = 'Start';
+                return;
+            }
+        }
+    } catch (e) {
+        // Non-fatal — skip validation if the check itself fails
+        console.warn('[quick_proposal] endpoint validation failed:', e);
+    }
+
+    runBtn.textContent = 'Start';
 
     let uploadId;
     let filename;
@@ -462,7 +509,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         const res = await fetch('/api/quick_proposal/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ upload_id: uploadId, notes, gemini_model: geminiModel, manager_model: managerModel, filename }),
+            body: JSON.stringify({ upload_id: uploadId, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs }),
         });
         if (!res.ok) throw new Error(`Run failed: ${res.status}`);
         runId = (await res.json()).run_id;
@@ -520,9 +567,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
             addThumbnail(sidebarPages, mainOutput, data.page_idx, data.url);
         },
 
-        onIndexLoaded(data) {
-            renderJobList(mainOutput, data.jobs || []);
-        },
+        onIndexLoaded(_data) { /* job list is now selected before run starts */ },
 
         onPageClassified(data) {
             updateThumbnailClassification(sidebarPages, data);
@@ -1048,30 +1093,117 @@ function renderExtractionPanel(mainOutput) {
     `;
 }
 
+function _esc(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function _extractThinking(text) {
+    const m = (text || '').match(/^<think>([\s\S]*?)<\/think>\s*/);
+    if (!m) return { thinking: null, content: text || '' };
+    return { thinking: m[1].trim(), content: text.slice(m[0].length).trim() };
+}
+
+function _buildThinkingSection(thinking) {
+    const id = 'qp-think-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    return `<div class="thinking-section qp-think">
+        <div class="thinking-header" data-thinking-id="${id}">
+            <div class="thinking-header-left"><span>View thinking process</span></div>
+            <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
+        </div>
+        <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${_esc(thinking)}</div></div>
+    </div>`;
+}
+
 function appendExtractionMessage(mainOutput, data) {
     const container = mainOutput.querySelector('#qp-extraction-messages');
     if (!container) return;
+    if (!container._toolNodes) container._toolNodes = new Map();
 
-    const row = document.createElement('div');
-    row.className = 'qp-exmsg';
+    if (data.role === 'tool_call') {
+        // Group consecutive tool calls in one agent-thread wrapper
+        let thread = container.lastElementChild?.classList.contains('agent-thread')
+            ? container.lastElementChild : null;
+        if (!thread) {
+            thread = document.createElement('div');
+            thread.className = 'agent-thread qp-gemini-thread';
+            container.appendChild(thread);
+        }
+        const toolId = data.tool_id || '';
+        const node = document.createElement('div');
+        node.className = 'agent-thread-node running';
+        node.dataset.toolId = toolId;
+        node.innerHTML = `<div class="agent-thread-dot"></div>
+            <div class="agent-thread-header">
+                <span class="agent-thread-icon">⚙</span>
+                <span class="agent-thread-tool">${_esc(data.tool)}</span>
+                <span class="agent-thread-wave">▱▲△</span>
+            </div>
+            <div class="agent-thread-content">
+                <details class="agent-tool-output"><summary>Input</summary><pre>${_esc(data.args || '{}')}</pre></details>
+            </div>`;
+        thread.appendChild(node);
+        if (toolId) container._toolNodes.set(toolId, node);
 
-    if (data.role === 'claude') {
-        row.className += ' qp-exmsg-claude';
-        row.textContent = `${data.model || 'Manager'}: ${data.text}`;
+    } else if (data.role === 'tool_result') {
+        const node = data.tool_id ? container._toolNodes.get(data.tool_id) : null;
+        if (node) {
+            const inputHtml = node.querySelector('.agent-tool-output')?.outerHTML || '';
+            node.className = 'agent-thread-node';
+            node.innerHTML = `<div class="agent-thread-dot"></div>
+                <div class="agent-thread-header">
+                    <span class="agent-thread-icon">✓</span>
+                    <span class="agent-thread-tool">${_esc(data.tool)}</span>
+                    <span class="agent-thread-status">done</span>
+                    <span class="agent-thread-chevron">▶</span>
+                </div>
+                <div class="agent-thread-content">
+                    ${inputHtml}
+                    <details class="agent-tool-output"><summary>Output</summary><pre>${_esc(data.result || '(no output)')}</pre></details>
+                </div>`;
+        }
+
+    } else if (data.role === 'claude') {
+        const { thinking, content } = _extractThinking(data.text || '');
+        const label = data.model || 'Manager';
+        const wrap = document.createElement('div');
+        wrap.className = 'qp-exmsg qp-exmsg-manager';
+        wrap.innerHTML = (thinking ? _buildThinkingSection(thinking) : '')
+            + `<div class="qp-msg-bubble qp-msg-manager">
+                <span class="qp-msg-avatar qp-avatar-manager">${_esc(label)}</span>
+                <div class="qp-msg-text">${_esc(content)}</div>
+            </div>`;
+        container.appendChild(wrap);
+
     } else if (data.role === 'claude_to_gemini') {
-        row.className += ' qp-exmsg-claude-to-gemini';
-        row.textContent = `${data.model || 'Manager'} → Gemini: ${data.text}`;
+        const id = 'qp-instr-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+        const wrap = document.createElement('div');
+        wrap.className = 'qp-exmsg qp-exmsg-instruction';
+        wrap.innerHTML = `<div class="thinking-section qp-instr-section">
+            <div class="thinking-header" data-thinking-id="${id}">
+                <div class="thinking-header-left"><span data-label="Gemini instruction">→ Gemini instruction</span></div>
+                <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
+            </div>
+            <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${_esc(data.text || '')}</div></div>
+        </div>`;
+        container.appendChild(wrap);
+
     } else if (data.role === 'gemini') {
-        row.className += ' qp-exmsg-gemini';
-        row.textContent = `Gemini: ${data.text}`;
-    } else if (data.role === 'tool_call') {
-        row.className += ' qp-exmsg-tool';
-        row.textContent = `  ⚙ ${data.tool}(${data.args})`;
+        const wrap = document.createElement('div');
+        wrap.className = 'qp-exmsg qp-exmsg-gemini';
+        wrap.innerHTML = `<div class="qp-msg-bubble qp-msg-gemini">
+            <span class="qp-msg-avatar qp-avatar-gemini">Gemini</span>
+            <div class="qp-msg-text">${_esc(data.text || '')}</div>
+        </div>`;
+        container.appendChild(wrap);
+
     } else {
+        const row = document.createElement('div');
+        row.className = 'qp-exmsg';
         row.textContent = data.text || JSON.stringify(data);
+        container.appendChild(row);
     }
 
-    container.appendChild(row);
     container.scrollTop = container.scrollHeight;
 }
 
@@ -1491,27 +1623,3 @@ export function buildRunsPanel({ onClose, onSelectRun, onOpenRun }) {
     return overlay;
 }
 
-function renderJobList(mainOutput, jobs) {
-    // Remove existing panel if re-rendered
-    mainOutput.querySelector('#qp-jobs-panel')?.remove();
-
-    const panel = document.createElement('div');
-    panel.className = 'qp-jobs-panel';
-    panel.id = 'qp-jobs-panel';
-    panel.innerHTML = `
-        <div class="qp-jobs-title">Select Jobs To Reference</div>
-        <div class="qp-jobs-grid" id="qp-jobs-grid"></div>
-    `;
-
-    const grid = panel.querySelector('#qp-jobs-grid');
-    jobs.forEach(job => {
-        const chip = document.createElement('label');
-        chip.className = 'qp-job-chip';
-        chip.innerHTML = `<input type="checkbox" value="${job.id}" checked> ${job.name}`;
-        grid.appendChild(chip);
-    });
-
-    // Insert before the preview area so the jobs panel persists while previewing
-    const previewArea = mainOutput.querySelector('#qp-preview-area');
-    mainOutput.insertBefore(panel, previewArea);
-}

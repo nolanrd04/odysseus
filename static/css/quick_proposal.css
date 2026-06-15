@@ -162,13 +162,53 @@
     font-size: 12px; line-height: 1.45;
 }
 .qp-exmsg { word-break: break-word; }
-.qp-exmsg-claude       { color: var(--accent, #0af); }
-.qp-exmsg-claude-to-gemini { color: #a78bfa; font-style: italic; }
-.qp-exmsg-gemini       { color: var(--fg); }
-.qp-exmsg-tool         {
-    color: color-mix(in srgb, var(--fg) 50%, transparent);
-    font-family: monospace; font-size: 10px;
+
+/* Manager bubble */
+.qp-exmsg-manager { margin: 6px 0; }
+.qp-msg-bubble {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 7px 10px; border-radius: 7px;
+    font-size: 12px; line-height: 1.5;
 }
+.qp-msg-manager {
+    background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 20%, transparent);
+}
+.qp-msg-gemini {
+    background: color-mix(in srgb, var(--fg) 5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+}
+.qp-msg-avatar {
+    display: inline-block; font-size: 9px; font-weight: 700;
+    padding: 2px 5px; border-radius: 4px; white-space: nowrap;
+    flex-shrink: 0; margin-top: 1px; letter-spacing: 0.3px;
+}
+.qp-avatar-manager {
+    background: color-mix(in srgb, var(--accent, var(--red)) 20%, transparent);
+    color: var(--accent, var(--red));
+}
+.qp-avatar-gemini {
+    background: color-mix(in srgb, var(--fg) 12%, transparent);
+    color: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+.qp-msg-text {
+    flex: 1; white-space: pre-wrap; word-break: break-word;
+    color: var(--fg); opacity: 0.9;
+}
+
+/* Gemini tool thread */
+.qp-gemini-thread { margin: 4px 0 4px 8px; }
+
+/* Instruction collapsible (→ Gemini instruction) */
+.qp-exmsg-instruction { margin: 4px 0; }
+.qp-instr-section { margin: 0; font-size: 11px; }
+.qp-instr-section .thinking-content-inner { white-space: pre-wrap; }
+
+/* Thinking section scoped to QP */
+.qp-think { margin: 4px 0; font-size: 11px; }
+
+/* Gemini response bubble */
+.qp-exmsg-gemini { margin: 6px 0; }
 /* ── Live Index Panel ─────────────────────────────────────────────────────── */
 .qp-index-panel {
     flex-shrink: 0; max-height: 220px; overflow-y: auto;

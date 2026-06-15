@@ -153,10 +153,23 @@ class RunRequest(BaseModel):
     filename: str = ""
 
 
+class ValidateRequest(BaseModel):
+    gemini_model: str = ""
+    manager_model: str = ""
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 async def _emit(queue: asyncio.Queue, event_type: str, **kwargs):
     await queue.put({"type": event_type, **kwargs})
+
+
+def _to_openai_compat_url(url: str) -> str:
+    """Anthropic's native endpoint is /v1/messages but the manager uses OpenAI-compat
+    format (/v1/chat/completions). Swap the suffix when needed."""
+    if url and url.endswith("/v1/messages"):
+        return url[: -len("/v1/messages")] + "/v1/chat/completions"
+    return url
 
 
 def _strip_fences(text: str) -> str:
@@ -803,10 +816,11 @@ async def _run_gemini_with_tools(
                 tc_args = {}
             await _emit(queue, "extraction_message",
                         role="tool_call",
+                        tool_id=tc.get("id", ""),
                         tool=tool_name,
                         args=json.dumps(tc_args))
             if log_path := gemini_state.get("log_path"):
-                _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_call", "tool": tool_name, "args": json.dumps(tc_args)})
+                _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_call", "tool_id": tc.get("id", ""), "tool": tool_name, "args": json.dumps(tc_args)})
 
         pending_images: list = []  # list of (bbox_id, image_block)
         for tc in tool_calls:
@@ -819,6 +833,15 @@ async def _run_gemini_with_tools(
             except json.JSONDecodeError:
                 tc_args = {}
             result_blocks = await _execute_gemini_tool(tool_name, tc_args, index, queue)
+            # Emit tool result so the UI can update the running node to done.
+            result_text = "\n".join(b["text"] for b in result_blocks if b.get("type") == "text") or "(no output)"
+            await _emit(queue, "extraction_message",
+                        role="tool_result",
+                        tool_id=tc_id,
+                        tool=tool_name,
+                        result=result_text)
+            if log_path := gemini_state.get("log_path"):
+                _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result", "tool_id": tc_id, "tool": tool_name, "result": result_text})
             # Gemini OpenAI-compat rejects image_url in tool messages; keep only text
             # here and carry images forward as a user message instead.
             text_parts = [b["text"] for b in result_blocks if b.get("type") == "text"]
@@ -863,6 +886,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
         found = _get_endpoint_for_model(manager_model)
         if found:
             mgr_url, mgr_headers, mgr_api_key, mgr_model_id = found
+            mgr_url = _to_openai_compat_url(mgr_url)
 
     if not mgr_url:
         try:
@@ -873,7 +897,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                 ).first()
                 if ep:
                     base, mgr_api_key = resolve_endpoint_runtime(ep)
-                    mgr_url      = build_chat_url(base)
+                    mgr_url      = _to_openai_compat_url(build_chat_url(base))
                     mgr_headers  = build_headers(mgr_api_key, base)
                     mgr_model_id = getattr(ep, "model", None) or _CLAUDE_MODEL
             finally:
@@ -1116,7 +1140,12 @@ async def run_pipeline(
         await _emit(queue, "phase_start", phase="index", label="Loading knowledge base…")
         try:
             index.knowledge_pack = _load_knowledge_pack()
-            index.case_library   = _load_case_library()
+            full_library         = _load_case_library()
+            # Filter to user-selected jobs if any were specified at run start.
+            if index.selected_jobs:
+                index.case_library = [c for c in full_library if c.get("job_name") in index.selected_jobs]
+            else:
+                index.case_library = full_library
         except Exception as e:
             raise RuntimeError(f"Failed to load knowledge base: {e}")
 
@@ -1196,6 +1225,83 @@ def setup_quick_proposal_routes():
                         pass
         runs.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
         return runs[:50]
+
+    @router.post("/validate")
+    async def validate_endpoints(req: ValidateRequest):
+        """Smoke-test the manager and Gemini endpoints with a 1-token request before starting a run."""
+        errors: dict[str, str] = {}
+
+        def _test(url: str, headers: dict, model: str, label: str) -> str | None:
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            }
+            try:
+                with httpx.Client(timeout=15.0) as client:
+                    r = client.post(url, headers={**headers, "content-type": "application/json"}, json=payload)
+                if r.status_code >= 400:
+                    try:
+                        detail = r.json().get("error", {}).get("message") or r.text[:120]
+                    except Exception:
+                        detail = r.text[:120]
+                    return f"HTTP {r.status_code}: {detail}"
+            except Exception as e:
+                return str(e)[:120]
+            return None
+
+        # Resolve manager
+        mgr_url = mgr_headers = mgr_model_id = None
+        if req.manager_model:
+            found = _get_endpoint_for_model(req.manager_model)
+            if found:
+                mgr_url, mgr_headers, _, mgr_model_id = found
+                mgr_url = _to_openai_compat_url(mgr_url)
+        if not mgr_url:
+            try:
+                db = SessionLocal()
+                try:
+                    ep = db.query(ModelEndpoint).filter(ModelEndpoint.base_url.ilike("%anthropic.com%")).first()
+                    if ep:
+                        base, api_key = resolve_endpoint_runtime(ep)
+                        mgr_url = _to_openai_compat_url(build_chat_url(base))
+                        mgr_headers = build_headers(api_key, base)
+                        mgr_model_id = getattr(ep, "model", None) or _CLAUDE_MODEL
+                finally:
+                    db.close()
+            except Exception:
+                pass
+        if not mgr_url:
+            errors["manager"] = "No manager endpoint found — add an endpoint in Settings"
+        else:
+            err = await asyncio.to_thread(_test, mgr_url, mgr_headers or {}, mgr_model_id or _CLAUDE_MODEL, "manager")
+            if err:
+                errors["manager"] = err
+
+        # Resolve Gemini
+        if not errors.get("manager") or True:  # always test both
+            gem_url = gem_headers = gem_model = None
+            if req.gemini_model:
+                found = _get_endpoint_for_model(req.gemini_model)
+                if found:
+                    gem_url, gem_headers, _, _ = found
+                    gem_model = req.gemini_model
+            if not gem_url:
+                gem_url, gem_headers, _, gem_model = _get_gemini_endpoint()
+            if not gem_url:
+                errors["gemini"] = "No Gemini endpoint found — add a googleapis.com endpoint in Settings"
+            else:
+                err = await asyncio.to_thread(_test, gem_url, gem_headers or {}, gem_model or "", "gemini")
+                if err:
+                    errors["gemini"] = err
+
+        return {"ok": len(errors) == 0, "errors": errors}
+
+    @router.get("/jobs")
+    async def list_jobs():
+        """Return the case library job list so the UI can show it before a run starts."""
+        jobs = _load_case_library()
+        return [{"id": c.get("job_name", ""), "name": c.get("job_name", "")} for c in jobs]
 
     @router.get("/prompts")
     async def list_prompts():
