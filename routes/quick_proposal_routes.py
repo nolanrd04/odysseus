@@ -133,6 +133,8 @@ _active_tasks: dict[str, asyncio.Task] = {}
 class Phase3OnlyRequest(BaseModel):
     manager_model: str = ""
     gemini_model: str = ""
+    gemini_retry_attempts: int = 3
+    gemini_fallback_models: List[str] = []
 
 
 class ReclassifyPageRequest(BaseModel):
@@ -151,6 +153,8 @@ class RunRequest(BaseModel):
     gemini_model: str = ""
     manager_model: str = ""
     filename: str = ""
+    gemini_retry_attempts: int = 3
+    gemini_fallback_models: List[str] = []
 
 
 class ValidateRequest(BaseModel):
@@ -218,14 +222,14 @@ def _save_extracted_values(run_id: str, extracted_values: dict) -> None:
         logger.warning(f"[quick_proposal] extracted_values save failed run={run_id}: {e}")
 
 
-async def _run_phase3_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "") -> None:
+async def _run_phase3_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None) -> None:
     """Re-run phase2 index build + phase3 extraction loop using saved page classifications."""
     try:
         await _emit(queue, "phase_start", phase="phase2", label="Building extraction index…")
         index.extracted_data["phase1_summary"] = _build_phase1_summary(index)
         await _emit(queue, "phase_complete", phase="phase2")
 
-        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model)
+        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models)
         _save_run_results(run_id, index)
         _save_run_meta(run_id, status="complete")
     except Exception as e:
@@ -473,7 +477,7 @@ async def _classify_one_page(
             raise
 
 
-async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str = "") -> None:
+async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str = "", retry_attempts: int = 3, fallback_models: list | None = None) -> None:
     """Classify each rendered page via Gemini and emit page_classified events."""
     from src.quick_proposal.index import BboxRecord
 
@@ -497,32 +501,60 @@ async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str
     prompt     = (_PROMPTS_DIR / "gemini_phase1.txt").read_text(encoding="utf-8")
     cache_name = await _gemini_cache_create(prompt, api_key)
 
+    # Fallbacks use None for cache_name — the cache is tied to the primary endpoint's API key.
+    fallback_configs: list = []
+    for fb_model in (fallback_models or []):
+        found = _get_endpoint_for_model(fb_model)
+        if found:
+            fallback_configs.append((found[0], found[1], fb_model, None))
+        else:
+            fallback_configs.append((url, headers, fb_model, None))
+
+    all_configs = [(url, headers, model, cache_name)] + fallback_configs
+
     await _emit(queue, "phase_start", phase="phase1",
                 label="Classifying pages…",
                 cached=cache_name is not None)
 
     try:
         for page in index.pages:
-            last_err = None
             result = None
-            for attempt in range(3):
-                try:
-                    result = await _classify_one_page(page.image_path, prompt, url, headers, model, cache_name)
-                    last_err = None
-                    break
-                except httpx.HTTPStatusError as e:
-                    last_err = e
-                    status = e.response.status_code
-                    retryable = status == 400 or status >= 500
-                    if not retryable or attempt == 2:
+            last_err = None
+
+            for cfg_idx, (cfg_url, cfg_headers, cfg_model, cfg_cache) in enumerate(all_configs):
+                n_tries = retry_attempts if cfg_idx == 0 else 1
+                delay = 2.0
+
+                for attempt in range(n_tries):
+                    if attempt > 0:
+                        logger.warning(f"[quick_proposal] phase1 page={page.idx} retrying {cfg_model} attempt={attempt + 1}/{n_tries}: {last_err}")
+                        await asyncio.sleep(delay)
+                        delay = min(delay * 2, 30.0)
+                    elif cfg_idx > 0:
+                        logger.warning(f"[quick_proposal] phase1 page={page.idx} trying fallback model {cfg_model}")
+
+                    try:
+                        result = await _classify_one_page(page.image_path, prompt, cfg_url, cfg_headers, cfg_model, cfg_cache)
+                        last_err = None
                         break
-                    logger.warning(f"[quick_proposal] phase1 page={page.idx} HTTP {status} attempt={attempt}: {e.response.text[:500]}")
-                    await asyncio.sleep(2 ** (attempt + 1))
-                except Exception as e:
-                    last_err = e
-                    break
+                    except httpx.HTTPStatusError as e:
+                        last_err = e
+                        status = e.response.status_code
+                        if status not in _RETRYABLE_STATUS and status != 400:
+                            break  # non-retryable HTTP error
+                        logger.warning(f"[quick_proposal] phase1 page={page.idx} HTTP {status}: {e.response.text[:200]}")
+                    except (json.JSONDecodeError, httpx.TimeoutException) as e:
+                        last_err = e
+                        logger.warning(f"[quick_proposal] phase1 page={page.idx} {type(e).__name__}: {e}")
+                    except Exception as e:
+                        last_err = e
+                        break  # unknown error — don't retry
+
+                if last_err is None:
+                    break  # success, stop trying fallback configs
+
             if last_err is not None:
-                logger.warning(f"[quick_proposal] phase1 page={page.idx} error: {last_err}", exc_info=True)
+                logger.warning(f"[quick_proposal] phase1 page={page.idx} failed after all retries+fallbacks: {last_err}", exc_info=True)
                 await _emit(queue, "page_classified",
                             page_idx=page.idx, sheet_type="other",
                             importance="low", description="(classification failed)",
@@ -759,15 +791,73 @@ async def _execute_gemini_tool(
         return [{"type": "text", "text": f"Unknown tool: {name}"}]
 
 
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+async def _gemini_call_with_retry(
+    url: str,
+    headers: dict,
+    payload: dict,
+    retry_attempts: int = 3,
+    fallback_models_info: list | None = None,
+    queue: asyncio.Queue | None = None,
+) -> "httpx.Response":
+    """POST to Gemini, retrying transient errors then falling through to fallback models."""
+    base_headers = {**headers, "Content-Type": "application/json"}
+    # (url, headers, model) — primary first, then fallbacks
+    configs = [(url, base_headers, payload["model"])]
+    for fb_url, fb_hdrs, fb_model in (fallback_models_info or []):
+        configs.append((fb_url, {**fb_hdrs, "Content-Type": "application/json"}, fb_model))
+
+    last_response: "httpx.Response | None" = None
+    delay = 2.0
+
+    for cfg_idx, (cfg_url, cfg_hdrs, cfg_model) in enumerate(configs):
+        n_tries = retry_attempts if cfg_idx == 0 else 1
+        attempt_payload = {**payload, "model": cfg_model}
+
+        for attempt in range(n_tries):
+            if attempt > 0:
+                notice = f"Gemini error — retrying {cfg_model} (attempt {attempt + 1}/{n_tries})…"
+                logger.warning(f"[quick_proposal] {notice}")
+                if queue:
+                    await _emit(queue, "extraction_message", role="retry_notice", text=notice)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30.0)
+            elif cfg_idx > 0:
+                notice = f"Switching to fallback model: {cfg_model}…"
+                logger.warning(f"[quick_proposal] {notice}")
+                if queue:
+                    await _emit(queue, "extraction_message", role="retry_notice", text=notice)
+
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                r = await client.post(cfg_url, headers=cfg_hdrs, json=attempt_payload)
+
+            if r.is_success:
+                return r
+
+            last_response = r
+            if r.status_code not in _RETRYABLE_STATUS:
+                logger.error(f"[quick_proposal] Gemini non-retryable {r.status_code} model={cfg_model}: {r.text[:300]}")
+                r.raise_for_status()
+
+            logger.warning(f"[quick_proposal] Gemini {r.status_code} model={cfg_model} attempt={attempt + 1}/{n_tries}: {r.text[:200]}")
+
+    if last_response is not None:
+        last_response.raise_for_status()
+    raise RuntimeError("[quick_proposal] Gemini call failed: all attempts exhausted")
+
+
 async def _run_gemini_with_tools(
     user_message: str,
     gemini_state: dict,
     index,
     queue: asyncio.Queue,
+    retry_attempts: int = 3,
+    fallback_models_info: list | None = None,
 ) -> str:
     """Append user_message to Gemini history, call Gemini, handle tool loops, return final text."""
     gemini_state["messages"].append({"role": "user", "content": user_message})
-    req_headers = {**gemini_state["headers"], "Content-Type": "application/json"}
 
     for _ in range(200):
         payload: dict = {
@@ -779,11 +869,12 @@ async def _run_gemini_with_tools(
         if gemini_state.get("cache_name"):
             payload["cached_content"] = gemini_state["cache_name"]
 
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            r = await client.post(gemini_state["url"], headers=req_headers, json=payload)
-            if not r.is_success:
-                logger.error(f"[quick_proposal] Gemini phase3 error {r.status_code} model={payload['model']} url={gemini_state['url']}: {r.text[:500]}")
-            r.raise_for_status()
+        r = await _gemini_call_with_retry(
+            gemini_state["url"], gemini_state["headers"], payload,
+            retry_attempts=retry_attempts,
+            fallback_models_info=fallback_models_info,
+            queue=queue,
+        )
 
         resp_data  = r.json()
         choice     = resp_data.get("choices", [{}])[0]
@@ -803,6 +894,11 @@ async def _run_gemini_with_tools(
                 "content": text_out,
             })
 
+        if text_out and text_out.strip():
+            await _emit(queue, "extraction_message", role="gemini", text=text_out)
+            if log_path := gemini_state.get("log_path"):
+                _log_phase3_event(log_path, {"type": "extraction_message", "role": "gemini", "text": text_out})
+
         if not tool_calls:
             return text_out
 
@@ -818,6 +914,7 @@ async def _run_gemini_with_tools(
                         role="tool_call",
                         tool_id=tc.get("id", ""),
                         tool=tool_name,
+                        model=gemini_state.get("model", ""),
                         args=json.dumps(tc_args))
             if log_path := gemini_state.get("log_path"):
                 _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_call", "tool_id": tc.get("id", ""), "tool": tool_name, "args": json.dumps(tc_args)})
@@ -835,11 +932,14 @@ async def _run_gemini_with_tools(
             result_blocks = await _execute_gemini_tool(tool_name, tc_args, index, queue)
             # Emit tool result so the UI can update the running node to done.
             result_text = "\n".join(b["text"] for b in result_blocks if b.get("type") == "text") or "(no output)"
+            result_image = next((b["image_url"]["url"] for b in result_blocks if b.get("type") == "image_url"), None)
             await _emit(queue, "extraction_message",
                         role="tool_result",
                         tool_id=tc_id,
                         tool=tool_name,
-                        result=result_text)
+                        model=gemini_state.get("model", ""),
+                        result=result_text,
+                        **({"image_url": result_image} if result_image else {}))
             if log_path := gemini_state.get("log_path"):
                 _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result", "tool_id": tc_id, "tool": tool_name, "result": result_text})
             # Gemini OpenAI-compat rejects image_url in tool messages; keep only text
@@ -877,7 +977,7 @@ def _call_manager_sync(url: str, headers: dict, payload: dict) -> dict:
         return r.json()
 
 
-async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "") -> None:
+async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None) -> None:
     """Phase 3: Manager LLM orchestrates Gemini extraction via send_to_gemini tool (OpenAI-compatible format)."""
     # Resolve manager endpoint — prefer the explicitly selected model, fall back to Anthropic endpoint.
     mgr_url = mgr_headers = mgr_api_key = mgr_model_id = None
@@ -925,6 +1025,15 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
             gemini_url, gemini_headers, gemini_api_key, _unused = _get_gemini_endpoint()
     else:
         gemini_url, gemini_headers, gemini_api_key, gemini_model = _get_gemini_endpoint()
+
+    # Resolve fallback model endpoints once — reused by every _run_gemini_with_tools call.
+    fallback_models_info: list = []
+    for fb_model in (gemini_fallback_models or []):
+        found = _get_endpoint_for_model(fb_model)
+        if found:
+            fallback_models_info.append((found[0], found[1], fb_model))
+        else:
+            fallback_models_info.append((gemini_url, gemini_headers, fb_model))
 
     # Cache gemini_phase3.txt system prompt for reuse across all Gemini turns.
     gemini_phase3_prompt = (_PROMPTS_DIR / "gemini_phase3.txt").read_text(encoding="utf-8")
@@ -983,6 +1092,22 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
         },
     }
 
+    read_index_tool = {
+        "type": "function",
+        "function": {
+            "name":        "read_index",
+            "description": (
+                "Returns the current state of all extracted values in the shared index as JSON. "
+                "Call this before asking Gemini to re-read something — the value may already be extracted."
+            ),
+            "parameters": {
+                "type":       "object",
+                "properties": {},
+                "required":   [],
+            },
+        },
+    }
+
     mgr_messages = [
         {"role": "system", "content": manager_system},
         {"role": "user",   "content": "Here is the Phase 1 index from the plan set. Begin extraction.\n\n" + phase1_summary},
@@ -996,7 +1121,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                 "model":      mgr_model_id,
                 "max_tokens": 8192,
                 "messages":   mgr_messages,
-                "tools":      [send_to_gemini_tool],
+                "tools":      [send_to_gemini_tool, read_index_tool],
             }
             resp = await asyncio.to_thread(_call_manager_sync, mgr_url, mgr_headers, payload)
 
@@ -1039,12 +1164,25 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                     await _emit(queue, "extraction_message", role="claude_to_gemini", text=msg_text, model=mgr_model_id)
                     if log_path:
                         _log_phase3_event(log_path, {"type": "extraction_message", "role": "claude_to_gemini", "text": msg_text, "model": mgr_model_id})
-                    gemini_resp = await _run_gemini_with_tools(msg_text, gemini_state, index, queue)
+                    gemini_resp = await _run_gemini_with_tools(
+                        msg_text, gemini_state, index, queue,
+                        retry_attempts=retry_attempts,
+                        fallback_models_info=fallback_models_info or None,
+                    )
                     if gemini_resp.strip():
                         await _emit(queue, "extraction_message", role="gemini", text=gemini_resp)
                         if log_path:
                             _log_phase3_event(log_path, {"type": "extraction_message", "role": "gemini", "text": gemini_resp})
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": gemini_resp or "(extraction complete)"})
+                elif tool_name == "read_index":
+                    index_json = json.dumps(index.extracted_values, indent=2)
+                    await _emit(queue, "extraction_message",
+                                role="tool_call", tool_id=tool_id, tool="read_index", model=mgr_model_id, args="{}")
+                    await _emit(queue, "extraction_message",
+                                role="tool_result", tool_id=tool_id, tool="read_index", model=mgr_model_id, result=index_json)
+                    if log_path:
+                        _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result", "tool_id": tool_id, "tool": "read_index", "result": index_json})
+                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": index_json})
                 else:
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": f"Unknown tool: {tool_name}"})
 
@@ -1112,6 +1250,8 @@ async def run_pipeline(
     selected_jobs: Optional[List[str]] = None,
     gemini_model: str = "",
     manager_model: str = "",
+    gemini_retry_attempts: int = 3,
+    gemini_fallback_models: list | None = None,
 ) -> None:
     _success = False
     try:
@@ -1155,7 +1295,7 @@ async def run_pipeline(
         await _emit(queue, "phase_complete", phase="index")
 
         # Step 3 — Phase 1 per-page Gemini classification
-        await phase1_classify_pages(index, queue, model_override=gemini_model)
+        await phase1_classify_pages(index, queue, model_override=gemini_model, retry_attempts=gemini_retry_attempts, fallback_models=gemini_fallback_models)
         _save_run_results(run_id, index)  # persist phase1 classifications + bboxes
 
         # Step 4 — Phase 2: build text index from Phase 1 results (pure Python, no LLM)
@@ -1164,7 +1304,7 @@ async def run_pipeline(
         await _emit(queue, "phase_complete", phase="phase2")
 
         # Step 5 — Phase 3: manager LLM + Gemini extraction tool loop
-        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model)
+        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=gemini_retry_attempts, gemini_fallback_models=gemini_fallback_models)
         _success = True
 
     except Exception as e:
@@ -1207,6 +1347,8 @@ def setup_quick_proposal_routes():
             selected_jobs=req.selected_jobs or None,
             gemini_model=req.gemini_model,
             manager_model=req.manager_model,
+            gemini_retry_attempts=req.gemini_retry_attempts,
+            gemini_fallback_models=req.gemini_fallback_models or None,
         ))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
@@ -1394,7 +1536,7 @@ def setup_quick_proposal_routes():
         _active_runs[run_id] = queue
         _save_run_meta(run_id, status="running")
 
-        task = asyncio.create_task(_run_phase3_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model))
+        task = asyncio.create_task(_run_phase3_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
 
@@ -1432,7 +1574,30 @@ def setup_quick_proposal_routes():
 
         prompt = (_PROMPTS_DIR / "gemini_phase1.txt").read_text(encoding="utf-8")
         try:
-            result = await _classify_one_page(str(img_path), prompt, url, headers, model, None)
+            result = None
+            last_err = None
+            delay = 2.0
+            for attempt in range(3):
+                if attempt > 0:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 10.0)
+                try:
+                    result = await _classify_one_page(str(img_path), prompt, url, headers, model, None)
+                    last_err = None
+                    break
+                except httpx.HTTPStatusError as e:
+                    last_err = e
+                    if e.response.status_code not in _RETRYABLE_STATUS:
+                        break
+                    logger.warning(f"[quick_proposal] reclassify page={page_idx} HTTP {e.response.status_code} attempt={attempt + 1}/3")
+                except (json.JSONDecodeError, httpx.TimeoutException) as e:
+                    last_err = e
+                    logger.warning(f"[quick_proposal] reclassify page={page_idx} {type(e).__name__} attempt={attempt + 1}/3: {e}")
+                except Exception as e:
+                    last_err = e
+                    break
+            if last_err is not None:
+                raise last_err
         except Exception as e:
             logger.error(f"[quick_proposal] reclassify run={run_id} page={page_idx}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Classification failed: {e}")

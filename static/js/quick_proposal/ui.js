@@ -1,4 +1,5 @@
 import { startStream } from './stream.js';
+import markdownModule from '../markdown.js';
 
 const IMPORTANCE_COLOR = { high: '#22c55e', medium: '#f59e0b', low: '#6b7280' };
 const SHEET_TYPES = ['cover','typical_section','plan_view','profile','utility_plan','plat','grading','detail','spec','erosion','other'];
@@ -258,6 +259,44 @@ const STYLES = `
     display: flex; flex-direction: column; gap: 6px;
 }
 .qp-jobs-section .qp-model-label { width: auto; }
+.qp-retry-row {
+    width: 100%; max-width: 480px;
+    display: flex; align-items: center; gap: 10px;
+}
+.qp-retry-input {
+    width: 72px; flex-shrink: 0;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 6px 8px; font-size: 13px;
+    font-family: inherit;
+}
+.qp-retry-input:focus { outline: none; border-color: var(--accent, #0af); }
+.qp-fallback-section {
+    width: 100%; max-width: 480px;
+    display: flex; flex-direction: column; gap: 6px;
+}
+.qp-fallback-row { display: flex; gap: 6px; align-items: center; }
+.qp-fallback-add-btn {
+    flex-shrink: 0; background: none;
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); cursor: pointer;
+    font-size: 17px; padding: 3px 10px; line-height: 1;
+    transition: background 0.15s;
+}
+.qp-fallback-add-btn:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.qp-fallback-list { display: flex; flex-direction: column; gap: 4px; }
+.qp-fallback-chip {
+    display: flex; align-items: center; justify-content: space-between;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 4px 8px; font-size: 12px;
+}
+.qp-fallback-remove {
+    background: none; border: none; cursor: pointer;
+    color: color-mix(in srgb, var(--fg) 35%, transparent);
+    font-size: 13px; padding: 0 2px; line-height: 1; transition: color 0.1s;
+}
+.qp-fallback-remove:hover { color: #ef4444; }
 `;
 
 function injectStyles() {
@@ -310,6 +349,20 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                         <option value="">Loading models…</option>
                     </select>
                 </div>
+                <div class="qp-retry-row">
+                    <label class="qp-model-label" for="qp-retry-attempts">Gemini Retries</label>
+                    <input type="number" class="qp-retry-input" id="qp-retry-attempts" value="3" min="1" max="10">
+                </div>
+                <div class="qp-fallback-section">
+                    <div class="qp-model-label">Gemini Fallbacks <span style="opacity:0.5;font-weight:400;font-size:11px">(tried in order)</span></div>
+                    <div class="qp-fallback-row">
+                        <select class="qp-model-select" id="qp-fallback-select">
+                            <option value="">Loading models…</option>
+                        </select>
+                        <button class="qp-fallback-add-btn" id="qp-fallback-add-btn" type="button" title="Add fallback model">+</button>
+                    </div>
+                    <div class="qp-fallback-list" id="qp-fallback-list"></div>
+                </div>
                 <div class="qp-jobs-section" id="qp-jobs-section">
                     <div class="qp-model-label">Reference Jobs</div>
                     <div class="qp-jobs-grid" id="qp-jobs-grid"><span style="opacity:0.5;font-size:11px">Loading…</span></div>
@@ -345,6 +398,30 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
 
     loadModels(modelSelect, { preferClaude: false });
     loadModels(managerSelect, { preferClaude: true });
+
+    const retryInput     = overlay.querySelector('#qp-retry-attempts');
+    const fallbackSelect = overlay.querySelector('#qp-fallback-select');
+    const fallbackAddBtn = overlay.querySelector('#qp-fallback-add-btn');
+    const fallbackList   = overlay.querySelector('#qp-fallback-list');
+    let fallbackModels   = [];
+
+    loadModels(fallbackSelect, { preferClaude: false });
+
+    fallbackAddBtn.addEventListener('click', () => {
+        const mid = fallbackSelect.value;
+        if (!mid || fallbackModels.includes(mid)) return;
+        const label = fallbackSelect.options[fallbackSelect.selectedIndex]?.textContent || mid;
+        fallbackModels.push(mid);
+        const chip = document.createElement('div');
+        chip.className = 'qp-fallback-chip';
+        chip.dataset.mid = mid;
+        chip.innerHTML = `<span>${_esc(label)}</span><button class="qp-fallback-remove" type="button" title="Remove">✕</button>`;
+        chip.querySelector('.qp-fallback-remove').addEventListener('click', () => {
+            fallbackModels = fallbackModels.filter(m => m !== mid);
+            chip.remove();
+        });
+        fallbackList.appendChild(chip);
+    });
 
     // Fetch and render the reference jobs list up front so the selection is fixed before the run starts.
     const jobsGrid = overlay.querySelector('#qp-jobs-grid');
@@ -393,7 +470,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
         onFileSelected(e.dataTransfer.files[0]);
     });
 
-    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename));
+    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename, parseInt(retryInput.value, 10) || 3, [...fallbackModels]));
 
     return overlay;
 }
@@ -439,7 +516,7 @@ async function loadModels(select, { preferClaude = false } = {}) {
     }
 }
 
-async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '') {
+async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '', geminiRetryAttempts = 3, geminiFallbackModels = []) {
     const runBtn       = overlay.querySelector('#qp-run-btn');
     const cancelBtn    = overlay.querySelector('#qp-cancel-btn');
     const statusEl     = overlay.querySelector('#qp-status');
@@ -459,7 +536,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         const vRes = await fetch('/api/quick_proposal/validate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ gemini_model: geminiModel, manager_model: managerModel }),
+            body: JSON.stringify({ gemini_model: geminiModel, manager_model: managerModel, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels }),
             credentials: 'same-origin',
         });
         if (vRes.ok) {
@@ -509,7 +586,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         const res = await fetch('/api/quick_proposal/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ upload_id: uploadId, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs }),
+            body: JSON.stringify({ upload_id: uploadId, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels }),
         });
         if (!res.ok) throw new Error(`Run failed: ${res.status}`);
         runId = (await res.json()).run_id;
@@ -1076,6 +1153,42 @@ function closeClassifyEditor() {
     if (editor) editor.style.display = 'none';
 }
 
+function _exportLogText(container) {
+    const parts = [];
+    for (const child of container.children) {
+        if (child.classList.contains('qp-exmsg-manager')) {
+            const avatar = child.querySelector('.qp-msg-avatar')?.textContent?.trim() || 'Manager';
+            const thinking = child.querySelector('.thinking-content-inner')?.innerText?.trim();
+            const text = child.querySelector('.qp-msg-text')?.innerText?.trim() || '';
+            if (thinking) parts.push(`[${avatar} – thinking]\n${thinking}`);
+            if (text) parts.push(`[${avatar}]\n${text}`);
+        } else if (child.classList.contains('qp-exmsg-gemini')) {
+            const thinking = child.querySelector('.thinking-content-inner')?.innerText?.trim();
+            const text = child.querySelector('.qp-msg-text')?.innerText?.trim() || '';
+            if (thinking) parts.push(`[Gemini – thinking]\n${thinking}`);
+            if (text) parts.push(`[Gemini]\n${text}`);
+        } else if (child.classList.contains('qp-exmsg-instruction')) {
+            const text = child.querySelector('.thinking-content-inner')?.innerText?.trim() || '';
+            if (text) parts.push(`[→ Gemini instruction]\n${text}`);
+        } else if (child.classList.contains('agent-thread')) {
+            for (const node of child.querySelectorAll('.agent-thread-node')) {
+                const tool = node.querySelector('.agent-thread-tool')?.textContent?.trim() || 'tool';
+                const outputs = node.querySelectorAll('.agent-tool-output pre');
+                const input  = outputs[0]?.textContent?.trim() || '';
+                const output = outputs[1]?.textContent?.trim() || '';
+                let entry = `[tool: ${tool}]`;
+                if (input)  entry += `\nInput:  ${input}`;
+                if (output) entry += `\nOutput: ${output}`;
+                parts.push(entry);
+            }
+        } else {
+            const text = child.innerText?.trim();
+            if (text) parts.push(text);
+        }
+    }
+    return parts.join('\n\n---\n\n');
+}
+
 function renderExtractionPanel(mainOutput) {
     const previewArea = mainOutput.querySelector('#qp-preview-area');
     if (!previewArea) return;
@@ -1083,7 +1196,10 @@ function renderExtractionPanel(mainOutput) {
     previewArea._panCtrl?.abort();
     previewArea.innerHTML = `
         <div class="qp-extraction-log" id="qp-extraction-log">
-            <div class="qp-extraction-header">Extraction Log</div>
+            <div class="qp-extraction-header">
+                Extraction Log
+                <button class="qp-export-log-btn" id="qp-export-log-btn" title="Copy log as plain text">Export log</button>
+            </div>
             <div class="qp-extraction-messages" id="qp-extraction-messages"></div>
         </div>
         <div class="qp-index-panel" id="qp-index-panel">
@@ -1091,6 +1207,16 @@ function renderExtractionPanel(mainOutput) {
             <div class="qp-index-values" id="qp-index-values"></div>
         </div>
     `;
+    previewArea.querySelector('#qp-export-log-btn').addEventListener('click', () => {
+        const msgs = previewArea.querySelector('#qp-extraction-messages');
+        const text = _exportLogText(msgs);
+        navigator.clipboard.writeText(text).then(() => {
+            const btn = previewArea.querySelector('#qp-export-log-btn');
+            const orig = btn.textContent;
+            btn.textContent = 'Copied!';
+            setTimeout(() => { btn.textContent = orig; }, 1500);
+        });
+    });
 }
 
 function _esc(str) {
@@ -1098,22 +1224,6 @@ function _esc(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function _extractThinking(text) {
-    const m = (text || '').match(/^<think>([\s\S]*?)<\/think>\s*/);
-    if (!m) return { thinking: null, content: text || '' };
-    return { thinking: m[1].trim(), content: text.slice(m[0].length).trim() };
-}
-
-function _buildThinkingSection(thinking) {
-    const id = 'qp-think-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
-    return `<div class="thinking-section qp-think">
-        <div class="thinking-header" data-thinking-id="${id}">
-            <div class="thinking-header-left"><span>View thinking process</span></div>
-            <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
-        </div>
-        <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${_esc(thinking)}</div></div>
-    </div>`;
-}
 
 function appendExtractionMessage(mainOutput, data) {
     const container = mainOutput.querySelector('#qp-extraction-messages');
@@ -1133,10 +1243,14 @@ function appendExtractionMessage(mainOutput, data) {
         const node = document.createElement('div');
         node.className = 'agent-thread-node running';
         node.dataset.toolId = toolId;
+        if (data.model) node.dataset.model = data.model;
+        const modelBadge = data.model
+            ? `<span class="qp-tool-model-badge">${_esc(data.model)}</span>`
+            : '';
         node.innerHTML = `<div class="agent-thread-dot"></div>
             <div class="agent-thread-header">
                 <span class="agent-thread-icon">⚙</span>
-                <span class="agent-thread-tool">${_esc(data.tool)}</span>
+                ${modelBadge}<span class="agent-thread-tool">${_esc(data.tool)}</span>
                 <span class="agent-thread-wave">▱▲△</span>
             </div>
             <div class="agent-thread-content">
@@ -1150,28 +1264,31 @@ function appendExtractionMessage(mainOutput, data) {
         if (node) {
             const inputHtml = node.querySelector('.agent-tool-output')?.outerHTML || '';
             node.className = 'agent-thread-node';
+            const model = data.model || node.dataset.model || '';
+            const modelBadge = model ? `<span class="qp-tool-model-badge">${_esc(model)}</span>` : '';
+            const imgHtml = data.image_url
+                ? `<img src="${_esc(data.image_url)}" style="max-width:100%;border-radius:4px;margin-top:6px;" loading="lazy">`
+                : '';
             node.innerHTML = `<div class="agent-thread-dot"></div>
                 <div class="agent-thread-header">
                     <span class="agent-thread-icon">✓</span>
-                    <span class="agent-thread-tool">${_esc(data.tool)}</span>
+                    ${modelBadge}<span class="agent-thread-tool">${_esc(data.tool)}</span>
                     <span class="agent-thread-status">done</span>
                     <span class="agent-thread-chevron">▶</span>
                 </div>
                 <div class="agent-thread-content">
                     ${inputHtml}
-                    <details class="agent-tool-output"><summary>Output</summary><pre>${_esc(data.result || '(no output)')}</pre></details>
+                    <details class="agent-tool-output"><summary>Output</summary><pre>${_esc(data.result || '(no output)')}</pre>${imgHtml}</details>
                 </div>`;
         }
 
     } else if (data.role === 'claude') {
-        const { thinking, content } = _extractThinking(data.text || '');
         const label = data.model || 'Manager';
         const wrap = document.createElement('div');
         wrap.className = 'qp-exmsg qp-exmsg-manager';
-        wrap.innerHTML = (thinking ? _buildThinkingSection(thinking) : '')
-            + `<div class="qp-msg-bubble qp-msg-manager">
+        wrap.innerHTML = `<div class="qp-msg-bubble qp-msg-manager">
                 <span class="qp-msg-avatar qp-avatar-manager">${_esc(label)}</span>
-                <div class="qp-msg-text">${_esc(content)}</div>
+                <div class="qp-msg-text">${markdownModule.processWithThinking(data.text || '')}</div>
             </div>`;
         container.appendChild(wrap);
 
@@ -1184,7 +1301,7 @@ function appendExtractionMessage(mainOutput, data) {
                 <div class="thinking-header-left"><span data-label="Gemini instruction">→ Gemini instruction</span></div>
                 <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
             </div>
-            <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${_esc(data.text || '')}</div></div>
+            <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${markdownModule.mdToHtml(data.text || '')}</div></div>
         </div>`;
         container.appendChild(wrap);
 
@@ -1193,8 +1310,14 @@ function appendExtractionMessage(mainOutput, data) {
         wrap.className = 'qp-exmsg qp-exmsg-gemini';
         wrap.innerHTML = `<div class="qp-msg-bubble qp-msg-gemini">
             <span class="qp-msg-avatar qp-avatar-gemini">Gemini</span>
-            <div class="qp-msg-text">${_esc(data.text || '')}</div>
+            <div class="qp-msg-text">${markdownModule.processWithThinking(data.text || '')}</div>
         </div>`;
+        container.appendChild(wrap);
+
+    } else if (data.role === 'retry_notice') {
+        const wrap = document.createElement('div');
+        wrap.className = 'qp-exmsg qp-exmsg-retry-notice';
+        wrap.innerHTML = `<span style="margin-right:5px;opacity:0.7">↻</span>${_esc(data.text || '')}`;
         container.appendChild(wrap);
 
     } else {
@@ -1382,6 +1505,8 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
                 <select class="qp-model-select" id="qp-p3-manager-select">
                     <option value="">Loading…</option>
                 </select>
+                <span class="qp-phase3-label">Retries</span>
+                <input type="number" class="qp-retry-input" id="qp-p3-retry-attempts" value="3" min="1" max="10">
                 <button class="qp-run-btn" id="qp-p3-run-btn" style="margin:0;padding:6px 18px;flex-shrink:0;">Run Phase 3</button>
             </div>
             <div class="qp-status" id="qp-status" style="display:none"></div>
@@ -1411,10 +1536,11 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
     mainOutput._qpRunId        = runId;
     mainOutput._qpSidebarPages = sidebarPages;
     mainOutput._qpGeminiModel  = '';
-    const phase3Bar     = overlay.querySelector('#qp-phase3-bar');
-    const geminiSelect  = overlay.querySelector('#qp-p3-gemini-select');
-    const managerSelect = overlay.querySelector('#qp-p3-manager-select');
-    const phase3RunBtn  = overlay.querySelector('#qp-p3-run-btn');
+    const phase3Bar      = overlay.querySelector('#qp-phase3-bar');
+    const geminiSelect   = overlay.querySelector('#qp-p3-gemini-select');
+    const managerSelect  = overlay.querySelector('#qp-p3-manager-select');
+    const p3RetryInput   = overlay.querySelector('#qp-p3-retry-attempts');
+    const phase3RunBtn   = overlay.querySelector('#qp-p3-run-btn');
     const cancelBtn     = overlay.querySelector('#qp-cancel-btn');
 
     loadModels(geminiSelect, { preferClaude: false });
@@ -1427,7 +1553,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
             const res = await fetch(`/api/quick_proposal/runs/${runId}/phase3`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value }),
+                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [] }),
                 credentials: 'same-origin',
             });
             if (!res.ok) throw new Error(`Phase 3 start failed: ${res.status}`);
