@@ -1,0 +1,210 @@
+.qp-classify-editor {
+    position: fixed;
+    z-index: 9999;
+    background: var(--panel, #1a1d23);
+    border: 1px solid var(--border, #355a66);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 175px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+}
+.qp-classify-editor-row { display: flex; flex-direction: column; gap: 3px; }
+.qp-classify-editor-label {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: color-mix(in srgb, var(--fg) 50%, transparent);
+}
+.qp-classify-editor select {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 5px;
+    color: var(--fg); padding: 5px 7px; font-size: 12px;
+    font-family: inherit; cursor: pointer; width: 100%;
+}
+.qp-classify-editor select:focus { outline: none; border-color: var(--accent, #0af); }
+.qp-classify-editor-actions { display: flex; gap: 6px; margin-top: 2px; }
+.qp-classify-editor-save {
+    flex: 1; background: var(--accent, #0af); color: #fff;
+    border: none; border-radius: 5px; padding: 5px 0;
+    font-size: 12px; font-family: inherit; cursor: pointer; font-weight: 600;
+}
+.qp-classify-editor-save:hover { opacity: 0.85; }
+.qp-classify-editor-cancel {
+    flex: 1; background: none; border: 1px solid var(--border);
+    border-radius: 5px; color: var(--fg); padding: 5px 0;
+    font-size: 12px; font-family: inherit; cursor: pointer;
+}
+.qp-classify-editor-cancel:hover { border-color: var(--fg); }
+.qp-classification-badge { cursor: pointer; }
+.qp-classification-badge:hover { opacity: 1 !important; filter: brightness(1.2); }
+
+/* ── Proposal Runs Panel ──────────────────────────────────────────────────── */
+.qp-runs-body {
+    flex: 1; overflow-y: auto; padding: 12px 16px;
+    display: flex; flex-direction: column; gap: 8px;
+}
+.qp-run-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px;
+    border: 1px solid var(--border); border-radius: 8px;
+    transition: border-color 0.12s;
+}
+.qp-run-row:hover { border-color: var(--accent, #0af); }
+.qp-run-info { flex: 1; min-width: 0; }
+.qp-run-filename {
+    font-size: 13px; font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qp-run-meta {
+    font-size: 11px; margin-top: 2px;
+    color: color-mix(in srgb, var(--fg) 50%, transparent);
+}
+.qp-run-notes {
+    font-size: 11px; margin-top: 2px; font-style: italic;
+    color: color-mix(in srgb, var(--fg) 45%, transparent);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qp-run-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.qp-run-open-btn {
+    padding: 5px 14px; font-size: 12px; font-weight: 600;
+    background: transparent; color: var(--accent, #0af);
+    border: 1px solid var(--accent, #0af); border-radius: 5px; cursor: pointer; transition: opacity 0.12s;
+}
+.qp-run-open-btn:hover { opacity: 0.75; }
+.qp-run-rerun-btn {
+    padding: 5px 14px; font-size: 12px; font-weight: 600;
+    background: var(--accent, #0af); color: #fff;
+    border: none; border-radius: 5px; cursor: pointer; transition: opacity 0.12s;
+}
+.qp-run-rerun-btn:hover { opacity: 0.82; }
+.qp-view-rerun-btn {
+    margin-left: auto; margin-right: 8px;
+    padding: 4px 12px; font-size: 12px;
+}
+.qp-run-status-running  { color: #f59e0b; }
+.qp-run-status-complete { color: #22c55e; }
+.qp-run-status-error    { color: #ef4444; }
+.qp-run-status-unknown  { color: color-mix(in srgb, var(--fg) 45%, transparent); }
+.qp-runs-empty {
+    padding: 32px; text-align: center; font-size: 13px;
+    color: color-mix(in srgb, var(--fg) 45%, transparent);
+}
+
+/* ── View Panel — Phase 3 rerun bar ──────────────────────────────────────── */
+.qp-phase3-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 16px; flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--fg) 2%, var(--bg));
+}
+.qp-phase3-label {
+    font-size: 12px; white-space: nowrap; flex-shrink: 0; width: 110px;
+    color: color-mix(in srgb, var(--fg) 65%, transparent);
+}
+
+/* ── Prompts Panel ────────────────────────────────────────────────────────── */
+.qp-prompts-body {
+    flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+}
+.qp-prompt-tabs {
+    display: flex; gap: 2px; flex-shrink: 0;
+    padding: 8px 12px 0;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+}
+.qp-prompt-tab {
+    padding: 5px 14px; font-size: 12px; font-weight: 500;
+    background: none; border: 1px solid transparent;
+    border-bottom: none; border-radius: 5px 5px 0 0;
+    color: color-mix(in srgb, var(--fg) 60%, transparent);
+    cursor: pointer; transition: color 0.12s, background 0.12s;
+    margin-bottom: -1px;
+}
+.qp-prompt-tab:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.qp-prompt-tab.active {
+    color: var(--fg);
+    background: var(--panel, #1a1d23);
+    border-color: var(--border);
+    border-bottom-color: var(--panel, #1a1d23);
+}
+.qp-prompt-content {
+    flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column;
+}
+.qp-prompt-pane {
+    flex: 1; overflow-y: auto; padding: 16px;
+}
+.qp-prompt-pre {
+    margin: 0; font-family: 'Courier New', monospace; font-size: 12px;
+    line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+    color: var(--fg);
+}
+
+/* ── Phase 3 Extraction Panel ─────────────────────────────────────────────── */
+#qp-preview-area:has(#qp-extraction-log) {
+    flex-direction: column;
+}
+.qp-extraction-log {
+    flex: 1; display: flex; flex-direction: column; min-height: 0;
+    overflow: hidden;
+}
+.qp-extraction-header, .qp-index-header {
+    padding: 5px 12px; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    color: color-mix(in srgb, var(--fg) 45%, transparent);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.qp-extraction-messages {
+    flex: 1; overflow-y: auto; padding: 8px 12px;
+    display: flex; flex-direction: column; gap: 3px;
+    font-size: 12px; line-height: 1.45;
+}
+.qp-exmsg { word-break: break-word; }
+.qp-exmsg-claude       { color: var(--accent, #0af); }
+.qp-exmsg-claude-to-gemini { color: #a78bfa; font-style: italic; }
+.qp-exmsg-gemini       { color: var(--fg); }
+.qp-exmsg-tool         {
+    color: color-mix(in srgb, var(--fg) 50%, transparent);
+    font-family: monospace; font-size: 10px;
+}
+/* ── Live Index Panel ─────────────────────────────────────────────────────── */
+.qp-index-panel {
+    flex-shrink: 0; max-height: 220px; overflow-y: auto;
+    border-top: 1px solid var(--border);
+}
+.qp-index-values {
+    padding: 6px 12px; display: flex; flex-direction: column; gap: 1px;
+}
+.qp-index-item {
+    display: grid; grid-template-columns: 180px 1fr auto;
+    gap: 6px; font-size: 11px; font-family: monospace;
+    padding: 1px 0;
+}
+.qp-index-key  { color: color-mix(in srgb, var(--fg) 55%, transparent); truncate: ellipsis; }
+.qp-index-val  { color: var(--fg); }
+.qp-index-conf { font-size: 9px; padding: 1px 4px; border-radius: 3px; align-self: center; }
+.qp-index-conf-high   { color: #22c55e; }
+.qp-index-conf-medium { color: #f59e0b; }
+.qp-index-conf-low    { color: #ef4444; }
+/* ── Region preview tiles (in sidebar Viewed Regions section) ───────────────── */
+.qp-region-preview-grid {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 4px 8px 8px;
+}
+.qp-region-tile {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+}
+.qp-region-tile img {
+    width: 72px; height: 52px; object-fit: cover;
+    border-radius: 3px; border: 1px solid var(--border);
+    transition: border-color 0.12s;
+}
+.qp-region-tile.active img,
+.qp-region-tile:hover img { border-color: var(--accent, #0af); }
+.qp-region-tile-lbl {
+    font-size: 9px; font-family: monospace;
+    color: color-mix(in srgb, var(--fg) 45%, transparent);
+    max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}

@@ -1,0 +1,144 @@
+You are classifying a single page from a civil engineering construction plan set for a land
+development project. Your job is to identify what type of sheet this is, flag how useful it is
+for cost estimation, and annotate every region that contains extractable data.
+
+Return ONLY valid JSON. No text outside the JSON block.
+
+---
+
+## Sheet Types
+
+Classify as exactly one of:
+
+- "cover"           — title sheet, project name, sheet index, lot/parcel table, engineer's seal
+- "typical_section" — road cross-section: ROW width, curb type, pavement layers, sidewalk, stripping depth
+- "plan_view"       — top-down road layout with centerline, stationing, lot numbers, construction limits
+- "profile"         — elevation profile (x = station, y = elevation) showing proposed vs existing grade
+- "utility_plan"    — water main, sewer main, storm drainage routing with pipe labels and fixture symbols
+- "plat"            — subdivision plat with lot boundaries, bearings, curve data, road dimensions
+- "grading"         — grading/earthwork plan with contours, cut/fill zones, lot grading extents
+- "detail"          — construction detail drawings (curb, manhole, inlet, valve, service connection, etc.)
+- "spec"            — specification notes, general notes, standard notes pages
+- "erosion"         — erosion and sediment control (ESC/SWPPP) plan
+- "other"           — anything not covered above (blank page, signature page, standard plan sheets, etc.)
+
+---
+
+## Importance
+
+Rate the estimation value of this page:
+
+- "high"   — directly contains data needed to compute quantities or determine scope:
+             typical_section (curb type, ROW, pavement spec, sidewalk), plan_view (stationing,
+             road layout, construction limits), utility_plan (pipe routes, hydrant/manhole counts),
+             cover or plat that clearly shows lot count
+- "medium" — contains useful context or secondary data: profile (earthwork balance), grading
+             (lot grading scope, cut/fill), cover without a readable lot table
+- "low"    — unlikely to change the estimate: detail sheets, spec/notes pages, erosion plans,
+             signature/approval blocks, standard boilerplate, blank or near-blank pages
+
+---
+
+## Regions
+
+For each distinct zone that a cost estimator would read, annotate a region.
+Assign each region an `element_type` from this list (required):
+
+- "drawing"    — a graphical drawing, diagram, or plan view. Add `element_subtype`:
+                 "plan_view" | "profile" | "typical_section" | "plat" | "map"
+- "table"      — a structured table (lot count table, bid item list, quantity sheet, etc.)
+- "list"       — a bulleted or numbered list of notes, specs, or items
+- "notes"      — a block of free-text general notes or specification language
+- "scale"      — a scale bar or ratio label
+- "page_label" — the sheet number / sheet index label (e.g. "C-3", "Sheet 4 of 12")
+- "page_title" — the title block text (project name, road name, station range, etc.)
+- "compass"    — a north arrow or compass rose
+- "other"      — anything else; describe it in `element_subtype`
+
+Multiple instances of the same `element_type` are allowed on one page.
+
+Annotate ALL of the following when visible — do not skip them:
+
+TYPICAL SECTION:
+  - ROW width dimension label (the full right-of-way arrow with number)
+  - Curb type detail (rolled/mountable vs vertical curb & gutter profile)
+  - Pavement spec callout (e.g. "4\" HMA over 4\" base over 12\" ballast")
+  - Sidewalk slab (one side or both sides of road)
+  - Stripping depth callout ("STRIP 6\" TOPSOIL", "6\" STRIP AND STOCKPILE")
+  - Curb-to-curb width label (B-B dimension, travel lane width)
+
+PLAN VIEW / PLAT:
+  - Road name + stationing range in title or label (e.g. "[ROAD] STA: 10+00 TO STA: 17+00")
+  - BEGIN CONSTRUCTION / END CONSTRUCTION / BEGIN PROJECT / END PROJECT markers
+  - Station tick labels along the road centerline
+  - Lot number labels (to count buildable lots)
+  - Road connection points to existing roads (each point where new road meets existing pavement)
+  - Cul-de-sac bulb or loop closure geometry
+
+UTILITY PLAN:
+  - Pipe labels (8" WATER MAIN, 8" SEWER MAIN, 12" SEWER MAIN, etc.)
+  - Proposed fire hydrant symbols (annotate each cluster)
+  - Proposed sewer manhole labels (MH-1, MH-2, 48" MH, etc.)
+  - Storm drainage basin labels (BASIN 1, DB-1, drainage area arrows)
+  - Stormwater inlet types (catch basin grates, scupper openings, curb inlets)
+  - Irrigation service note or irrigation district callout
+
+COVER:
+  - Lot count table or "LOTS: N" callout
+  - Project name and location text
+  - Engineering firm name/seal
+
+PROFILE:
+  - Proposed grade line vs existing grade line (which is consistently above the other)
+  - Any earthwork balance note ("IMPORT FILL", "EXPORT", "BORROW")
+
+GRADING:
+  - Areas labeled "FILL" or "CUT"
+  - Notes using keywords: "strip lots", "lot grading", "rough grade lots", "place topsoil on lots"
+  - Cut/fill volume summary table
+
+SCOPE FLAGS (on any sheet):
+  - Demo callouts ("DEMO PERMIT REQUIRED", "REMOVE & DISPOSE", "REMOVE TO FILL")
+  - Existing road widening scope ("ROAD WIDENING", "RIGHT TURN LANE", "WIDEN TO MATCH")
+  - Ballast as separate line item ("12\" BALLAST", "CRUSHED AGGREGATE BASE COURSE" as bid item)
+  - Haul-off language ("INCL HAUL OFF", "HAUL TO WASTE", "EXPORT TO WASTE SITE")
+  - Pedestrian path distinct from sidewalk ("MULTI-USE PATH", "SHARED USE PATH", "TRAIL")
+
+Do NOT annotate: north arrow, scale bar, revision blocks, boilerplate legal text, blank margins.
+
+---
+
+## Bounding Box Format
+
+"bbox": [x1, y1, x2, y2]
+
+Coordinates are percentages of page width and height.
+(0, 0) = top-left. (100, 100) = bottom-right.
+Be generous — include context around the element. Minimum box: 5 × 5 units.
+Larger boxes are better than missing context.
+
+---
+
+## Output Schema
+
+Return exactly this structure:
+
+{
+  "sheet_type": "<type from list above>",
+  "importance": "high" | "medium" | "low",
+  "description": "<one sentence: what is on this page and what estimation data it contains>",
+  "regions": [
+    {
+      "id": "r0",
+      "label": "<short label for this region, e.g. 'ROW width label', 'pavement spec', 'lot table'>",
+      "bbox": [x1, y1, x2, y2],
+      "element_type": "<one of: drawing | table | list | notes | scale | page_label | page_title | compass | other>",
+      "element_subtype": "<for drawing: plan_view | profile | typical_section | plat | map; for other: brief description; omit for remaining types>",
+      "extraction_hint": "<the specific fact that can be read here — be concrete, e.g. 'ROW width in feet', 'stripping depth in inches', 'total LF from stationing range'>",
+      "importance": "high" | "medium" | "low"
+    }
+  ]
+}
+
+Use sequential IDs: r0, r1, r2, ...
+If no regions worth annotating exist (low-importance page), return an empty array for "regions".

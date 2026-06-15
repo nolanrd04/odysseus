@@ -1,0 +1,942 @@
+/* ── Layout ── */
+
+    /* Top bar — session meta + incognito, single row */
+    .chat-top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      position: relative;
+      z-index: 2;
+      padding: 5px 0 0;
+      min-height: 25px;
+      box-sizing: border-box;
+    }
+    .chat-top-bar::after {
+      content: none;
+    }
+    body.sidebar-collapsed.hamburger-left .chat-top-bar {
+      padding-left: 38px;
+    }
+    body.sidebar-collapsed.hamburger-right .chat-top-bar {
+      padding-right: 38px;
+    }
+    .incognito-indicator {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.15s, background 0.15s, left 0.15s;
+      z-index: 1;
+      opacity: 0.7;
+    }
+    body.sidebar-collapsed.hamburger-left .incognito-indicator {
+      left: 12px;
+    }
+    .incognito-indicator:hover {
+      opacity: 1;
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+    }
+
+    .chat-new-btn {
+      position: absolute;
+      right: 7px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: var(--fg);
+      opacity: 0.6;
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.08s, background 0.08s, left 0.15s, right 0.15s;
+      flex-shrink: 0;
+      z-index: 1;
+    }
+    .chat-new-btn:hover {
+      opacity: 1;
+      color: var(--accent);
+    }
+    /* Flip new-chat and incognito when sidebar is on the right */
+    body:has(.sidebar.right-side) .chat-new-btn {
+      right: auto;
+      left: 12px;
+    }
+    body:has(.sidebar.right-side) .incognito-indicator {
+      left: auto;
+      right: 12px;
+    }
+    body.sidebar-collapsed.hamburger-right .incognito-indicator {
+      right: 42px;
+    }
+
+    /* Session meta — sits at top of chat area, scrolls with content */
+    .chat-meta-overlay {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      transform: translateY(calc(-50% - 2px));
+      font-size: 0.75em;
+      line-height: 1;
+      /* 70% mix keeps the chat title clearly above the WCAG AA 4.5:1
+         contrast threshold (40% only reached ~2.8:1). */
+      color: color-mix(in srgb, var(--fg) 70%, transparent);
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      pointer-events: none;
+    }
+    .chat-meta-overlay > * {
+      pointer-events: auto;
+    }
+    .chat-meta-overlay #current-meta {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+    .chat-meta-overlay:hover {
+      color: color-mix(in srgb, var(--fg) 75%, transparent);
+    }
+    /* Offline model rows */
+    .models-row-offline {
+      opacity: 0.4;
+      pointer-events: none;
+    }
+    .models-row-offline .model-chat-btn {
+      pointer-events: auto;
+    }
+    /* Offline badge next to endpoint name */
+    .endpoint-offline-badge {
+      color: var(--danger, #f44);
+      font-size: 0.8em;
+      margin-left: 4px;
+      opacity: 0.7;
+    }
+    .chat-meta-overlay:empty,
+    .chat-meta-overlay:not(:has(#current-meta:not(:empty))) {
+      display: none;
+    }
+    .export-dropdown-wrap {
+      position: relative;
+      display: inline-flex;
+      flex-shrink: 0;
+      margin-left: -4px;
+      margin-right: -20px;
+    }
+    .export-dl-btn {
+      background: none; border: none;
+      color: inherit;
+      cursor: pointer;
+      padding: 4px 5px; border-radius: 4px;
+      display: flex; align-items: center;
+      transition: color 0.08s, background 0.08s;
+    }
+    .export-dl-btn:hover {
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+    }
+    .export-dropdown-menu {
+      display: none;
+      position: fixed;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 8px; padding: 4px; min-width: 120px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      z-index: 300;
+      color: var(--fg);
+    }
+    .export-dropdown-menu.open { display: block; }
+    .export-dropdown-item {
+      padding: 6px 8px; font-size: 11px; cursor: pointer;
+      border-radius: 6px; color: var(--fg); white-space: nowrap;
+      display: flex; align-items: center; gap: 10px;
+      transition: background 0.1s;
+    }
+    .export-dropdown-item:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+    .export-dropdown-item .dropdown-icon {
+      width: 14px; height: 14px;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; opacity: 0.5;
+    }
+    /* On mobile the chat-header export dropdown was cramped — items
+       were 11px font with 6px padding. Bump to readable touch targets:
+       larger min-width, taller rows, bigger icons + text. */
+    @media (max-width: 768px) {
+      .export-dropdown-menu {
+        min-width: 200px;
+        padding: 6px;
+        border-radius: 10px;
+      }
+      .export-dropdown-item {
+        padding: 12px 14px;
+        font-size: 14px;
+        gap: 12px;
+        min-height: 44px;
+      }
+      .export-dropdown-item .dropdown-icon {
+        width: 18px; height: 18px; opacity: 0.7;
+      }
+      .export-dropdown-item .dropdown-icon svg {
+        width: 18px; height: 18px;
+      }
+    }
+    .sidebar {
+      width: 240px;
+      background: var(--sidebar-bg, var(--panel));
+      border-right: 1px solid var(--border);
+      transition: width 0.25s ease, opacity 0.2s ease, padding 0.25s ease;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      overflow: hidden;
+      min-height: 0;
+      margin: 0;
+      padding: 0;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      backdrop-filter: blur(10px);
+      border: 1px solid color-mix(in srgb, var(--fg) 11%, transparent);
+      position: relative;
+    }
+    .sidebar-resize-handle {
+      position: absolute;
+      top: 0;
+      right: -3px;
+      width: 6px;
+      height: 100%;
+      cursor: col-resize;
+      z-index: 10;
+      background: transparent;
+    }
+    .sidebar-resize-handle:hover,
+    .sidebar-resize-handle.dragging {
+      background: var(--accent);
+      opacity: 0.6;
+    }
+    .sidebar.right-side .sidebar-resize-handle {
+      right: auto;
+      left: -3px;
+    }
+    .sidebar.resizing {
+      transition: none;
+      user-select: none;
+    }
+    .sidebar.right-side {
+      order: 2;
+      margin: 0;
+      border-right: none;
+      border-left: 1px solid var(--border);
+    }
+    .sidebar.hidden {
+      /* !important so it beats the inline width init.js restores from storage —
+         otherwise the width never changes and only opacity animates, making the
+         collapse look instant. With this, width animates from the inline value
+         down to 0 via the .sidebar width transition. */
+      width: 0 !important;
+      padding: 0 !important;
+      border: none;
+      overflow: hidden;
+      opacity: 0;
+    }
+    /* ===== Sidebar User Bar ===== */
+    .sidebar-user-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 12px;
+      flex-shrink: 0;
+      gap: 4px;
+      min-height: 48px;
+    }
+
+    .user-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 1;
+      min-width: 0;
+      cursor: pointer;
+      padding: 6px 8px;
+      border-radius: 8px;
+      transition: background 0.15s;
+    }
+
+    .user-bar-left:hover {
+      background: color-mix(in srgb, var(--fg) 6%, transparent);
+    }
+
+    .user-bar-avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: color-mix(in srgb, var(--fg) 12%, transparent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--fg);
+      opacity: 0.7;
+      flex-shrink: 0;
+      text-transform: uppercase;
+    }
+
+    .user-bar-name {
+      font-size: 9.75px;
+      font-weight: 500;
+      color: var(--fg);
+      opacity: 0.8;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .user-bar-actions {
+      display: flex;
+      gap: 1px;
+      flex-shrink: 0;
+    }
+
+    .user-bar-btn {
+      background: none;
+      border: none;
+      color: var(--fg);
+      opacity: 0.35;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.12s, background 0.12s;
+    }
+
+    .user-bar-btn:hover {
+      opacity: 1;
+      background: color-mix(in srgb, var(--fg) 8%, transparent);
+    }
+
+
+    .sidebar.hidden .sidebar-user-bar {
+      display: none;
+    }
+
+    /* Sticky sidebar header — logo, never scrolls */
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end; /* right-align when sidebar is on left */
+      gap: 8px;
+      padding: 15px 10px 0 40px; /* top padding aligns logo with fixed hamburger */
+      flex-shrink: 0;
+      min-height: 40px;
+      border: none !important;
+      box-shadow: none !important;
+      position: relative;
+      z-index: 3;
+      background: var(--sidebar-bg, var(--panel));
+    }
+    .sidebar-hamburger {
+      display: none !important; /* external #hamburger-btn is the only toggle */
+    }
+    .sidebar-inner {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior-y: none;
+      scrollbar-width: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      padding: 10px 8px 8px;
+      min-height: 0;
+      transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+    .sidebar-brand {
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      min-height: 24px;
+    }
+    .sidebar-brand-title {
+      font-size: 1rem;
+      font-weight: 600;
+      line-height: 1.35;
+      color: var(--brand-color, var(--red));
+      white-space: nowrap;
+      user-select: none;
+      position: relative;
+      top: 0;
+      left: -10px;
+    }
+    .sidebar-sep {
+      display: none;
+    }
+    #sidebar-search-btn,
+    #sidebar-new-chat-btn {
+      margin: 0;
+      padding: 8px 8px;
+    }
+    #sessions-section {
+      margin-top: -1px;
+    }
+    #tools-section {
+      margin-top: 1px;
+    }
+    #tools-section .list-item {
+      padding: 8px 8px;
+    }
+    .sidebar.right-side .sidebar-header {
+      justify-content: flex-start;
+      padding-left: 10px;
+      padding-right: 40px;
+    }
+    .sidebar.right-side .sidebar-inner {
+      padding: 8px;
+    }
+    .sidebar.right-side .sidebar-brand {
+      justify-content: flex-start;
+      padding: 2px 30px 4px 4px;
+    }
+    .sidebar.right-side .sidebar-brand-title {
+      margin-left: 10px;
+    }
+    /* Fixed hamburger — always visible, toggles sidebar */
+    .hamburger-btn {
+      position: fixed;
+      top: 12px;
+      left: 9px;
+      right: auto;
+      z-index: 210;
+      width: 30px;
+      height: 30px;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: none;
+      color: var(--hamburger-color, var(--fg));
+      cursor: pointer;
+      opacity: 0.5;
+      -webkit-tap-highlight-color: transparent;
+      outline: none;
+      transition: opacity 0.15s;
+      padding: 0;
+      display: flex;
+    }
+    body.hamburger-right .hamburger-btn {
+      left: auto;
+      right: 9px;
+    }
+    .mobile-new-chat-btn {
+      display: none;
+    }
+    .hamburger-btn:hover {
+      opacity: 1;
+    }
+    /* Icon rail — mini sidebar that replaces the wide .sidebar when it's
+       hidden (mutually exclusive — see sidebar-layout.js:57). Fullscreen
+       panels reserve this strip of width via `left: var(--icon-rail-w)`
+       so the rail stays visible without needing a z-index hack (which
+       used to cover the fixed-position hamburger button). */
+    .icon-rail {
+      width: 48px;
+      flex-shrink: 0;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 4px 8px 4px;
+      gap: 4px;
+      margin: 0;
+      position: relative;
+      box-sizing: border-box;
+      /* Allow hover labels (e.g. the rail-new-chat "New" tooltip) to extend
+         outside the 48px column. overflow:hidden was clipping them. */
+      overflow: visible;
+    }
+    .rail-resize-handle {
+      position: absolute;
+      top: 0;
+      right: -3px;
+      width: 6px;
+      height: 100%;
+      cursor: col-resize;
+      z-index: 10;
+      background: transparent;
+    }
+    .rail-resize-handle:hover,
+    .rail-resize-handle.dragging {
+      background: var(--accent);
+      opacity: 0.6;
+    }
+    .icon-rail.right-side .rail-resize-handle {
+      right: auto;
+      left: -3px;
+    }
+    .icon-rail.right-side {
+      order: 2;
+      margin: 0;
+      border-right: none;
+      border-left: 1px solid var(--border);
+    }
+    .icon-rail-divider {
+      width: 24px;
+      height: 1px;
+      background: var(--border);
+      margin: 4px 0;
+    }
+    .icon-rail-btn {
+      position: relative;
+      width: 34px;
+      height: 34px;
+      border: none;
+      background: transparent;
+      color: var(--accent, var(--red));
+      font-size: 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.5;
+      transition: opacity 0.08s, background 0.08s;
+    }
+    .rail-notes-badge {
+      position: absolute;
+      top: 1px;
+      right: 1px;
+      min-width: 14px;
+      height: 14px;
+      padding: 0 3px;
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--accent) 85%, var(--bg));
+      color: var(--bg);
+      font-size: 9px;
+      font-weight: 700;
+      line-height: 14px;
+      text-align: center;
+      box-sizing: border-box;
+      pointer-events: none;
+      box-shadow: 0 0 0 1px var(--bg);
+    }
+    .rail-notes-badge.fired {
+      background: var(--red);
+      animation: rail-notes-pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes rail-notes-pulse {
+      0%, 100% { box-shadow: 0 0 0 1px var(--bg), 0 0 0 0 color-mix(in srgb, var(--red) 50%, transparent); }
+      50% { box-shadow: 0 0 0 1px var(--bg), 0 0 0 4px color-mix(in srgb, var(--red) 15%, transparent); }
+    }
+    /* Main sidebar notes button — dot when a reminder has fired */
+    .tool-notes-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--red);
+      /* Match the Deep Research badge: right-aligned (auto) with the same
+         4px left nudge, so both sidebar buttons' dots line up identically. */
+      margin-left: auto;
+      position: relative;
+      left: -4px;
+      flex-shrink: 0;
+      align-self: center;
+      animation: rail-notes-pulse 1.6s ease-in-out infinite;
+      pointer-events: none;
+    }
+    /* Individual card — subtle accent border tint when a reminder has fired */
+    .note-card.note-card-reminder-due .note-card-reminder {
+      background: color-mix(in srgb, var(--red) 22%, transparent);
+      color: var(--red);
+      font-weight: 600;
+    }
+    .icon-rail-btn:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .icon-rail-btn.active-section { opacity: 1; background: color-mix(in srgb, var(--color-accent) 15%, transparent); }
+    /* Unified "minimized" indicator for any rail/sidebar button whose modal is held open */
+    .rail-minimized { position: relative; }
+    .rail-minimized::after {
+      content: ''; position: absolute;
+      /* Default for inline spans like #email-section-title — sit just to the
+         right of the element so it never overlaps the icon. */
+      top: 50%; right: -10px; transform: translateY(-50%);
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--accent, var(--red));
+      box-shadow: 0 0 0 2px var(--bg);
+      pointer-events: none;
+      animation: rail-min-pulse 2s ease-in-out infinite;
+    }
+    /* Compact icon-rail buttons: top-right corner of the icon */
+    .icon-rail-btn.rail-minimized::after { top: 4px; right: 4px; transform: none; }
+    /* Sidebar list-items are wider — anchor right-aligned vertically centered */
+    .list-item.rail-minimized::after { top: 50%; right: 8px; transform: translateY(-50%); }
+    #tool-memory-btn.rail-minimized::after { right: 12px; }
+    /* Per-user nudge: the listed tools' minimized dot sits 2px further
+       in from the right edge so it doesn't look glued to the border. */
+    #tool-theme-btn.rail-minimized::after,
+    #tool-tasks-btn.rail-minimized::after,
+    #tool-notes-btn.rail-minimized::after,
+    #tool-library-btn.rail-minimized::after,
+    #tool-gallery-btn.rail-minimized::after,
+    #tool-compare-btn.rail-minimized::after,
+    #tool-calendar-btn.rail-minimized::after { right: 12px; }
+    /* Cookbook already shows its own running/served-status dot
+       (#cookbook-notif-dot, toggled with .cookbook-notif-active on the
+       button). Don't stack the tabbed-down pulse on top of it — the two
+       dots overlap. Suppress the minimized dot while the status dot is up. */
+    .list-item.rail-minimized.cookbook-notif-active::after { display: none; }
+    @media (max-width: 768px) {
+      /* On mobile the list-items are taller (touch-sized), so the tabbed-down
+         pulsing dot reads a hair low and right. Email uses its own dot and is
+         already aligned — only the tool list-item dots need the nudge:
+         4px left (right 8 → 12) and 2px up. */
+      .list-item.rail-minimized::after {
+        right: 13px;
+        transform: translateY(calc(-50% - 2px));
+      }
+      #tool-memory-btn.rail-minimized::after { right: 17px; }
+    }
+    @keyframes rail-min-pulse {
+      0%,100% { opacity: 1; }
+      50%     { opacity: 0.4; }
+    }
+    /* Compact `_` minimize button for modal headers — matches the close
+       button's bordered square so the two read as a paired control. The
+       header's h4 carries margin-right:auto, which groups minimize + close
+       on the right; this button just needs a small gap before close. */
+    .modal-minimize-btn {
+      background: var(--bg);
+      color: var(--fg);
+      border: 1px solid var(--fg);
+      cursor: pointer;
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      margin-left: 0;
+      margin-right: 4px;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      flex-shrink: 0;
+      transition: background 0.15s, color 0.15s;
+    }
+    .modal-minimize-btn:hover { background: var(--fg); color: var(--bg); }
+    .modal.modal-minimized { display: none !important; }
+    /* Window tile snap ghost (desktop only) */
+    #tile-ghost {
+      position: fixed; pointer-events: none; z-index: 9000;
+      background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+      border: 2px solid color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+      border-radius: 8px;
+      opacity: 0; transform: scale(0.96);
+      transition: left 0.12s ease, top 0.12s ease, width 0.12s ease, height 0.12s ease, opacity 0.12s, transform 0.12s;
+    }
+    #tile-ghost.visible { opacity: 1; transform: scale(1); }
+    /* Bottom dock — chip per minimized modal */
+    #minimized-dock {
+      position: fixed; bottom: var(--composer-clearance, 12px); left: 50%; transform: translateX(-50%);
+      display: flex; gap: 6px; flex-wrap: wrap;
+      max-width: calc(100vw - 24px);
+      padding: 4px;
+      z-index: 100;
+      pointer-events: none;
+    }
+    .minimized-dock-chip {
+      pointer-events: auto;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 8px 6px 10px;
+      background: var(--panel, var(--bg));
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--fg); font-family: inherit; font-size: 12px;
+      cursor: grab; touch-action: none; user-select: none;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+      transition: transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.15s, border-color 0.15s;
+      animation: dock-chip-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    }
+    .minimized-dock-chip:hover {
+      background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--panel, var(--bg)));
+      border-color: color-mix(in srgb, var(--accent, var(--red)) 40%, var(--border));
+    }
+    .minimized-dock-chip:active { cursor: grabbing; }
+    .minimized-dock-chip.dragging {
+      cursor: grabbing; z-index: 1000;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+      transition: none;
+      opacity: 0.95;
+    }
+    /* Whole-dock drag (grabbed an edge chip) */
+    #minimized-dock.dock-dragging { cursor: grabbing; }
+    #minimized-dock.dock-dragging .minimized-dock-chip {
+      transition: none;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    }
+    /* Subtle visual cue that edge chips drag the whole dock */
+    #minimized-dock .minimized-dock-chip:first-child:not(:only-child),
+    #minimized-dock .minimized-dock-chip:last-child:not(:only-child) {
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35),
+                  inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 25%, transparent);
+    }
+    .minimized-dock-chip svg { opacity: 0.7; flex-shrink: 0; }
+    .minimized-dock-label { white-space: nowrap; }
+
+    /* Mobile: chips are icon-only round pills. Tap to restore, drag toward
+       the trash zone at top-center to close. touch-action:none lets the
+       pointermove listener claim the gesture instead of the page scroll. */
+    @media (max-width: 768px) {
+      .minimized-dock-chip {
+        width: 40px; height: 40px;
+        padding: 0 !important;
+        border-radius: 50% !important;
+        justify-content: center;
+        position: relative;
+        overflow: visible;
+        touch-action: none;
+      }
+      .minimized-dock-chip svg { width: 18px; height: 18px; opacity: 0.9; }
+      .minimized-dock-label,
+      .minimized-dock-x { display: none !important; }
+      .minimized-dock-chip.chip-free-drag {
+        box-shadow: 0 8px 22px rgba(0,0,0,0.55),
+                    0 0 0 2px color-mix(in srgb, var(--accent, var(--red)) 50%, transparent) !important;
+      }
+      /* Long-press hint — chip swells and settles while the detach timer
+         counts down so the user feels feedback before the bubble peels out
+         of the chain. Returns to scale(1) at the end so there's no visual
+         jump when the timer fires and the chip becomes a free-drag puck. */
+      .minimized-dock-chip.chip-long-press {
+        background:
+          radial-gradient(circle at 30% 25%, color-mix(in srgb, #fff 28%, transparent), transparent 36%),
+          linear-gradient(135deg,
+            color-mix(in srgb, var(--accent, var(--red)) 34%, var(--panel, var(--bg))),
+            color-mix(in srgb, #7dd3fc 26%, var(--panel, var(--bg))) 52%,
+            color-mix(in srgb, #f0abfc 22%, var(--panel, var(--bg))));
+        border-color: color-mix(in srgb, var(--accent, var(--red)) 72%, #fff 12%) !important;
+        animation: chip-long-press-pulse 0.82s ease-in-out infinite;
+        z-index: 10030;
+      }
+      .minimized-dock-chip.chip-long-press::before {
+        content: '';
+        position: absolute;
+        inset: -96px;
+        border-radius: inherit;
+        background:
+          radial-gradient(circle,
+            color-mix(in srgb, var(--accent, var(--red)) 42%, transparent) 0 18%,
+            color-mix(in srgb, #7dd3fc 34%, transparent) 34%,
+            color-mix(in srgb, #f0abfc 30%, transparent) 50%,
+            transparent 72%);
+        pointer-events: none;
+        z-index: -1;
+        animation: chip-long-press-ripple 0.82s ease-out infinite;
+      }
+      @keyframes chip-long-press-pulse {
+        0%, 100% { transform: scale(1); }
+        50%      { transform: scale(1.42);
+                   box-shadow: 0 14px 42px rgba(0,0,0,0.66),
+                               0 0 0 16px color-mix(in srgb, var(--accent, var(--red)) 42%, transparent),
+                               0 0 72px color-mix(in srgb, #7dd3fc 44%, transparent),
+                               0 0 118px color-mix(in srgb, #f0abfc 32%, transparent); }
+      }
+      @keyframes chip-long-press-ripple {
+        0%   { opacity: 0.92; transform: scale(0.08); }
+        72%  { opacity: 0.28; transform: scale(3.6); }
+        100% { opacity: 0; transform: scale(5.4); }
+      }
+      /* Chip whose modal is currently open — accent ring so the user can
+         tell at a glance which floating bubble belongs to the visible
+         modal. Tap it to minimize. */
+      .minimized-dock-chip.chip-active {
+        border-color: var(--accent, var(--red)) !important;
+        box-shadow: 0 4px 14px rgba(0,0,0,0.35),
+                    0 0 0 2px color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+      }
+      .minimized-dock-chip.chip-active svg { opacity: 1; }
+    }
+    /* Magnetic close zone — slides in from the side opposite the chip's
+       starting position so it never overlaps the dock. Always accent
+       color, larger than the chips, snappy spring transition. */
+    #dock-trash-zone {
+      position: fixed;
+      left: 50%;
+      width: 88px; height: 88px;
+      border-radius: 50%;
+      background: var(--accent, var(--red, #e53935));
+      color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      pointer-events: none;
+      opacity: 0;
+      z-index: 9000;
+      box-shadow: 0 8px 28px color-mix(in srgb, var(--accent, var(--red, #e53935)) 55%, transparent);
+      transition: opacity 0.18s ease,
+                  transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1),
+                  box-shadow 0.18s ease;
+    }
+    /* Off-screen start position depends on which side the chip is on so
+       the X slides in from the opposite edge with a snappy overshoot. */
+    #dock-trash-zone[data-side="top"]    { transform: translateX(-50%) translateY(-180%) scale(0.7); }
+    #dock-trash-zone[data-side="bottom"] { transform: translateX(-50%) translateY(180%) scale(0.7); }
+    #dock-trash-zone.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0) scale(1);
+    }
+    #dock-trash-zone.engaged {
+      transform: translateX(-50%) translateY(0) scale(1.22);
+      box-shadow: 0 0 0 14px color-mix(in srgb, var(--accent, var(--red, #e53935)) 22%, transparent),
+                  0 12px 36px color-mix(in srgb, var(--accent, var(--red, #e53935)) 60%, transparent);
+    }
+    /* Whirlpool ring — fades in when chip is in capture range and spins
+       continuously, then bursts on drop. */
+    #dock-trash-zone .whirlpool {
+      position: absolute; inset: -8px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      border-top-color: rgba(255,255,255,0.9);
+      border-right-color: rgba(255,255,255,0.55);
+      border-bottom-color: rgba(255,255,255,0.25);
+      opacity: 0;
+      pointer-events: none;
+      animation: whirlpool-spin 0.85s linear infinite;
+      transition: opacity 0.15s ease;
+    }
+    #dock-trash-zone.engaged .whirlpool { opacity: 1; }
+    #dock-trash-zone.dropping .whirlpool {
+      opacity: 1;
+      animation: whirlpool-burst 0.36s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    }
+    /* When a chip is swirling into the trash X, its inline `rotate(720deg)`
+       drags every child + ::after badge along with it — the count/dot pill
+       spinning looks chaotic. Fade those out fast at the start of the close
+       so visually only the icon glyph rotates. */
+    .minimized-dock-chip.chip-trashing > :not(svg),
+    .minimized-dock-chip.chip-trashing::after,
+    .minimized-dock-chip.chip-trashing::before {
+      opacity: 0 !important;
+      transition: opacity 0.16s ease-out !important;
+    }
+    @keyframes whirlpool-spin { to { transform: rotate(360deg); } }
+    @keyframes whirlpool-burst {
+      0%   { transform: rotate(0deg) scale(1);   opacity: 1; }
+      60%  { transform: rotate(540deg) scale(1.5); opacity: 0.6; }
+      100% { transform: rotate(900deg) scale(2.2); opacity: 0; }
+    }
+
+    /* Email chip badges:
+       - email-lib-modal chip: "1" badge when an email is expanded
+         inside (JS sets data-has-expanded).
+       - email-reader-* chips: auto-numbered 1, 2, 3 … via CSS counter,
+         so multiple opened-email windows are visually distinguishable. */
+    .minimized-dock-chip[data-modal-id="email-lib-modal"],
+    .minimized-dock-chip[data-modal-id^="email-reader-"] {
+      position: relative;
+    }
+    .minimized-dock-chip[data-modal-id^="email-reader-"][data-tab-num]::after {
+      content: attr(data-tab-num);
+      position: absolute;
+      top: -4px;
+      right: -4px;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 4px;
+      background: var(--accent, var(--red));
+      color: #fff;
+      font-size: 9px;
+      font-weight: 700;
+      line-height: 16px;
+      text-align: center;
+      border-radius: 8px;
+      box-shadow: 0 0 0 2px var(--bg);
+      pointer-events: none;
+    }
+    .minimized-dock-chip[data-modal-id="email-lib-modal"][data-email-unread-label]::after {
+      content: attr(data-email-unread-label);
+      position: absolute;
+      top: -6px;
+      right: 10px;
+      height: 16px;
+      padding: 0 6px;
+      background: var(--accent, var(--red));
+      color: #fff;
+      font-size: 9px;
+      font-weight: 700;
+      line-height: 16px;
+      white-space: nowrap;
+      border-radius: 8px;
+      box-shadow: 0 0 0 2px var(--bg);
+      pointer-events: none;
+    }
+
+    .minimized-dock-x {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 16px; height: 16px; border-radius: 50%;
+      font-size: 14px; line-height: 1; opacity: 0.4;
+      margin-left: 3px;
+    }
+    .minimized-dock-x:hover { opacity: 1; background: color-mix(in srgb, var(--fg) 12%, transparent); }
+    @keyframes dock-chip-in {
+      from { opacity: 0; transform: translateY(20px) scale(0.85); }
+      to   { opacity: 1; transform: translateY(0)   scale(1); }
+    }
+    .rail-new-chat svg { transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1); }
+    .rail-new-chat:hover svg { transform: rotate(90deg); }
+    /* A "New" label slides out from the right of the + as it spins, so users
+       discover what the icon does without needing the tooltip. */
+    .rail-new-chat { position: relative; }
+    .rail-new-chat::after {
+      content: 'New';
+      position: absolute;
+      left: 100%;
+      top: 50%;
+      margin-left: 6px;
+      transform: translateY(-50%) translateX(-6px);
+      opacity: 0;
+      pointer-events: none;
+      white-space: nowrap;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--fg);
+      background: var(--panel);
+      padding: 2px 6px;
+      border-radius: 4px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+      z-index: 20;
+      transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .rail-new-chat:hover::after {
+      opacity: 1;
+      transform: translateY(-50%) translateX(0);
+    }
+    #rail-admin,
+    #rail-settings { color: var(--fg); }
+    .rail-separator { width: 20px; height: 1px; background: var(--border); margin: 4px auto; }
+    .rail-dynamic {
+      position: relative;
+    }
+    .rail-dynamic::after {
+      content: '';
+      position: absolute;
+      bottom: 2px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--accent, var(--red));
+      opacity: 0.7;
+    }

@@ -1,0 +1,195 @@
+/* ── Personal Assistant ── */
+.sidebar-assistant-entry { gap: 6px; min-height: 29px; box-sizing: border-box; align-items: center; }
+.sidebar-assistant-entry .sidebar-action-icon { position: relative; left: -2px; }
+#sidebar-assistant-gear:hover { opacity: 0.8 !important; }
+.assistant-settings-form { display: flex; flex-direction: column; gap: 12px; padding: 4px 2px 2px; }
+.assistant-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: color-mix(in srgb, var(--fg) 70%, transparent); }
+.assistant-field > span { font-size: 11px; opacity: 0.6; }
+.assistant-field input[type="text"],
+.assistant-field input[type="time"],
+.assistant-field select,
+.assistant-field textarea {
+  background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 7px 10px;
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.assistant-field textarea { resize: vertical; min-height: 60px; }
+.assistant-field input:focus,
+.assistant-field select:focus,
+.assistant-field textarea:focus { outline: none; border-color: var(--accent, var(--red)); }
+.assistant-field-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.assistant-field-row > .assistant-field { flex: 1 1 180px; }
+.assistant-field-check { flex-direction: row !important; align-items: center; gap: 6px; padding-bottom: 7px; }
+.assistant-checkins { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+.assistant-checkins h5 { margin: 0 0 2px; font-size: 12px; font-weight: 600; opacity: 0.8; }
+.assistant-checkin-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+.assistant-checkin-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.assistant-checkin-head input[type="text"],
+.assistant-checkin-head input[type="time"] {
+  background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+}
+.assistant-checkin-head input[type="text"] { flex: 1; min-width: 120px; }
+.assistant-checkin-head input[type="time"] { width: 90px; }
+.assistant-checkin-run {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+.assistant-checkin-run:hover { opacity: 1; }
+.assistant-checkin-prompt {
+  background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 48px;
+}
+.assistant-checkin-prompt:focus { outline: none; border-color: var(--accent, var(--red)); }
+.assistant-checkin-meta { font-size: 10px; opacity: 0.45; }
+.assistant-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.assistant-tools-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-top: 4px;
+}
+.assistant-tool-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.assistant-tool-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0.5;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  width: 100%;
+  margin-bottom: 1px;
+}
+.assistant-tool-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+  user-select: none;
+}
+.assistant-tool-item:hover {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+.assistant-tool-item:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.assistant-tool-item input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+}
+
+button.cal-event-more {
+  background:transparent;
+  border:none;
+  color:var(--fg);
+  width:20px; height:20px;
+  cursor:pointer;
+  padding:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  font-family:inherit;
+  flex-shrink:0;
+  margin-left:auto;
+  align-self:center;
+  transform:translateY(-4px);
+  transition:opacity 0.15s;
+}
+button.cal-event-more:hover { opacity:1 !important; }
+/* Empty state */
+.cal-empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:60px 20px; text-align:center; gap:10px; }
+.cal-empty-title { font-size:14px; font-weight:600; opacity:0.8; }
+.cal-empty-msg { font-size:12px; opacity:0.5; max-width:320px; line-height:1.5; margin-bottom:8px; }
+.cal-allday-switch { margin:0; flex-shrink:0; }
+/* Stack the "All day" label above its toggle so it doesn't get squeezed /
+   truncated next to the date inputs in the row. */
+.cal-allday-ctrl { display:flex; flex-direction:column; align-items:center; gap:3px; flex-shrink:0; }
+.cal-allday-label { font-size:10px; opacity:0.5; white-space:nowrap; line-height:1; }
+.cal-form { display:flex; flex-direction:column; gap:8px; }
+.cal-form-title { font-size:13px; font-weight:600; margin-bottom:2px; }
+.cal-title-wrap { position: relative; }
+/* Calendar-picker select sits 2px higher; its border-left/background tint is
+   set in JS to the chosen calendar's colour. */
+.cal-f-cal-select { position: relative; top: -4px; }
+/* Day-detail "+ New" button nudged down 2px. */
+#cal-add-day { position: relative; top: 2px; }
+/* Accent the native date/time picker glyphs. We recolor the webkit indicator
+   by masking an accent fill through a calendar/clock SVG (same technique as the
+   mono icon picker). accent-color covers the spinner parts where supported. */
+.cal-form-bespoke input[type="date"],
+.cal-form-bespoke input[type="time"],
+.cal-form-bespoke input[type="datetime-local"] { accent-color: var(--accent, var(--red)); }
+.cal-form-bespoke input[type="date"]::-webkit-calendar-picker-indicator,
+.cal-form-bespoke input[type="time"]::-webkit-calendar-picker-indicator,
+.cal-form-bespoke input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  background-color: var(--accent, var(--red));
+  background-image: none;
+  cursor: pointer;
+  width: 14px; height: 14px;
+}
+.cal-form-bespoke input[type="date"]::-webkit-calendar-picker-indicator,
+.cal-form-bespoke input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='18' rx='2'/%3E%3Cline x1='16' y1='2' x2='16' y2='6'/%3E%3Cline x1='8' y1='2' x2='8' y2='6'/%3E%3Cline x1='3' y1='10' x2='21' y2='10'/%3E%3C/svg%3E") center/contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='18' rx='2'/%3E%3Cline x1='16' y1='2' x2='16' y2='6'/%3E%3Cline x1='8' y1='2' x2='8' y2='6'/%3E%3Cline x1='3' y1='10' x2='21' y2='10'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+.cal-form-bespoke input[type="time"]::-webkit-calendar-picker-indicator {
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpolyline points='12 6 12 12 16 14'/%3E%3C/svg%3E") center/contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpolyline points='12 6 12 12 16 14'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+

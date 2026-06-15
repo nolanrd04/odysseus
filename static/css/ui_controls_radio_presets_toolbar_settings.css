@@ -1,0 +1,174 @@
+/* ── UI Controls (Radio, Presets, Toolbar, Settings) ── */
+
+
+    /* Custom radio button styling */
+    .radio-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--fg) 6%, transparent);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    
+    .radio-option:hover {
+      background: color-mix(in srgb, var(--fg) 9%, transparent);
+      border-color: var(--fg);
+    }
+    
+    .radio-option input[type="radio"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--border);
+      border-radius: 50%;
+      outline: none;
+      margin: 0;
+      background: var(--bg);
+      transition: all 0.2s ease;
+      position: relative;
+      flex-shrink: 0;
+    }
+    
+    .radio-option input[type="radio"]:checked {
+      border-color: var(--red);
+      background: var(--red);
+    }
+    
+    .radio-option input[type="radio"]:focus {
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 30%, transparent);
+    }
+    
+    .radio-label {
+      color: var(--fg);
+      font-size: 14px;
+      user-select: none;
+    }
+    
+    /* Preset buttons */
+    .preset-btn {
+      height: 27.2px; /* 15% smaller than 32px */
+      padding: 0 8.5px; /* 15% smaller than 10px */
+      margin-left: 4px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'Fira Code', monospace;
+      font-size: 10.2px; /* 15% smaller than 12px */
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    
+    .preset-btn:hover {
+      background: var(--panel);
+      border-color: var(--fg);
+    }
+    
+    .preset-btn.active {
+      background: var(--panel);
+      border-color: var(--fg);
+      box-shadow: 0 0 0 1px var(--fg), 0 0 8px color-mix(in srgb, var(--fg) 16%, transparent);
+      font-weight: 600;
+    }
+    
+    /* All preset buttons use the same blue color */
+    .preset-btn {
+      border-color: var(--red); /* Blue color */
+    }
+    
+    .preset-btn.active {
+      border-color: var(--red); /* Blue color when active */
+      box-shadow: 0 0 0 1px var(--red), 0 0 8px color-mix(in srgb, var(--red) 30%, transparent);
+    }
+    
+    /* Custom preset modal: the base .preset-modal-content sets overflow:hidden
+       (for desktop rounded-corner clipping), which on the mobile sheet clipped
+       the footer (Start/Cancel) off the bottom with no way to reach it. Let the
+       whole sheet scroll — same as every other mobile modal (.modal-content is
+       overflow-y:auto on mobile) — so the footer is always reachable. No flex
+       changes, so the body can't collapse. */
+    #custom-preset-modal .preset-modal-content {
+      overflow-y: auto !important;
+    }
+    #custom-preset-modal .modal-body label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--fg);
+      margin-top: 8px;
+      margin-bottom: 4px;
+      display: block;
+    }
+
+    #custom-preset-modal .modal-body input,
+    #custom-preset-modal .modal-body textarea {
+      width: 100%;
+      margin-bottom: 8px;
+      box-sizing: border-box;
+    }
+    #custom-preset-modal .modal-body textarea,
+    #custom-preset-modal .modal-body input[type="text"] {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--fg);
+      padding: 8px 10px;
+      font-size: 13px;
+      font-family: inherit;
+      transition: border-color 0.15s;
+    }
+    #custom-preset-modal .modal-body textarea {
+      resize: vertical;
+    }
+    #custom-preset-modal .modal-body textarea:focus,
+    #custom-preset-modal .modal-body input[type="text"]:focus {
+      outline: none;
+      border-color: var(--red);
+    }
+
+    #custom-preset-modal .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+
+    #custom-preset-modal .modal-footer button {
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      border: 1px solid var(--border);
+      background: none;
+      color: var(--fg);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    #custom-preset-modal .modal-footer button:hover {
+      background: color-mix(in srgb, var(--fg) 8%, transparent);
+    }
+
+    #custom-preset-modal .modal-footer button#save-custom-preset {
+      /* The theme's accent is stored in --red (theme.js sets --red = accentHex)
+         and --accent is undefined, so the canonical accent expression is
+         var(--accent, var(--red)). The old bare var(--accent) resolved to nothing
+         which, with color:var(--bg), made the button invisible. */
+      background: var(--accent, var(--red));
+      color: var(--bg);
+      border-color: var(--accent, var(--red));
+    }
+    #custom-preset-modal .modal-footer button#save-custom-preset:hover {
+      opacity: 0.85;
+    }
+    /* Toolbar visibility tab */
+    .toolbar-hint {
+      font-size: 12px;
+      color: color-mix(in srgb, var(--fg) 55%, transparent);
+      margin-bottom: 12px;
+    }

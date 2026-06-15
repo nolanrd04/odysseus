@@ -1,0 +1,85 @@
+/* ── Archive browser ── */
+.archive-list {
+  grid-template-columns: 1fr !important;
+  gap: 4px !important;
+}
+.archive-row {
+  flex-direction: row !important;
+}
+.archive-row .doclib-card-header {
+  flex: 1;
+  padding: 8px 10px;
+}
+.archive-row .doclib-card-title {
+  flex: 1;
+  min-width: 0;
+}
+/* Archive column layout */
+.archive-header {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+  gap: 6px;
+  font-size: 9px;
+  font-weight: 600;
+  opacity: 0.35;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.archive-col-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: -4px;
+}
+.archive-col-msgs {
+  width: 40px;
+  flex-shrink: 0;
+  text-align: left;
+  margin-left: -8px;
+}
+.archive-col-model {
+  width: 90px;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.archive-col-time {
+  width: 55px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.archive-col-menu {
+  width: 24px;
+  flex-shrink: 0;
+}
+.archive-menu-btn {
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  opacity: 0.3;
+  cursor: pointer;
+  padding: 4px;
+  line-height: 0;
+  border-radius: 4px;
+  transition: background .15s, opacity .15s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-left: 4px;
+  vertical-align: middle;
+  height: 100%;
+}
+.archive-menu-btn svg {
+  display: block;
+  margin-top: -6px;
+}
+.archive-menu-btn:hover {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  opacity: 1;
+}
+

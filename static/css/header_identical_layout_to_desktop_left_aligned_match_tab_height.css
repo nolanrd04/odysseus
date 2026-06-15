@@ -1,0 +1,10 @@
+  /* ── Header — identical layout to desktop (left-aligned), match tab height ── */
+  .doc-editor-header {
+    padding: 6px 12px 6px 8px;
+    gap: 6px;
+    min-height: 40px;
+  }
+  .doc-import-label,
+  #doc-version-badge {
+    display: none !important;
+  }

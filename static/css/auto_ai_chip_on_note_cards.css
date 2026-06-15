@@ -1,0 +1,42 @@
+/* ─── Auto-AI ✨ chip on note cards ─────────────────────────────────── */
+.note-card-ai-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: inherit;
+  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+  color: var(--accent, var(--red));
+  cursor: pointer;
+  transition: background 0.12s, transform 0.12s, box-shadow 0.12s;
+  vertical-align: middle;
+}
+.note-card-ai-chip:hover {
+  background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+}
+.note-card-ai-chip svg {
+  flex-shrink: 0;
+  animation: note-ai-shine 2.4s ease-in-out infinite;
+}
+@keyframes note-ai-shine {
+  0%, 100% { opacity: 0.85; filter: drop-shadow(0 0 0 transparent); }
+  50%      { opacity: 1;    filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent, var(--red)) 60%, transparent)); }
+}
+.note-card-ai-solving {
+  cursor: default;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+.note-card-ai-solving svg { animation: spin 0.9s linear infinite; filter: none; }
+.note-card-ai-done { background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent); }
+.note-card-ai-done svg { animation: none; }
+#notes-auto-ai-toggle.active { color: var(--accent, var(--red)); }
+

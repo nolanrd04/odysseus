@@ -1,0 +1,259 @@
+/* ── Skill test monitor + AI eval verdict ── */
+.skill-test { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.skill-test-log {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: 48vh;
+  overflow-y: auto;
+  font-family: ui-monospace, 'SF Mono', 'Fira Code', monospace;
+  font-size: 9.5px;
+  line-height: 1.45;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.skill-test-log > div { margin: 1px 0; }
+.skill-test-meta  { opacity: 0.5; }
+.skill-test-task  { color: var(--accent, var(--red)); font-weight: 500; font-size: 9px; opacity: 0.85; }
+.skill-test-round { opacity: 0.6; margin-top: 6px !important; }
+.skill-test-tool  { color: var(--accent, var(--red)); opacity: 0.85; }
+.skill-test-out   { opacity: 0.7; padding-left: 10px; }
+.skill-test-say   { white-space: pre-wrap; }
+.skill-test-err   { color: var(--color-danger, #e06c75); }
+.skill-eval-head  { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.skill-eval-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
+  padding: 2px 8px; border-radius: 10px; flex-shrink: 0;
+}
+.skill-eval-ok   { background: color-mix(in srgb, var(--color-success, #4ade80) 26%, transparent); color: var(--color-success, #4ade80); }
+.skill-eval-warn { background: color-mix(in srgb, var(--color-warning, #f0ad4e) 26%, transparent); color: var(--color-warning, #f0ad4e); }
+.skill-eval-bad  { background: color-mix(in srgb, var(--color-danger, #e06c75) 26%, transparent); color: var(--color-danger, #e06c75); }
+.skill-eval-unknown { background: color-mix(in srgb, var(--fg) 14%, transparent); }
+.skill-eval-summary { font-size: 11px; opacity: 0.85; }
+.skill-eval-issues { margin: 6px 0 0; padding-left: 18px; font-size: 11px; opacity: 0.8; }
+.skill-eval-issues li { margin: 2px 0; }
+.skill-eval-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }
+.skill-eval-approve.suggested {
+  border-color: var(--color-success, #4ade80) !important;
+  color: var(--color-success, #4ade80) !important;
+}
+/* Already published — the button confirms the state (click to unpublish). */
+.skill-eval-approve.is-approved {
+  border-color: var(--color-success, #4ade80) !important;
+  color: var(--color-success, #4ade80) !important;
+  background: color-mix(in srgb, var(--color-success, #4ade80) 14%, transparent) !important;
+}
+/* Add-Skill form: a "rich placeholder" overlay so only the FIRST word (Title,
+   When to use, How, Tags) is accent-colored while the rest stays muted — real
+   placeholders can't be partially colored. The native placeholder is a single
+   space so :placeholder-shown still toggles the overlay. */
+.skill-ph-wrap { position: relative; }
+.skill-ph-wrap .skill-hint-input { width: 100%; box-sizing: border-box; }
+.skill-rich-ph {
+  position: absolute;
+  left: 11px; right: 11px; top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.2;
+  color: color-mix(in srgb, var(--fg) 40%, transparent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Textarea: align the hint to the first line instead of vertical-centering. */
+.skill-rich-ph-top { top: 7px; transform: none; }
+.skill-rich-ph .k { color: var(--accent, var(--red)); }
+/* Hide the overlay once the field has real content. */
+.skill-hint-input:not(:placeholder-shown) ~ .skill-rich-ph { display: none; }
+.skill-md-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  font-family: ui-monospace, 'SF Mono', 'Fira Code', monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.doclib-empty {
+  text-align: center;
+  color: color-mix(in srgb, var(--fg) 35%, transparent);
+  padding: 32px 16px;
+  font-size: 12px;
+  font-style: italic;
+}
+/* Unified loading row across every Library tab (Chats / Documents / Research /
+   Archive): one opacity, one size, with the whirlpool spinner next to it. */
+.lib-loading-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 16px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+}
+.doclib-load-more {
+  display: block;
+  margin: 10px auto 0;
+  padding: 6px 16px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+  flex-shrink: 0;
+  position: relative;
+  top: 8px;
+}
+/* Soft dark gradient above the button — blends the list content into the
+   load-more strip instead of a hard cutoff. Spans the modal width and
+   sits behind/above the button. */
+.doclib-load-more::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 100%;
+  margin-bottom: 4px;
+  width: min(600px, 92vw);
+  height: 34px;
+  pointer-events: none;
+  background: linear-gradient(to top, color-mix(in srgb, #000 24%, transparent), transparent);
+}
+.doclib-load-more:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* Document library toolbar buttons */
+.doclib-toolbar-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.doclib-toolbar-btn:hover {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+.doclib-toolbar-btn.active {
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  color: var(--red);
+}
+.doclib-toolbar-btn.danger {
+  color: var(--color-error, #e55);
+}
+.doclib-toolbar-btn.danger:hover:not(:disabled) {
+  border-color: var(--color-error, #e55);
+}
+.doclib-toolbar-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Bulk action bar */
+.doclib-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--red) 5%, transparent);
+  font-size: 10px;
+  margin-bottom: 8px;
+}
+.doclib-bulk-bar.hidden {
+  display: none;
+}
+.doclib-bulk-check-all {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  font-size: 10px;
+}
+#doclib-selected-count {
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  font-size: 10px;
+}
+#doclib-bulk-bar .memory-toolbar-btn {
+  position: relative;
+  top: -3px;
+}
+
+/* Custom checkboxes */
+.doclib-select-cb,
+.doclib-bulk-check-all input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  cursor: pointer;
+  flex-shrink: 0;
+  margin: 0;
+  position: relative;
+  transition: all 0.15s;
+}
+.doclib-select-cb:hover,
+.doclib-bulk-check-all input:hover {
+  border-color: var(--red);
+}
+.doclib-select-cb:checked,
+.doclib-bulk-check-all input:checked {
+  background: var(--red);
+  border-color: var(--red);
+}
+.doclib-select-cb:checked::after,
+.doclib-bulk-check-all input:checked::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--bg);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+
+/* + button outside scroll area (when doc is on right side) */
+
+@media (max-width: 600px) {
+  .doclib-toolbar {
+    flex-direction: column;
+  }
+  .doclib-card-session,
+  .doclib-card-time {
+    display: none;
+  }
+  .doclib-card-preview {
+    max-height: 40vh;
+  }
+}
+

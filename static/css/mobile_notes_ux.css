@@ -1,0 +1,149 @@
+/* ── Mobile notes UX ────────────────────────────────────
+   Tiles become read-only previews on touch ≤768px wide.
+   Tap opens a fullscreen overlay where editing happens; long-press
+   toggles drag-to-reorder. Wired up in static/js/notes.js. */
+body.notes-mobile-mode .note-card-corner,
+body.notes-mobile-mode .note-card-corner-edit,
+body.notes-mobile-mode .note-card-corner-archive,
+body.notes-mobile-mode .note-card-corner-copy,
+body.notes-mobile-mode .note-card-corner-trash,
+body.notes-mobile-mode .note-card-corner-unarchive,
+body.notes-mobile-mode .note-card-corner-done,
+body.notes-mobile-mode .note-card-edit-corner,
+body.notes-mobile-mode .note-card-done,
+body.notes-mobile-mode .note-card-actions,
+body.notes-mobile-mode .note-cl-quickadd,
+body.notes-mobile-mode .note-card .note-checkbox-rm,
+/* Panel-fullscreen toggle is redundant on mobile — the panel always
+   fills the viewport already. */
+body.notes-mobile-mode #notes-fullscreen-toggle {
+  display: none !important;
+}
+
+/* Header toggle icons (archive view, list/grid switch) — defaults are
+   tuned for the dense desktop header; on mobile bump them slightly so
+   they read as tap targets without dominating the header. */
+body.notes-mobile-mode #notes-archive-toggle,
+body.notes-mobile-mode #notes-view-toggle {
+  width: 30px;
+  height: 30px;
+  padding: 6px;
+}
+body.notes-mobile-mode #notes-archive-toggle svg,
+body.notes-mobile-mode #notes-view-toggle svg {
+  width: 17px;
+  height: 17px;
+}
+/* Disable inline checkbox toggling on tiles — checking off a todo
+   requires opening the note. The visual dot stays but it's styled
+   as a passive status indicator, not a tappable button. */
+body.notes-mobile-mode .note-card .note-checkbox,
+body.notes-mobile-mode .note-card .note-checkbox-rm {
+  pointer-events: none;
+}
+body.notes-mobile-mode .note-card .note-check-dot,
+body.notes-mobile-mode .note-card .note-checkbox-dot,
+body.notes-mobile-mode .note-card .note-cl-dot {
+  opacity: 0.55;
+  transform: none !important;
+  transition: none !important;
+  cursor: default !important;
+}
+/* The whole card is the tap target on mobile — bigger feedback */
+body.notes-mobile-mode .note-card {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+body.notes-mobile-mode .note-card:active {
+  transform: scale(0.985);
+}
+
+/* Drag-to-reorder mode — desaturate the grid and sweep a subtle
+   shimmer across every tile so it's obvious you're in rearrange mode
+   (the Google Keep "active edit" cue). Also disable scroll inside the
+   panel so the drag works smoothly. */
+body.notes-drag-mode .notes-pane-body {
+  overflow: hidden;
+  touch-action: none;
+}
+body.notes-drag-mode .note-card {
+  cursor: grab;
+  transform: scale(0.985);
+  filter: saturate(0.7);
+  opacity: 0.92;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.22s cubic-bezier(0.2, 0.7, 0.3, 1),
+              filter 0.18s ease,
+              opacity 0.18s ease;
+}
+body.notes-drag-mode .note-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    115deg,
+    transparent 30%,
+    color-mix(in srgb, var(--fg) 14%, transparent) 50%,
+    transparent 70%
+  );
+  background-size: 250% 100%;
+  animation: notes-drag-shimmer 2.1s linear infinite;
+  border-radius: inherit;
+  z-index: 1;
+  mix-blend-mode: overlay;
+}
+@media (max-width: 768px) {
+  body.notes-drag-mode .note-card {
+    filter: none;
+    opacity: 0.96;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 28%, transparent);
+  }
+  body.notes-drag-mode .note-card::after {
+    display: none;
+  }
+}
+@keyframes notes-drag-shimmer {
+  0%   { background-position: 250% 0; }
+  100% { background-position: -150% 0; }
+}
+/* The grabbed card lifts above its siblings; suppress the shimmer on
+   it so it reads as the "live" element being moved. */
+body.notes-drag-mode .note-card.note-card-dragging {
+  transform: scale(1.06);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+  opacity: 1;
+  filter: none;
+  z-index: 10001;
+  cursor: grabbing;
+  transition: box-shadow 0.18s ease;
+}
+body.notes-drag-mode .note-card.note-card-dragging::after { display: none; }
+body.notes-drag-mode .note-card .note-card-pin {
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+body.notes-drag-mode .note-card-pinned .note-card-pin,
+body.notes-drag-mode .note-card-pin.active,
+body.notes-drag-mode .note-card-pin svg {
+  visibility: hidden !important;
+  opacity: 0 !important;
+}
+/* Placeholder — same footprint as the lifted card, dotted outline so
+   the drop target is visible while the card follows the finger. */
+.note-card-placeholder {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border: 2px dashed color-mix(in srgb, var(--fg) 25%, transparent);
+  border-radius: 8px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  transition: width 0.18s ease, height 0.18s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  body.notes-drag-mode .note-card::after { animation: none; }
+}
+
+

@@ -1,0 +1,691 @@
+/* ── Tasks ── */
+.tasks-modal-content { max-width: 600px; width: min(600px, 92vw); background: var(--bg); font-size: 12px; }
+
+/* Tasks tabs reuse the .memory-tab look. The Brain window's tab bar is
+   full-bleed (its underline spans the whole modal width). The Tasks bar is a
+   direct child of .modal-content (padding:10px), so cancel that padding with
+   negative side margins to span edge-to-edge, then re-inset the tabs by 10px
+   so they line up with the rest of the modal content — matching the Brain bar. */
+.tasks-modal-content .tasks-tabs {
+  margin: -2px -10px 8px;
+  padding: 0 10px;
+}
+
+/* Activity log — compact by default. Click the row to expand body+actions. */
+.task-log-row {
+  --cat-hue: 220;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 10px;
+  margin-bottom: 3px;
+  background: color-mix(in srgb, var(--fg) 2%, transparent);
+  position: relative;
+  cursor: pointer;
+  transition: padding .12s ease;
+}
+.task-log-row:hover {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.task-log-row.expanded { padding: 8px 10px 6px; }
+.task-log-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  margin-bottom: 0;
+}
+.task-log-row.expanded .task-log-row-head { margin-bottom: 4px; }
+/* Collapsed: body + footer hidden. Expanded: visible. */
+.task-log-row:not(.expanded):not(.is-skipped) .task-log-row-body,
+.task-log-row:not(.expanded):not(.is-skipped) .task-log-row-actions,
+.task-log-row:not(.expanded):not(.is-skipped) .task-log-prompt {
+  display: none;
+}
+.task-log-name {
+  font-weight: 600;
+  /* Pull saturation from the per-row hue but mix with the foreground so the
+     title still reads in dark mode. Lightness stays adaptive. */
+  color: hsl(var(--cat-hue) 60% 60%);
+}
+.task-log-task-icon {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-right: -3px;
+}
+.task-log-task-icon svg {
+  top: 0 !important;
+  opacity: 0.46 !important;
+}
+.task-log-row-head .task-ai-mark {
+  top: 0;
+  margin-left: -4px;
+}
+.task-log-repeat {
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  color: color-mix(in srgb, var(--fg) 62%, transparent);
+  border-radius: 999px;
+  padding: 1px 0;
+  white-space: nowrap;
+}
+@media (prefers-color-scheme: light) {
+  .task-log-name { color: hsl(var(--cat-hue) 65% 38%); }
+}
+/* Per-account prefix in fan-out results — e.g. "[Default] No recent emails"
+   becomes a compact accent chip + plain message. Makes multi-account activity
+   rows readable instead of a bracket soup. */
+/* Running / queued status line in the Activity tab — whirlpool + label. */
+.task-log-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.task-log-running-label { font-style: normal; }
+
+/* New right-side placement: "Running <whirlpool>" sits where the timestamp
+   normally would, on the head row's right edge. */
+.task-log-running-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.task-log-running-inline .task-log-running-label { font-weight: 500; }
+.task-log-running-elapsed {
+  margin-left: 6px;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+.task-log-force-run {
+  border: 0;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  box-shadow: none;
+  color: inherit;
+  opacity: .82;
+  margin-left: 7px;
+  padding: 1px 6px 1px 4px;
+  min-height: 16px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  position: relative;
+  top: -1px;
+}
+.task-log-force-run svg,
+.task-log-stop svg {
+  display: block;
+  flex-shrink: 0;
+  transform: translateY(1px);
+}
+.task-log-force-run:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--green, #50fa7b) 16%, transparent);
+  color: var(--green, #50fa7b);
+}
+.task-log-stop {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: .72;
+  padding: 0;
+  margin-left: 6px;
+  width: 12px;
+  height: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  top: -3px;
+}
+.task-log-stop:hover {
+  opacity: 1;
+  color: var(--red, #f87171);
+}
+
+/* Slim single-line row for skipped (noop) runs — body/actions stripped, font
+   shrunk, opacity dropped. Distinguishes "task ran but had nothing to do"
+   from a "real" entry without flooding the feed visually. */
+.task-log-row.is-skipped {
+  padding: 4px 8px;
+  opacity: 0.45;
+  font-size: 11px;
+  background: transparent;
+}
+.task-log-row.is-skipped .task-log-row-head { padding: 0; }
+.task-log-row.is-skipped .task-log-name { font-weight: 500; }
+.task-log-row.is-skipped .task-log-skipped-reason {
+  flex: 1 1 auto;
+  margin-left: 6px;
+  font-style: italic;
+  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.task-log-row.is-skipped:hover { opacity: 0.7; }
+
+.task-log-account-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 7px;
+  margin-right: 4px;
+  border-radius: 10px;
+  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+  vertical-align: 1px;
+}
+.task-log-time {
+  opacity: 0.5;
+  font-variant-numeric: tabular-nums;
+}
+.task-log-status {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--fg) 30%, transparent);
+}
+.task-log-status-ok    { background: #4ade80; box-shadow: 0 0 6px #4ade80, 0 0 3px #4ade80; }
+.task-log-status-error { background: var(--red, #f87171); box-shadow: 0 0 6px var(--red, #f87171), 0 0 3px var(--red, #f87171); }
+.task-log-status-info  { background: color-mix(in srgb, var(--fg) 25%, transparent); }
+.task-log-status-queued  { background: #fbbf24; box-shadow: 0 0 0 2px color-mix(in srgb, #fbbf24 30%, transparent); }
+.task-log-status-running { background: #60a5fa; animation: task-log-pulse 1.4s ease-in-out infinite; }
+.task-log-status-skipped { background: color-mix(in srgb, var(--fg) 20%, transparent); }
+.task-log-status-aborted { background: color-mix(in srgb, var(--fg) 30%, transparent); border: 1px dashed color-mix(in srgb, var(--fg) 50%, transparent); }
+@keyframes task-log-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, #60a5fa 60%, transparent); }
+  50%      { box-shadow: 0 0 0 4px color-mix(in srgb, #60a5fa 0%, transparent); }
+}
+.task-log-row-body {
+  font-size: 12px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--fg) 85%, transparent);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.task-log-row-body p { margin: 0 0 6px 0; }
+.task-log-row-body p:last-child { margin-bottom: 0; }
+.task-log-row-body pre {
+  margin: 4px 0;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  max-height: 180px;
+  overflow: auto;
+}
+.task-log-row-body code {
+  font-size: 11px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.task-log-row-body ul, .task-log-row-body ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+.task-log-row-body li { margin: 2px 0; }
+/* Markdown headings inside a task result — without these, ## headings
+   render at browser-default huge sizes and blow out the cramped row. */
+.task-log-row-body h1,
+.task-log-row-body h2,
+.task-log-row-body h3,
+.task-log-row-body h4 {
+  margin: 10px 0 4px;
+  line-height: 1.3;
+  font-weight: 650;
+  color: var(--fg);
+}
+.task-log-row-body h1 { font-size: 14px; }
+.task-log-row-body h2 { font-size: 13px; }
+.task-log-row-body h3,
+.task-log-row-body h4 { font-size: 12px; opacity: 0.9; }
+.task-log-row-body h1:first-child,
+.task-log-row-body h2:first-child,
+.task-log-row-body h3:first-child { margin-top: 0; }
+.task-log-row-body hr {
+  border: none;
+  border-top: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+  margin: 8px 0;
+}
+.task-log-row-body blockquote {
+  margin: 4px 0;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--fg) 20%, transparent);
+  opacity: 0.85;
+}
+.task-log-row-body a { color: var(--accent, #60a5fa); text-decoration: none; }
+.task-log-row-body a:hover { text-decoration: underline; }
+.task-log-row-body strong { font-weight: 650; color: var(--fg); }
+/* Email-summary tables — render compactly instead of default browser ugliness. */
+.task-log-row-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 6px 0;
+  font-size: 11px;
+}
+.task-log-row-body th,
+.task-log-row-body td {
+  border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+  padding: 3px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+.task-log-row-body th {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  font-weight: 600;
+}
+.task-log-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+}
+.task-log-open-chat,
+.task-log-open-report,
+.task-log-copy,
+.task-log-clear-cache,
+.task-log-run-again {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  border-radius: 5px;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  font-family: inherit;
+  font-size: 10px;
+  padding: 1px 6px;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+  line-height: 1.4;
+}
+.task-log-open-chat:hover,
+.task-log-open-report:hover,
+.task-log-copy:hover,
+.task-log-clear-cache:hover,
+.task-log-run-again:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--fg) 30%, transparent);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+.task-log-row-actions > .task-log-open-chat,
+.task-log-row-actions > .task-log-copy {
+  margin-left: auto;
+}
+.task-log-clear-cache svg {
+  position: relative;
+  top: 0;
+}
+/* Activity filter chips — toggle-out model: ON by default (solid),
+   click to toggle OFF (dimmed + strikethrough) to hide that group. */
+.tasks-af-chip {
+  font-size: 11px;
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--fg) 16%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: var(--fg);
+  cursor: pointer;
+  font-family: inherit;
+  transition: opacity .12s, background .12s, border-color .12s;
+}
+.tasks-af-chip:hover { border-color: color-mix(in srgb, var(--fg) 32%, transparent); }
+.tasks-af-chip.off {
+  opacity: 0.4;
+  text-decoration: line-through;
+  background: transparent;
+}
+.tasks-af-chip.active {
+  border-color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+  opacity: 1;
+}
+.tasks-af-chip-error { border-color: color-mix(in srgb, var(--red, #f87171) 45%, transparent); }
+.tasks-af-chip-error:not(.off) { color: var(--red, #f87171); }
+
+/* "Open in Deep Research" is now a regular clickable chat link (a
+   `#research-<id>` markdown anchor in the assistant's message), rendered as
+   an a.chat-link. Nudge it 4px right so it sits slightly inset. */
+a.chat-link[href^="#research-"] {
+  margin-left: 4px;
+}
+.task-log-row.is-long .task-log-row-body {
+  max-height: 8.5em;
+  overflow: hidden;
+  position: relative;
+  mask-image: linear-gradient(to bottom, #000 70%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+}
+.task-log-row.is-long.expanded .task-log-row-body {
+  max-height: none;
+  overflow: visible;
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+.task-log-row-toggle {
+  margin-top: 6px;
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 0;
+  color: transparent;          /* hide raw "Show more" text */
+}
+.task-log-row-toggle::before {
+  color: color-mix(in srgb, var(--accent, var(--fg)) 80%, transparent);
+  opacity: 0.8;
+}
+.task-log-row:not(.expanded) .task-log-row-toggle::before { content: 'Show more'; }
+.task-log-row.expanded .task-log-row-toggle::before { content: 'Show less'; }
+.task-log-row-toggle:hover::before { opacity: 1; }
+.task-log-prompt {
+  margin-top: 6px;
+  font-size: 11px;
+}
+.task-log-prompt summary {
+  cursor: pointer;
+  opacity: 0.5;
+  user-select: none;
+}
+.task-log-prompt summary:hover { opacity: 0.8; }
+.task-log-prompt pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  opacity: 0.75;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.task-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 0;
+  background: color-mix(in srgb, var(--fg) 2%, transparent);
+  min-height: 47px;
+  box-sizing: border-box;
+  align-items: center;
+}
+/* When expanded, height grows to fit the detail panel. */
+.task-card.expanded { align-items: flex-start; }
+/* Nudge the card text up (dot/menu keep their own offsets); the leading icon
+   and built-in tag ride a bit higher to sit on the title's cap line. */
+.task-card .memory-item-title,
+.task-card .memory-item-meta { position: relative; top: -4px; }
+/* Always show the per-card ⋮ kebab on task cards (the default opacity:0 +
+   hover-reveal is unreliable on touch and easy to miss on desktop).
+   pointer-events / z-index belt-and-braces against any sibling overlay,
+   margin reset undoes the global `.modal-body button { margin-top:6px }`
+   that was punting the hit-target down. */
+.task-card .memory-item-actions {
+  opacity: 0.55;
+  pointer-events: auto;
+  position: relative;
+  z-index: 5;
+}
+.task-card:hover .memory-item-actions,
+.task-card .memory-item-actions:hover { opacity: 1; }
+.task-card .memory-item-actions .memory-item-btn {
+  margin: 0 !important;
+  pointer-events: auto;
+  position: relative;
+  z-index: 5;
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Make the SVG inside the kebab transparent to pointer events so the click
+   always lands on the BUTTON itself (some browsers / nested SVG events lose
+   the click when hitting the inner glyph). */
+.task-card .memory-item-actions .memory-item-btn svg { pointer-events: none; }
+.task-card .task-builtin-badge { position: relative; top: -4px; }
+.task-ai-mark {
+  flex: 0 0 auto;
+  color: var(--accent, var(--red));
+  opacity: 0.78;
+  position: relative;
+  top: -4px;
+}
+/* Per-card select checkbox rides up to the title line. The "All" checkbox is
+   #tasks-select-all (not .memory-select-cb), so it stays put. */
+.task-card .memory-select-cb { position: relative; top: -4px; }
+/* Bigger ⋮ dropdown on mobile (its buttons carry inline styles → !important). */
+@media (max-width: 768px) {
+  .task-dropdown { min-width: 160px !important; padding: 6px !important; }
+  .task-dropdown button { font-size: 13px !important; padding: 10px 12px !important; gap: 10px !important; }
+  .task-dropdown button svg { width: 15px !important; height: 15px !important; }
+  .task-card .task-status-badge {
+    padding-left: 5px;
+    padding-right: 5px;
+    gap: 2px;
+    letter-spacing: 0.15px;
+  }
+  .task-card .task-state-badge {
+    width: 20px;
+    min-width: 20px;
+    height: 20px;
+    min-height: 20px;
+    padding-left: 0;
+    padding-right: 0;
+    box-sizing: border-box;
+    justify-content: center;
+    top: 2px !important;
+  }
+  .task-card .task-state-badge .task-state-label {
+    display: none;
+  }
+  .task-card .task-card-run-btn {
+    margin-right: 1px !important;
+    top: 2px;
+  }
+}
+
+.task-card-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.task-card-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.task-card-schedule {
+  font-size: 10.5px;
+  opacity: 0.5;
+  margin-left: auto;
+}
+
+.task-card-output {
+  font-size: 10px;
+  opacity: 0.45;
+}
+
+.task-card-prompt {
+  font-size: 11px;
+  opacity: 0.55;
+  margin: 4px 0;
+  line-height: 1.4;
+}
+
+.task-card-meta {
+  font-size: 10.5px;
+  opacity: 0.45;
+  margin-bottom: 6px;
+}
+
+.task-card-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.task-btn {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--fg);
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s, background 0.15s;
+}
+.task-btn:hover { opacity: 1; }
+.task-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.task-btn-primary {
+  background: var(--red);
+  color: #fff;
+  border-color: transparent;
+  opacity: 1;
+}
+.task-btn-primary:hover { opacity: 0.85; }
+
+.task-btn-danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 30%, transparent); }
+.task-btn-danger:hover { opacity: 1; border-color: var(--red); }
+
+.tasks-clock {
+  font-size: 10px;
+  opacity: 0.35;
+  text-align: center;
+  padding: 6px 0 8px;
+}
+
+.task-preset-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;
+}
+.task-preset-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); cursor: pointer; transition: all 0.15s; text-align: left;
+  color: var(--fg);
+}
+.task-preset-card:hover {
+  border-color: var(--accent, #cc6a3a); background: color-mix(in srgb, var(--accent, #cc6a3a) 8%, var(--bg));
+}
+.task-preset-icon { font-size: 20px; margin-bottom: 2px; }
+.task-preset-label { font-size: 12px; font-weight: 600; }
+.task-preset-desc { font-size: 10px; opacity: 0.5; line-height: 1.3; }
+
+.task-form { display: flex; flex-direction: column; gap: 4px; }
+.task-form-label {
+  font-size: 11px;
+  opacity: 0.55;
+  font-weight: 500;
+  display: block;
+  /* Consistent rhythm: 8px above each label (section gap), 4px below to the
+     field — same spacing for Name/Prompt/Trigger/Output/Model/Chain. */
+  margin: 8px 0 4px;
+}
+.task-form-input {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+/* A <select>'s closed width otherwise grows to its widest option (the long
+   action descriptions), overflowing the modal — clip it to the field width. */
+select.task-form-input { text-overflow: ellipsis; }
+.task-form-input:focus {
+  outline: none;
+  border-color: var(--red);
+}
+.task-form-textarea { resize: vertical; min-height: 60px; }
+.task-form-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }
+
+.task-form-toggle {
+  display: flex; gap: 4px;
+}
+.task-toggle-btn {
+  flex: 1; padding: 4px 8px; font-size: 10px; font-family: inherit;
+  border: 1px solid var(--border); border-radius: 6px; background: transparent;
+  color: var(--fg); opacity: 0.4; cursor: pointer; transition: all 0.15s;
+}
+.task-toggle-btn:hover { opacity: 0.7; border-color: var(--fg); }
+.task-toggle-btn.active {
+  opacity: 1; border-color: var(--red); color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+
+.task-time-picker, .task-date-picker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.task-time-select, .task-date-select {
+  width: auto;
+  min-width: 48px;
+  font-size: 11px;
+}
+.task-time-sep { opacity: 0.4; font-size: 11px; }
+
+.task-history-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.task-runs-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
+.task-run-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.task-run-item-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+.task-run-time { margin-left: auto; font-size: 10px; opacity: 0.45; }
+.task-run-result {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-top: 4px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+

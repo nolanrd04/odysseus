@@ -1,0 +1,88 @@
+/* ── Goal form (Break-down editor) ───────────────────────────────────── */
+.note-form-goal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.note-form-goal-desc {
+  width: 100%;
+  box-sizing: border-box;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  resize: vertical;
+  min-height: 60px;
+}
+.note-form-goal-desc:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent-warm) 60%, var(--border));
+}
+.note-form-goal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.note-form-goal-ai {
+  display: inline-flex;
+  align-items: center;
+  background: color-mix(in srgb, var(--accent-warm) 16%, transparent);
+  color: var(--accent-warm);
+  border: 1px solid color-mix(in srgb, var(--accent-warm) 45%, transparent);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.note-form-goal-ai:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-warm) 26%, transparent);
+  border-color: color-mix(in srgb, var(--accent-warm) 65%, transparent);
+}
+.note-form-goal-ai:disabled,
+.note-form-goal-ai.busy {
+  opacity: 0.6;
+  cursor: wait;
+}
+.note-form-goal-hint {
+  font-size: 11px;
+  opacity: 0.55;
+}
+/* Fresh goal form: hide the title input + tag input + reminder button so the
+   user only sees the single "what do you want to achieve?" textarea. */
+.note-form-goal-fresh ~ .note-form-actions-group { display: none; }
+.note-form:has(.note-form-goal-fresh) .note-form-title,
+.note-form:has(.note-form-goal-fresh) .note-form-label,
+.note-form:has(.note-form-goal-fresh) .note-form-remind-btn,
+.note-form-bespoke:has(.note-form-goal-fresh) .note-form-title,
+.note-form-bespoke:has(.note-form-goal-fresh) .note-form-label,
+.note-form-bespoke:has(.note-form-goal-fresh) .note-form-remind-btn {
+  display: none !important;
+}
+.note-form-goal-fresh .note-form-goal-desc {
+  font-size: 15px;
+  min-height: 90px;
+  padding: 12px 14px;
+}
+.note-form-goal-fresh.building .note-form-goal-desc {
+  opacity: 0.55;
+  pointer-events: none;
+}
+.note-form-goal-fresh.building::after {
+  content: 'AI is planning your goal…';
+  display: block;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.7;
+  margin-top: 6px;
+  animation: note-goal-pulse 1.4s ease-in-out infinite;
+}
+@keyframes note-goal-pulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1; }
+}
+

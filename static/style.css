@@ -1267,7 +1267,8 @@ body.bg-pattern-sparkles {
     .section-collapse-chevron { display: inline-flex; opacity: 0.3; transition: transform 0.2s, opacity 0.15s; }
     .section-collapse-btn:hover .section-collapse-chevron { opacity: 0.6; }
     .section.collapsed .section-collapse-chevron { transform: rotate(-90deg); opacity: 0.5; }
-    .section-header-flex:has(.section-header-btn) .section-collapse-btn { display: none; }
+    /* Allow the chevron to be visible even if there's an add button;
+       it will just follow it in the flex flow. */
     .section.collapsed .section-collapse-btn { display: inline-flex !important; }
 
     /* Collapsed state */

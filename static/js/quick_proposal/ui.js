@@ -1,0 +1,1517 @@
+import { startStream } from './stream.js';
+
+const IMPORTANCE_COLOR = { high: '#22c55e', medium: '#f59e0b', low: '#6b7280' };
+const SHEET_TYPES = ['cover','typical_section','plan_view','profile','utility_plan','plat','grading','detail','spec','erosion','other'];
+const pageClassifications = {}; // page_idx → {sheet_type, importance, description, regions}
+
+const STYLES = `
+.qp-overlay {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    font-family: inherit; color: var(--fg);
+    overflow: hidden;
+}
+.qp-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.qp-title { font-size: 14px; font-weight: 600; letter-spacing: 0.3px; flex: 1; }
+.qp-close-btn {
+    background: none; border: none; cursor: pointer;
+    color: color-mix(in srgb, var(--fg) 50%, transparent);
+    font-size: 16px; padding: 2px 6px; border-radius: 4px;
+}
+.qp-close-btn:hover {
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    color: var(--fg);
+}
+.qp-cancel-btn {
+    background: none; border: 1px solid color-mix(in srgb, #ef4444 60%, transparent);
+    color: #ef4444; cursor: pointer; font-size: 12px; font-weight: 500;
+    padding: 3px 10px; border-radius: 4px; transition: background 0.15s;
+}
+.qp-cancel-btn:hover { background: color-mix(in srgb, #ef4444 12%, transparent); }
+.qp-bbox-svg {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; overflow: visible;
+}
+.qp-phase1-index {
+    flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px;
+    display: flex; flex-direction: column; gap: 10px;
+}
+.qp-p1-page {
+    border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+}
+.qp-p1-page-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; font-size: 12px;
+    background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+    cursor: pointer;
+}
+.qp-p1-page-header:hover { background: color-mix(in srgb, var(--fg) 7%, var(--bg)); }
+.qp-p1-imp {
+    font-size: 10px; font-weight: 600; padding: 1px 5px;
+    border-radius: 3px; color: #fff;
+}
+.qp-p1-type { font-weight: 600; }
+.qp-p1-desc { color: color-mix(in srgb, var(--fg) 55%, transparent); flex: 1; }
+.qp-p1-regions {
+    padding: 4px 10px 6px 10px;
+    display: flex; flex-direction: column; gap: 2px;
+    max-height: 110px; overflow-y: auto;
+}
+.qp-p1-region {
+    font-size: 11px; font-family: monospace;
+    color: color-mix(in srgb, var(--fg) 65%, transparent);
+    padding: 1px 0;
+}
+.qp-p1-region-id { color: var(--accent, #0af); margin-right: 6px; }
+.qp-p1-region-coords { color: color-mix(in srgb, var(--fg) 38%, transparent); margin-left: 5px; font-size: 10px; }
+.qp-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.qp-status {
+    display: flex; align-items: center; gap: 7px;
+    padding: 8px 16px; font-size: 12px;
+    color: color-mix(in srgb, var(--fg) 55%, transparent);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.qp-form-area {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; flex: 1; gap: 16px; padding: 32px;
+}
+.qp-upload-zone {
+    width: 100%; max-width: 480px;
+    border: 2px dashed var(--border);
+    border-radius: 10px; padding: 32px 24px;
+    text-align: center; cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+.qp-upload-zone:hover, .qp-upload-zone.drag-over {
+    border-color: var(--accent, #0af);
+    background: color-mix(in srgb, var(--accent, #0af) 8%, transparent);
+}
+.qp-upload-zone svg { display: block; margin: 0 auto 10px; opacity: 0.5; }
+.qp-upload-zone .qp-upload-hint {
+    font-size: 13px;
+    color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+.qp-file-chosen { font-size: 13px; color: var(--accent, #0af); margin-top: 6px; font-weight: 500; }
+.qp-notes {
+    width: 100%; max-width: 480px; box-sizing: border-box;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border);
+    border-radius: 6px; color: var(--fg); padding: 8px 10px;
+    font-size: 13px; resize: vertical; min-height: 64px; font-family: inherit;
+}
+.qp-notes:focus { outline: none; border-color: var(--accent, #0af); }
+.qp-run-btn {
+    padding: 9px 28px; background: var(--accent, #0af);
+    color: #fff; border: none; border-radius: 6px;
+    font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.15s;
+}
+.qp-run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.qp-run-btn:not(:disabled):hover { opacity: 0.85; }
+.qp-content { display: flex; flex: 1; min-height: 0; }
+.qp-sidebar {
+    width: 270px; flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+}
+.qp-sidebar-header {
+    padding: 8px 12px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    color: color-mix(in srgb, var(--fg) 50%, transparent);
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.qp-sidebar-pages {
+    flex: 1; overflow-y: auto; padding: 8px;
+    display: flex; flex-direction: column; gap: 6px;
+}
+.qp-page-thumb {
+    position: relative; width: 100%; cursor: pointer;
+    border-radius: 4px; overflow: hidden;
+    border: 2px solid var(--border);
+    transition: border-color 0.15s;
+    flex-shrink: 0;
+}
+.qp-page-thumb:hover { border-color: var(--accent, #0af); }
+.qp-page-thumb.active { border-color: var(--accent, #0af); }
+.qp-thumb-img-wrap { position: relative; overflow: hidden; }
+.qp-thumb-img-wrap img { width: 100%; display: block; }
+.qp-page-label {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: rgba(0,0,0,0.6); color: #fff;
+    font-size: 10px; padding: 2px 4px; text-align: center;
+}
+.qp-classification-badge {
+    position: absolute; top: 3px; right: 3px;
+    font-size: 9px; font-weight: 600; padding: 1px 4px;
+    border-radius: 3px; color: #fff; opacity: 0.92;
+    max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qp-thumb-info {
+    padding: 4px 8px 6px; display: flex; flex-direction: column; gap: 3px;
+    border-top: 1px solid var(--border);
+}
+.qp-thumb-desc {
+    font-size: 10px; line-height: 1.3;
+    color: color-mix(in srgb, var(--fg) 65%, transparent);
+}
+.qp-thumb-regions {
+    display: flex; flex-direction: column; gap: 1px;
+    max-height: 90px; overflow-y: auto; flex-shrink: 0;
+}
+.qp-thumb-region-row {
+    display: flex; align-items: flex-start; gap: 4px;
+    font-size: 10px; font-family: monospace;
+    color: color-mix(in srgb, var(--fg) 50%, transparent);
+    flex-shrink: 0; cursor: pointer;
+    flex-wrap: wrap;
+}
+.qp-thumb-region-row:hover { color: color-mix(in srgb, var(--fg) 75%, transparent); }
+.qp-thumb-region-coords {
+    color: color-mix(in srgb, var(--fg) 38%, transparent);
+    font-size: 9px; width: 100%; padding-left: 10px;
+}
+.qp-thumb-region-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.qp-thumb-region-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qp-main-output {
+    flex: 1; min-height: 0; overflow: hidden; padding: 0;
+    display: flex; flex-direction: column;
+}
+.qp-main-placeholder {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    gap: 8px;
+    color: color-mix(in srgb, var(--fg) 40%, transparent); font-size: 13px;
+}
+@keyframes qp-spin { to { transform: rotate(360deg); } }
+.qp-spinner {
+    width: 14px; height: 14px; flex-shrink: 0;
+    border: 2px solid color-mix(in srgb, var(--fg) 20%, transparent);
+    border-top-color: color-mix(in srgb, var(--fg) 55%, transparent);
+    border-radius: 50%;
+    animation: qp-spin 0.7s linear infinite;
+    display: inline-block;
+}
+.qp-preview-area {
+    flex: 1; min-height: 0; position: relative;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+}
+.qp-preview-close {
+    position: absolute; top: 8px; right: 10px; z-index: 1;
+    background: rgba(0,0,0,0.45); color: #fff; border: none;
+    border-radius: 4px; padding: 4px 10px; font-size: 12px;
+    cursor: pointer; transition: background 0.15s;
+}
+.qp-preview-close:hover { background: rgba(0,0,0,0.72); }
+.qp-preview-redo {
+    position: absolute; top: 8px; right: 110px; z-index: 1;
+    background: rgba(0,0,0,0.45); color: #fff; border: none;
+    border-radius: 4px; padding: 4px 10px; font-size: 12px;
+    cursor: pointer; transition: background 0.15s;
+}
+.qp-preview-redo:hover { background: rgba(0,80,200,0.72); }
+.qp-preview-redo:disabled { opacity: 0.5; cursor: default; }
+.qp-preview-img {
+    flex: 1; min-height: 0;
+    width: 100%; object-fit: contain; display: block;
+    transform-origin: center center;
+    user-select: none;
+    will-change: transform;
+}
+.qp-jobs-panel {
+    padding: 16px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.qp-jobs-title {
+    font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: color-mix(in srgb, var(--fg) 55%, transparent);
+    margin-bottom: 10px;
+}
+.qp-jobs-grid {
+    display: flex; flex-wrap: wrap; gap: 8px;
+}
+.qp-job-chip {
+    display: flex; align-items: center; gap: 5px;
+    padding: 4px 10px; border-radius: 20px;
+    border: 1px solid var(--border);
+    font-size: 12px; cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    user-select: none;
+}
+.qp-job-chip input[type=checkbox] { accent-color: var(--accent, #0af); margin: 0; }
+.qp-job-chip:hover { border-color: var(--accent, #0af); }
+.qp-model-row {
+    width: 100%; max-width: 480px;
+    display: flex; align-items: center; gap: 10px;
+}
+.qp-model-label {
+    font-size: 13px; white-space: nowrap; flex-shrink: 0;
+    width: 130px;
+    color: color-mix(in srgb, var(--fg) 65%, transparent);
+}
+.qp-model-select {
+    flex: 1; min-width: 0; width: 100%;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 6px 8px; font-size: 13px;
+    font-family: inherit; cursor: pointer;
+}
+.qp-model-select:focus { outline: none; border-color: var(--accent, #0af); }
+`;
+
+function injectStyles() {
+    if (document.getElementById('qp-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'qp-styles';
+    style.textContent = STYLES;
+    document.head.appendChild(style);
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = '/static/css/quick_proposal.css';
+    document.head.appendChild(link);
+}
+
+export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = '' }) {
+    injectStyles();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'qp-overlay';
+    overlay.id = 'qp-overlay';
+
+    overlay.innerHTML = `
+        <div class="qp-header">
+            <span class="qp-title">Quick Proposal</span>
+            <button class="qp-cancel-btn" id="qp-cancel-btn" style="display:none">Cancel</button>
+            <button class="qp-close-btn" id="qp-close-btn" title="Close">✕</button>
+        </div>
+        <div class="qp-body" id="qp-body">
+            <div class="qp-form-area" id="qp-form-area">
+                <div class="qp-upload-zone" id="qp-upload-zone" tabindex="0" role="button" aria-label="Upload plan PDF">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <div class="qp-upload-hint">Click or drag a plan PDF</div>
+                    <div class="qp-file-chosen" id="qp-file-chosen" style="display:none"></div>
+                </div>
+                <input type="file" id="qp-file-input" accept=".pdf,.jpg,.jpeg,.png" style="display:none">
+                <textarea class="qp-notes" id="qp-notes" placeholder="Optional notes for this job…"></textarea>
+                <div class="qp-model-row">
+                    <label class="qp-model-label" for="qp-model-select">Classifying Model</label>
+                    <select class="qp-model-select" id="qp-model-select">
+                        <option value="">Loading models…</option>
+                    </select>
+                </div>
+                <div class="qp-model-row">
+                    <label class="qp-model-label" for="qp-manager-model-select">Manager Model</label>
+                    <select class="qp-model-select" id="qp-manager-model-select">
+                        <option value="">Loading models…</option>
+                    </select>
+                </div>
+                <button class="qp-run-btn" id="qp-run-btn" disabled>Start</button>
+            </div>
+            <div class="qp-status" id="qp-status" style="display:none"></div>
+            <div class="qp-content" id="qp-content" style="display:none">
+                <div class="qp-sidebar">
+                    <div class="qp-sidebar-header">Index</div>
+                    <div class="qp-sidebar-pages" id="qp-sidebar-pages"></div>
+                </div>
+                <div class="qp-main-output" id="qp-main-output">
+                    <div class="qp-preview-area" id="qp-preview-area">
+                        <div class="qp-main-placeholder" id="qp-main-placeholder">
+                            <span class="qp-spinner"></span>Rendering pages…
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    overlay.querySelector('#qp-close-btn').addEventListener('click', onClose);
+
+    const fileInput  = overlay.querySelector('#qp-file-input');
+    const uploadZone = overlay.querySelector('#qp-upload-zone');
+    const fileChosen = overlay.querySelector('#qp-file-chosen');
+    const modelSelect   = overlay.querySelector('#qp-model-select');
+    const managerSelect = overlay.querySelector('#qp-manager-model-select');
+    const runBtn        = overlay.querySelector('#qp-run-btn');
+    let chosenFile = null;
+
+    loadModels(modelSelect, { preferClaude: false });
+    loadModels(managerSelect, { preferClaude: true });
+
+    // Pre-fill from an existing upload (Proposal Runs → Re-run flow)
+    if (prefillUploadId) {
+        fileChosen.textContent = `↩ ${prefillFilename || prefillUploadId}`;
+        fileChosen.style.display = 'block';
+        uploadZone.style.opacity = '0.4';
+        uploadZone.style.pointerEvents = 'none';
+        runBtn.disabled = false;
+    }
+
+    function onFileSelected(file) {
+        if (!file) return;
+        chosenFile = file;
+        fileChosen.textContent = file.name;
+        fileChosen.style.display = 'block';
+        runBtn.disabled = false;
+    }
+
+    uploadZone.addEventListener('click', () => fileInput.click());
+    uploadZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+    fileInput.addEventListener('change', () => onFileSelected(fileInput.files[0]));
+    uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+    uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+    uploadZone.addEventListener('drop', e => {
+        e.preventDefault();
+        uploadZone.classList.remove('drag-over');
+        onFileSelected(e.dataTransfer.files[0]);
+    });
+
+    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename));
+
+    return overlay;
+}
+
+async function loadModels(select, { preferClaude = false } = {}) {
+    try {
+        // Same fetch pattern as the main model picker: cached (no refresh), with credentials.
+        const res = await fetch('/api/models', { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const items = Array.isArray(data) ? data : (data.items ?? []);
+        const models = [];
+        for (const item of items) {
+            const displayNames = item.models_display || item.models || [];
+            const extraDisplayNames = item.models_extra_display || item.models_extra || [];
+            (item.models || []).forEach((mid, i) => {
+                models.push({ mid, label: displayNames[i] || mid });
+            });
+            (item.models_extra || []).forEach((mid, i) => {
+                models.push({ mid, label: extraDisplayNames[i] || mid });
+            });
+        }
+        select.innerHTML = '';
+        if (!models.length) {
+            select.innerHTML = '<option value="">No models found</option>';
+            return;
+        }
+        const defaultMid = preferClaude
+            ? (models.find(m => m.mid === 'claude-sonnet-4-6')?.mid
+                || models.find(m => m.mid.toLowerCase().includes('claude'))?.mid
+                || models[0].mid)
+            : (models.find(m => m.mid.toLowerCase().includes('gemini'))?.mid || models[0].mid);
+        models.forEach(({ mid, label }) => {
+            const opt = document.createElement('option');
+            opt.value = mid;
+            opt.textContent = label.split('/').pop();
+            opt.selected = mid === defaultMid;
+            select.appendChild(opt);
+        });
+    } catch (e) {
+        console.error('[quick_proposal] loadModels error:', e);
+        select.innerHTML = `<option value="">Error: ${e.message}</option>`;
+    }
+}
+
+async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '') {
+    const runBtn       = overlay.querySelector('#qp-run-btn');
+    const cancelBtn    = overlay.querySelector('#qp-cancel-btn');
+    const statusEl     = overlay.querySelector('#qp-status');
+    const formArea     = overlay.querySelector('#qp-form-area');
+    const contentArea  = overlay.querySelector('#qp-content');
+    const sidebarPages = overlay.querySelector('#qp-sidebar-pages');
+    const mainOutput   = overlay.querySelector('#qp-main-output');
+    const notes        = overlay.querySelector('#qp-notes').value;
+
+    runBtn.disabled = true;
+    statusEl.style.display = 'block';
+
+    let uploadId;
+    let filename;
+
+    if (existingUploadId) {
+        uploadId = existingUploadId;
+        filename = existingFilename || existingUploadId;
+        setStatus(statusEl, 'Starting pipeline…', true);
+    } else {
+        setStatus(statusEl, 'Uploading file…', true);
+        try {
+            const fd = new FormData();
+            fd.append('files', file);
+            const res = await fetch('/api/upload', { method: 'POST', body: fd });
+            if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+            uploadId = (await res.json()).files[0].id;
+            filename = file.name;
+        } catch (err) {
+            setStatus(statusEl, `Error: ${err.message}`);
+            runBtn.disabled = false;
+            return;
+        }
+    }
+
+    setStatus(statusEl, 'Starting pipeline…', true);
+
+    let runId;
+    try {
+        const res = await fetch('/api/quick_proposal/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ upload_id: uploadId, notes, gemini_model: geminiModel, manager_model: managerModel, filename }),
+        });
+        if (!res.ok) throw new Error(`Run failed: ${res.status}`);
+        runId = (await res.json()).run_id;
+        mainOutput._qpRunId       = runId;
+        mainOutput._qpSidebarPages = sidebarPages;
+        mainOutput._qpGeminiModel  = geminiModel;
+    } catch (err) {
+        setStatus(statusEl, `Error: ${err.message}`);
+        runBtn.disabled = false;
+        return;
+    }
+
+    formArea.style.display = 'none';
+    contentArea.style.display = 'flex';
+
+    if (cancelBtn) {
+        cancelBtn.style.display = '';
+        cancelBtn.onclick = () => {
+            cancelBtn.disabled = true;
+            fetch(`/api/quick_proposal/runs/${runId}/cancel`, { method: 'POST', credentials: 'same-origin' })
+                .catch(() => {});
+        };
+    }
+
+    startStream(runId, {
+        onPhaseStart(data) {
+            const label = data.cached
+                ? `${data.label || data.phase} (prompt cached)`
+                : (data.label || `Phase: ${data.phase}`);
+            setStatus(statusEl, label, true);
+            if (data.phase === 'phase3') {
+                renderExtractionPanel(mainOutput);
+            }
+        },
+
+        onPhaseComplete(data) {
+            const msgs = {
+                load:   'Pages rendered.',
+                index:  'Knowledge base loaded.',
+                phase1: 'Classification complete — regions annotated.',
+                phase2: 'Extraction index built.',
+                phase3: 'Extraction complete.',
+            };
+            setStatus(statusEl, msgs[data.phase] || `${data.phase} complete.`);
+            if (data.phase === 'load') {
+                const ph = mainOutput.querySelector('#qp-main-placeholder');
+                if (ph) { ph.innerHTML = 'Click a page to preview'; }
+            }
+            if (data.phase === 'phase1') {
+                // sidebar is the index — nothing to do in main area
+            }
+        },
+
+        onPageReady(data) {
+            addThumbnail(sidebarPages, mainOutput, data.page_idx, data.url);
+        },
+
+        onIndexLoaded(data) {
+            renderJobList(mainOutput, data.jobs || []);
+        },
+
+        onPageClassified(data) {
+            updateThumbnailClassification(sidebarPages, data);
+            if (data.error) {
+                setStatus(statusEl, `Classification error (p.${data.page_idx + 1}): ${data.error}`);
+            }
+        },
+
+        onExtractionMessage(data) {
+            appendExtractionMessage(mainOutput, data);
+        },
+
+        onIndexUpdate(data) {
+            updateLiveIndex(mainOutput, data);
+        },
+
+        onRegionPreview(data) { addRegionPreview(mainOutput, data); },
+
+        onError(data) {
+            setStatus(statusEl, `Error: ${data.message}`);
+            if (cancelBtn) cancelBtn.style.display = 'none';
+        },
+
+        onDone() {
+            setStatus(statusEl, 'Pipeline complete.');
+            if (cancelBtn) cancelBtn.style.display = 'none';
+            const pages = Object.entries(pageClassifications).map(([idx, cls]) => ({
+                idx:         parseInt(idx),
+                sheet_type:  cls.sheet_type,
+                importance:  cls.importance,
+                description: cls.description || '',
+            }));
+            if (pages.length && runId) {
+                fetch(`/api/quick_proposal/runs/${runId}/classifications`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pages }),
+                    credentials: 'same-origin',
+                }).catch(e => console.warn('[quick_proposal] classification save failed:', e));
+            }
+        },
+    });
+}
+
+function setStatus(el, text, loading = false) {
+    el.style.display = 'block';
+    el.innerHTML = '';
+    if (loading) {
+        const spinner = document.createElement('span');
+        spinner.className = 'qp-spinner';
+        el.appendChild(spinner);
+    }
+    el.appendChild(document.createTextNode(text));
+}
+
+function addThumbnail(container, mainOutput, pageIdx, url) {
+    const thumb = document.createElement('div');
+    thumb.className = 'qp-page-thumb';
+    thumb.dataset.pageIdx = pageIdx;
+
+    const imgWrap = document.createElement('div');
+    imgWrap.className = 'qp-thumb-img-wrap';
+
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = `Page ${pageIdx + 1}`;
+    img.loading = 'lazy';
+
+    const label = document.createElement('div');
+    label.className = 'qp-page-label';
+    label.textContent = `p.${pageIdx + 1}`;
+
+    imgWrap.appendChild(img);
+    imgWrap.appendChild(label);
+    thumb.appendChild(imgWrap);
+    container.appendChild(thumb);
+
+    // Click → full preview in main area
+    thumb.addEventListener('click', () => {
+        container.querySelectorAll('.qp-page-thumb').forEach(t => t.classList.remove('active'));
+        thumb.classList.add('active');
+        showPreview(mainOutput, url, pageIdx);
+    });
+}
+
+function showPreview(mainOutput, url, pageIdx) {
+    const previewArea = mainOutput.querySelector('#qp-preview-area');
+    if (!previewArea) return;
+
+    // Clean up any existing pan/zoom listeners before replacing content
+    previewArea._panCtrl?.abort();
+
+    // Preserve the current contents (extraction panel or placeholder) so back restores them.
+    const savedFragment = document.createDocumentFragment();
+    while (previewArea.firstChild) savedFragment.appendChild(previewArea.firstChild);
+
+    previewArea.innerHTML = '';
+
+    const panCtrl = new AbortController();
+    previewArea._panCtrl = panCtrl;
+    const { signal } = panCtrl;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'qp-preview-close';
+    closeBtn.textContent = '← Back';
+    closeBtn.addEventListener('click', () => {
+        panCtrl.abort();
+        mainOutput.closest('.qp-content')
+            ?.querySelectorAll('.qp-page-thumb')
+            .forEach(t => t.classList.remove('active'));
+        previewArea._panCtrl = null;
+        previewArea.innerHTML = '';
+        if (savedFragment.childNodes.length) {
+            previewArea.appendChild(savedFragment);
+        } else {
+            const ph = document.createElement('div');
+            ph.className = 'qp-main-placeholder';
+            ph.id = 'qp-main-placeholder';
+            ph.textContent = 'Click a page to preview';
+            previewArea.appendChild(ph);
+        }
+    });
+
+    const img = document.createElement('img');
+    img.className = 'qp-preview-img';
+    img.src = url;
+    img.alt = `Page ${pageIdx + 1} full preview`;
+    img.draggable = false;
+
+    // Zoom + pan state
+    let scale = 1, px = 0, py = 0;
+    let dragging = false, dragStartX = 0, dragStartY = 0, dragPx = 0, dragPy = 0;
+    let previewSvg = null;
+
+    function applyTransform() {
+        const t = `translate(${px}px, ${py}px) scale(${scale})`;
+        img.style.transform = t;
+        if (previewSvg) previewSvg.style.transform = t;
+        previewArea.style.cursor = scale > 1 ? (dragging ? 'grabbing' : 'grab') : 'default';
+    }
+
+    // Scroll to zoom, centered on cursor
+    previewArea.addEventListener('wheel', e => {
+        e.preventDefault();
+        const rect = previewArea.getBoundingClientRect();
+        const mx = e.clientX - rect.left - rect.width / 2;
+        const my = e.clientY - rect.top - rect.height / 2;
+        const factor = e.deltaY < 0 ? 1.05 : 1 / 1.05;
+        const newScale = Math.min(8, Math.max(1, scale * factor));
+        if (newScale === scale) return;
+        px = mx + (px - mx) * (newScale / scale);
+        py = my + (py - my) * (newScale / scale);
+        scale = newScale;
+        if (scale <= 1) { scale = 1; px = 0; py = 0; }
+        applyTransform();
+    }, { passive: false, signal });
+
+    // Drag to pan when zoomed
+    previewArea.addEventListener('mousedown', e => {
+        if (scale <= 1 || e.button !== 0) return;
+        dragging = true;
+        dragStartX = e.clientX; dragStartY = e.clientY;
+        dragPx = px; dragPy = py;
+        e.preventDefault();
+    }, { signal });
+
+    window.addEventListener('mousemove', e => {
+        if (!dragging) return;
+        px = dragPx + (e.clientX - dragStartX);
+        py = dragPy + (e.clientY - dragStartY);
+        applyTransform();
+    }, { signal });
+
+    window.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        applyTransform();
+    }, { signal });
+
+    // Double-click to reset zoom
+    previewArea.addEventListener('dblclick', () => {
+        scale = 1; px = 0; py = 0;
+        applyTransform();
+    }, { signal });
+
+    previewArea.appendChild(closeBtn);
+
+    const qpRunId = mainOutput._qpRunId;
+    if (qpRunId) {
+        const redoBtn = document.createElement('button');
+        redoBtn.className = 'qp-preview-redo';
+        redoBtn.textContent = '↻ Redo Page';
+        redoBtn.addEventListener('click', async () => {
+            redoBtn.disabled = true;
+            redoBtn.textContent = '↻ Classifying…';
+            try {
+                const geminiModel = mainOutput._qpGeminiModel || '';
+                const res = await fetch(
+                    `/api/quick_proposal/runs/${qpRunId}/reclassify/${pageIdx}`,
+                    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ gemini_model: geminiModel }) }
+                );
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                pageClassifications[pageIdx] = {
+                    sheet_type:  data.sheet_type,
+                    importance:  data.importance,
+                    description: data.description,
+                    regions:     data.regions || [],
+                };
+                const sp = mainOutput._qpSidebarPages;
+                if (sp) updateThumbnailClassification(sp, { page_idx: pageIdx, ...data });
+                showPreview(mainOutput, url, pageIdx);
+            } catch (e) {
+                redoBtn.textContent = `↻ Error: ${e.message}`;
+                redoBtn.disabled = false;
+            }
+        });
+        previewArea.appendChild(redoBtn);
+    }
+
+    previewArea.appendChild(img);
+
+    // Bbox overlay — aligned with the image using the same xMidYMid meet strategy as object-fit:contain
+    const regions = (pageClassifications[pageIdx] || {}).regions || [];
+    if (regions.length) {
+        const NS = 'http://www.w3.org/2000/svg';
+        previewSvg = document.createElementNS(NS, 'svg');
+        previewSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        previewSvg.style.cssText = 'position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; will-change:transform;';
+        img.addEventListener('load', () => {
+            const W = img.naturalWidth || 1000;
+            const H = img.naturalHeight || 1000;
+            previewSvg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+            regions.forEach(r => {
+                const [x1p, y1p, x2p, y2p] = r.bbox || [0, 0, 0, 0];
+                if (x2p <= x1p || y2p <= y1p) return;
+                const color = IMPORTANCE_COLOR[r.importance] || '#0af';
+                const rect = document.createElementNS(NS, 'rect');
+                rect.setAttribute('x',      String(x1p / 100 * W));
+                rect.setAttribute('y',      String(y1p / 100 * H));
+                rect.setAttribute('width',  String((x2p - x1p) / 100 * W));
+                rect.setAttribute('height', String((y2p - y1p) / 100 * H));
+                rect.setAttribute('fill', 'none');
+                rect.setAttribute('stroke', color);
+                rect.setAttribute('stroke-width', '2');
+                rect.setAttribute('vector-effect', 'non-scaling-stroke');
+                previewSvg.appendChild(rect);
+            });
+        });
+        previewArea.appendChild(previewSvg);
+    }
+}
+
+function renderBboxOverlays(thumb, regions) {
+    const target = thumb.querySelector('.qp-thumb-img-wrap') || thumb;
+    target.querySelectorAll('.qp-bbox-svg').forEach(el => el.remove());
+    if (!regions || !regions.length) return;
+
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 100 100');
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.classList.add('qp-bbox-svg');
+
+    regions.forEach(r => {
+        const [x1, y1, x2, y2] = r.bbox || [0, 0, 0, 0];
+        if (x2 <= x1 || y2 <= y1) return;
+        const color = IMPORTANCE_COLOR[r.importance] || '#0af';
+        const rect = document.createElementNS(NS, 'rect');
+        rect.setAttribute('x', x1);
+        rect.setAttribute('y', y1);
+        rect.setAttribute('width', x2 - x1);
+        rect.setAttribute('height', y2 - y1);
+        rect.setAttribute('fill', 'none');
+        rect.setAttribute('stroke', color);
+        rect.setAttribute('stroke-width', '1.2');
+        rect.setAttribute('vector-effect', 'non-scaling-stroke');
+        svg.appendChild(rect);
+    });
+
+    target.appendChild(svg);
+}
+
+function renderPhase1IndexPanel(mainOutput) {
+    const previewArea = mainOutput.querySelector('#qp-preview-area');
+    if (!previewArea) return;
+
+    previewArea._panCtrl?.abort();
+    previewArea.innerHTML = '';
+
+    const container = document.createElement('div');
+    container.className = 'qp-phase1-index';
+    container.id = 'qp-phase1-index';
+
+    const importanceOrder = { high: 0, medium: 1, low: 2 };
+    const sorted = Object.entries(pageClassifications)
+        .sort(([ai, a], [bi, b]) =>
+            (importanceOrder[a.importance] ?? 3) - (importanceOrder[b.importance] ?? 3)
+            || parseInt(ai) - parseInt(bi)
+        );
+
+    sorted.forEach(([idxStr, cls]) => {
+        const idx = parseInt(idxStr);
+        const card = document.createElement('div');
+        card.className = 'qp-p1-page';
+
+        const color = IMPORTANCE_COLOR[cls.importance] || '#6b7280';
+        const header = document.createElement('div');
+        header.className = 'qp-p1-page-header';
+        header.innerHTML = `
+            <span class="qp-p1-imp" style="background:${color}">${cls.importance || 'low'}</span>
+            <span class="qp-p1-type">p.${idx + 1} — ${(cls.sheet_type || 'other').replace(/_/g, ' ')}</span>
+            <span class="qp-p1-desc">${cls.description || ''}</span>
+        `;
+
+        header.addEventListener('click', () => {
+            const url = mainOutput.closest('.qp-content')
+                ?.querySelector(`[data-page-idx="${idx}"] img`)?.src;
+            if (url) showPreview(mainOutput, url, idx);
+        });
+
+        card.appendChild(header);
+
+        if (cls.regions && cls.regions.length) {
+            const regList = document.createElement('div');
+            regList.className = 'qp-p1-regions';
+            cls.regions.forEach(r => {
+                const row = document.createElement('div');
+                row.className = 'qp-p1-region';
+                const coords = r.bbox ? r.bbox.map(v => Math.round(v)).join(', ') : '';
+                row.innerHTML = `<span class="qp-p1-region-id">${r.id}</span>${r.label || r.extraction_hint || ''}<span class="qp-p1-region-coords" style="display:none"> [${coords}]</span>`;
+                row.style.cursor = coords ? 'pointer' : '';
+                if (coords) {
+                    row.addEventListener('click', () => {
+                        const el = row.querySelector('.qp-p1-region-coords');
+                        el.style.display = el.style.display === 'none' ? '' : 'none';
+                    });
+                }
+                regList.appendChild(row);
+            });
+            card.appendChild(regList);
+        }
+
+        container.appendChild(card);
+    });
+
+    previewArea.appendChild(container);
+}
+
+function updateThumbnailClassification(container, data, onSave) {
+    const thumb = container.querySelector(`[data-page-idx="${data.page_idx}"]`);
+    if (!thumb) return;
+
+    pageClassifications[data.page_idx] = {
+        sheet_type:  data.sheet_type  || 'other',
+        importance:  data.importance  || 'low',
+        description: data.description || '',
+        regions:     data.regions     || [],
+    };
+
+    const imgWrap = thumb.querySelector('.qp-thumb-img-wrap') || thumb;
+
+    const label = imgWrap.querySelector('.qp-page-label');
+    if (label) label.textContent = `p.${data.page_idx + 1} · ${data.sheet_type || '?'}`;
+
+    renderBboxOverlays(thumb, data.regions || []);
+
+    imgWrap.querySelector('.qp-classification-badge')?.remove();
+    const badge = document.createElement('div');
+    badge.className = 'qp-classification-badge';
+    if (data.error) {
+        badge.textContent = 'error';
+        badge.style.background = '#ef4444';
+    } else {
+        badge.textContent = (data.sheet_type || 'other').replace(/_/g, ' ');
+        badge.style.background = IMPORTANCE_COLOR[data.importance] || '#6b7280';
+    }
+    badge.addEventListener('click', e => {
+        e.stopPropagation();
+        openClassifyEditor(badge, data.page_idx, container, onSave);
+    });
+    imgWrap.appendChild(badge);
+
+    // Info panel: description + region list, always below the image
+    thumb.querySelector('.qp-thumb-info')?.remove();
+    if (!data.error && (data.description || (data.regions || []).length)) {
+        const info = document.createElement('div');
+        info.className = 'qp-thumb-info';
+
+        if (data.description) {
+            const desc = document.createElement('div');
+            desc.className = 'qp-thumb-desc';
+            desc.textContent = data.description;
+            info.appendChild(desc);
+        }
+
+        if ((data.regions || []).length) {
+            const regList = document.createElement('div');
+            regList.className = 'qp-thumb-regions';
+            (data.regions || []).forEach(r => {
+                const row = document.createElement('div');
+                row.className = 'qp-thumb-region-row';
+                const dot = document.createElement('span');
+                dot.className = 'qp-thumb-region-dot';
+                dot.style.background = IMPORTANCE_COLOR[r.importance] || '#6b7280';
+                const lbl = document.createElement('span');
+                lbl.className = 'qp-thumb-region-label';
+                lbl.textContent = r.label || r.extraction_hint || r.id;
+                row.appendChild(dot);
+                row.appendChild(lbl);
+                if (r.bbox) {
+                    const coords = document.createElement('span');
+                    coords.className = 'qp-thumb-region-coords';
+                    coords.textContent = `[${r.bbox.map(v => Math.round(v)).join(', ')}]`;
+                    coords.style.display = 'none';
+                    row.appendChild(coords);
+                    row.addEventListener('click', e => {
+                        e.stopPropagation();
+                        coords.style.display = coords.style.display === 'none' ? '' : 'none';
+                    });
+                }
+                regList.appendChild(row);
+            });
+            info.appendChild(regList);
+        }
+
+        thumb.appendChild(info);
+    }
+}
+
+function openClassifyEditor(anchor, pageIdx, container, onSave) {
+    let editor = document.getElementById('qp-classify-editor');
+    if (!editor) {
+        editor = document.createElement('div');
+        editor.id = 'qp-classify-editor';
+        editor.className = 'qp-classify-editor';
+        editor.innerHTML = `
+            <div class="qp-classify-editor-row">
+                <div class="qp-classify-editor-label">Sheet Type</div>
+                <select id="qp-ce-type"></select>
+            </div>
+            <div class="qp-classify-editor-row">
+                <div class="qp-classify-editor-label">Importance</div>
+                <select id="qp-ce-importance">
+                    <option value="high">high</option>
+                    <option value="medium">medium</option>
+                    <option value="low">low</option>
+                </select>
+            </div>
+            <div class="qp-classify-editor-actions">
+                <button class="qp-classify-editor-cancel" id="qp-ce-cancel">Cancel</button>
+                <button class="qp-classify-editor-save"   id="qp-ce-save">Save</button>
+            </div>`;
+        const typeSelect = editor.querySelector('#qp-ce-type');
+        SHEET_TYPES.forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t;
+            opt.textContent = t.replace(/_/g, ' ');
+            typeSelect.appendChild(opt);
+        });
+        document.body.appendChild(editor);
+        document.addEventListener('click', e => {
+            if (!editor.contains(e.target)) closeClassifyEditor();
+        });
+    }
+
+    // Store active page and save callback on the editor element
+    editor._pageIdx   = pageIdx;
+    editor._container = container;
+    editor._onSave    = onSave ?? null;
+
+    // Pre-populate with current values
+    const cls = pageClassifications[pageIdx] || {};
+    editor.querySelector('#qp-ce-type').value = cls.sheet_type || 'other';
+    editor.querySelector('#qp-ce-importance').value = cls.importance || 'low';
+
+    // Position near anchor
+    const rect = anchor.getBoundingClientRect();
+    const top  = Math.min(rect.bottom + 4, window.innerHeight - 180);
+    const left = Math.min(rect.left, window.innerWidth - 200);
+    editor.style.top  = `${top}px`;
+    editor.style.left = `${left}px`;
+    editor.style.display = 'flex';
+
+    editor.querySelector('#qp-ce-cancel').onclick = () => closeClassifyEditor();
+    editor.querySelector('#qp-ce-save').onclick = () => {
+        const newType = editor.querySelector('#qp-ce-type').value;
+        const newImp  = editor.querySelector('#qp-ce-importance').value;
+        const current = pageClassifications[pageIdx] || {};
+        const updated = { ...current, sheet_type: newType, importance: newImp };
+        updateThumbnailClassification(editor._container, {
+            page_idx:    pageIdx,
+            sheet_type:  newType,
+            importance:  newImp,
+            description: updated.description,
+            regions:     updated.regions,
+        }, editor._onSave);
+        editor._onSave?.(pageIdx, newType, newImp);
+        closeClassifyEditor();
+    };
+}
+
+function closeClassifyEditor() {
+    const editor = document.getElementById('qp-classify-editor');
+    if (editor) editor.style.display = 'none';
+}
+
+function renderExtractionPanel(mainOutput) {
+    const previewArea = mainOutput.querySelector('#qp-preview-area');
+    if (!previewArea) return;
+    // Abort any active pan/zoom listeners
+    previewArea._panCtrl?.abort();
+    previewArea.innerHTML = `
+        <div class="qp-extraction-log" id="qp-extraction-log">
+            <div class="qp-extraction-header">Extraction Log</div>
+            <div class="qp-extraction-messages" id="qp-extraction-messages"></div>
+        </div>
+        <div class="qp-index-panel" id="qp-index-panel">
+            <div class="qp-index-header">Extracted Values</div>
+            <div class="qp-index-values" id="qp-index-values"></div>
+        </div>
+    `;
+}
+
+function appendExtractionMessage(mainOutput, data) {
+    const container = mainOutput.querySelector('#qp-extraction-messages');
+    if (!container) return;
+
+    const row = document.createElement('div');
+    row.className = 'qp-exmsg';
+
+    if (data.role === 'claude') {
+        row.className += ' qp-exmsg-claude';
+        row.textContent = `${data.model || 'Manager'}: ${data.text}`;
+    } else if (data.role === 'claude_to_gemini') {
+        row.className += ' qp-exmsg-claude-to-gemini';
+        row.textContent = `${data.model || 'Manager'} → Gemini: ${data.text}`;
+    } else if (data.role === 'gemini') {
+        row.className += ' qp-exmsg-gemini';
+        row.textContent = `Gemini: ${data.text}`;
+    } else if (data.role === 'tool_call') {
+        row.className += ' qp-exmsg-tool';
+        row.textContent = `  ⚙ ${data.tool}(${data.args})`;
+    } else {
+        row.textContent = data.text || JSON.stringify(data);
+    }
+
+    container.appendChild(row);
+    container.scrollTop = container.scrollHeight;
+}
+
+function updateLiveIndex(mainOutput, data) {
+    const container = mainOutput.querySelector('#qp-index-values');
+    if (!container) return;
+
+    const key = data.key;
+    let item = container.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (!item) {
+        item = document.createElement('div');
+        item.className = 'qp-index-item';
+        item.dataset.key = key;
+        container.appendChild(item);
+    }
+    const confClass = `qp-index-conf-${data.confidence || 'medium'}`;
+    const valText   = data.value === null || data.value === undefined
+        ? 'null'
+        : (data.value !== null && typeof data.value === 'object' ? JSON.stringify(data.value) : String(data.value));
+    item.innerHTML = `
+        <span class="qp-index-key">${key}</span>
+        <span class="qp-index-val">${valText}</span>
+        <span class="qp-index-conf ${confClass}">${data.confidence || ''}</span>
+    `;
+}
+
+function addRegionPreview(mainOutput, data) {
+    const sidebar = mainOutput.closest('.qp-content')?.querySelector('#qp-sidebar-pages');
+    if (!sidebar) return;
+    let section = sidebar.querySelector('#qp-viewed-regions');
+    if (!section) {
+        const hdr = document.createElement('div');
+        hdr.className = 'qp-sidebar-header';
+        hdr.style.cssText = 'margin-top:8px;';
+        hdr.textContent = 'Viewed Regions';
+        section = document.createElement('div');
+        section.id = 'qp-viewed-regions';
+        section.className = 'qp-region-preview-grid';
+        sidebar.appendChild(hdr);
+        sidebar.appendChild(section);
+    }
+    const tile = document.createElement('div');
+    tile.className = 'qp-region-tile';
+    tile.title = data.bbox_id || '';
+    if (data.image_url) {
+        const img = document.createElement('img');
+        img.src = data.image_url;
+        tile.appendChild(img);
+        // Click → full preview, same as page thumbnails
+        const pageIdx = parseInt((data.bbox_id || '').split('_')[0], 10);
+        tile.style.cursor = 'pointer';
+        tile.addEventListener('click', () => {
+            section.querySelectorAll('.qp-region-tile').forEach(t => t.classList.remove('active'));
+            tile.classList.add('active');
+            showPreview(mainOutput, data.image_url, isNaN(pageIdx) ? 0 : pageIdx);
+        });
+    }
+    const lbl = document.createElement('div');
+    lbl.className = 'qp-region-tile-lbl';
+    lbl.textContent = data.bbox_id || '';
+    tile.appendChild(lbl);
+    section.appendChild(tile);
+    section.scrollTop = section.scrollHeight;
+}
+
+function _escHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+const PROMPT_DISPLAY_NAMES = {
+    'gemini_phase1':   'Phase 1 — Classification',
+    'gemini_phase3':   'Phase 3 — Extraction',
+    'manager_system':  'Manager System',
+    'system_prompt':   'System Prompt',
+};
+
+export async function buildPromptsPanel({ onClose }) {
+    injectStyles();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'qp-overlay';
+    overlay.id = 'qp-overlay';
+
+    overlay.innerHTML = `
+        <div class="qp-header">
+            <span class="qp-title">Quick Proposal — Prompts</span>
+            <button class="qp-close-btn" id="qp-close-btn" title="Close">✕</button>
+        </div>
+        <div class="qp-prompts-body" id="qp-prompts-body">
+            <div class="qp-main-placeholder"><span class="qp-spinner"></span>Loading prompts…</div>
+        </div>
+    `;
+
+    overlay.querySelector('#qp-close-btn').addEventListener('click', onClose);
+    const body = overlay.querySelector('#qp-prompts-body');
+
+    try {
+        const res = await fetch('/api/quick_proposal/prompts', { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const prompts = await res.json();
+
+        if (!prompts.length) {
+            body.innerHTML = '<div style="padding:32px;text-align:center;opacity:0.5;">No prompts found.</div>';
+            return overlay;
+        }
+
+        // Tab bar
+        const tabBar = document.createElement('div');
+        tabBar.className = 'qp-prompt-tabs';
+        const contentArea = document.createElement('div');
+        contentArea.className = 'qp-prompt-content';
+
+        body.innerHTML = '';
+        body.appendChild(tabBar);
+        body.appendChild(contentArea);
+
+        let activeTab = null;
+
+        prompts.forEach((p, i) => {
+            const label = PROMPT_DISPLAY_NAMES[p.name] || p.name;
+
+            const tab = document.createElement('button');
+            tab.className = 'qp-prompt-tab';
+            tab.textContent = label;
+            tab.dataset.name = p.name;
+            tabBar.appendChild(tab);
+
+            const pane = document.createElement('div');
+            pane.className = 'qp-prompt-pane';
+            pane.dataset.name = p.name;
+            pane.style.display = 'none';
+            pane.innerHTML = `<pre class="qp-prompt-pre">${_escHtml(p.content)}</pre>`;
+            contentArea.appendChild(pane);
+
+            tab.addEventListener('click', () => {
+                tabBar.querySelectorAll('.qp-prompt-tab').forEach(t => t.classList.remove('active'));
+                contentArea.querySelectorAll('.qp-prompt-pane').forEach(p => p.style.display = 'none');
+                tab.classList.add('active');
+                pane.style.display = 'block';
+                activeTab = p.name;
+            });
+
+            if (i === 0) tab.click();
+        });
+    } catch (e) {
+        body.innerHTML = `<div style="padding:32px;text-align:center;color:#ef4444;">Error loading prompts: ${_escHtml(e.message)}</div>`;
+    }
+
+    return overlay;
+}
+
+export async function buildViewPanel({ runId, onClose, onRerun }) {
+    injectStyles();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'qp-overlay';
+    overlay.id = 'qp-overlay';
+
+    overlay.innerHTML = `
+        <div class="qp-header">
+            <span class="qp-title">Quick Proposal</span>
+            <button class="qp-view-rerun-btn qp-run-rerun-btn" title="Re-run full pipeline">Re-run</button>
+            <button class="qp-cancel-btn" id="qp-cancel-btn" style="display:none">Cancel</button>
+            <button class="qp-close-btn" id="qp-close-btn" title="Close">✕</button>
+        </div>
+        <div class="qp-body" id="qp-body">
+            <div class="qp-phase3-bar" id="qp-phase3-bar">
+                <span class="qp-phase3-label">Extraction Model</span>
+                <select class="qp-model-select" id="qp-p3-gemini-select">
+                    <option value="">Loading…</option>
+                </select>
+                <span class="qp-phase3-label">Manager Model</span>
+                <select class="qp-model-select" id="qp-p3-manager-select">
+                    <option value="">Loading…</option>
+                </select>
+                <button class="qp-run-btn" id="qp-p3-run-btn" style="margin:0;padding:6px 18px;flex-shrink:0;">Run Phase 3</button>
+            </div>
+            <div class="qp-status" id="qp-status" style="display:none"></div>
+            <div class="qp-content" id="qp-content" style="display:flex">
+                <div class="qp-sidebar">
+                    <div class="qp-sidebar-header">Index</div>
+                    <div class="qp-sidebar-pages" id="qp-sidebar-pages"></div>
+                </div>
+                <div class="qp-main-output" id="qp-main-output">
+                    <div class="qp-preview-area" id="qp-preview-area">
+                        <div class="qp-main-placeholder" id="qp-main-placeholder">
+                            <span class="qp-spinner"></span>Loading run…
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    overlay.querySelector('#qp-close-btn').addEventListener('click', onClose);
+
+    const sidebarPages  = overlay.querySelector('#qp-sidebar-pages');
+    const mainOutput    = overlay.querySelector('#qp-main-output');
+    const placeholder   = overlay.querySelector('#qp-main-placeholder');
+    const statusEl      = overlay.querySelector('#qp-status');
+
+    mainOutput._qpRunId        = runId;
+    mainOutput._qpSidebarPages = sidebarPages;
+    mainOutput._qpGeminiModel  = '';
+    const phase3Bar     = overlay.querySelector('#qp-phase3-bar');
+    const geminiSelect  = overlay.querySelector('#qp-p3-gemini-select');
+    const managerSelect = overlay.querySelector('#qp-p3-manager-select');
+    const phase3RunBtn  = overlay.querySelector('#qp-p3-run-btn');
+    const cancelBtn     = overlay.querySelector('#qp-cancel-btn');
+
+    loadModels(geminiSelect, { preferClaude: false });
+    loadModels(managerSelect, { preferClaude: true });
+
+    phase3RunBtn.addEventListener('click', async () => {
+        phase3RunBtn.disabled = true;
+        setStatus(statusEl, 'Starting Phase 3…', true);
+        try {
+            const res = await fetch(`/api/quick_proposal/runs/${runId}/phase3`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value }),
+                credentials: 'same-origin',
+            });
+            if (!res.ok) throw new Error(`Phase 3 start failed: ${res.status}`);
+            const { run_id: streamRunId } = await res.json();
+
+            phase3Bar.style.display = 'none';
+            cancelBtn.style.display = '';
+            cancelBtn.disabled = false;
+            cancelBtn.onclick = () => {
+                cancelBtn.disabled = true;
+                fetch(`/api/quick_proposal/runs/${streamRunId}/cancel`, { method: 'POST', credentials: 'same-origin' })
+                    .catch(() => {});
+            };
+
+            startStream(streamRunId, {
+                onPhaseStart(data) {
+                    const label = data.cached
+                        ? `${data.label || data.phase} (prompt cached)`
+                        : (data.label || `Phase: ${data.phase}`);
+                    setStatus(statusEl, label, true);
+                    if (data.phase === 'phase3') renderExtractionPanel(mainOutput);
+                },
+                onPhaseComplete(data) {
+                    if (data.phase === 'phase3') {
+                        setStatus(statusEl, 'Extraction complete.');
+                        cancelBtn.style.display = 'none';
+                    }
+                },
+                onExtractionMessage(data)  { appendExtractionMessage(mainOutput, data); },
+                onIndexUpdate(data)        { updateLiveIndex(mainOutput, data); },
+                onRegionPreview(data)      { addRegionPreview(mainOutput, data); },
+                onDone() {
+                    cancelBtn.style.display = 'none';
+                    phase3Bar.style.display = 'flex';
+                    phase3RunBtn.disabled = false;
+                },
+                onError(data) {
+                    setStatus(statusEl, `Error: ${data.message}`);
+                    cancelBtn.style.display = 'none';
+                    phase3Bar.style.display = 'flex';
+                    phase3RunBtn.disabled = false;
+                },
+            });
+        } catch (err) {
+            setStatus(statusEl, `Error: ${err.message}`);
+            phase3Bar.style.display = 'flex';
+            phase3RunBtn.disabled = false;
+        }
+    });
+
+    try {
+        const res = await fetch(`/api/quick_proposal/runs/${runId}`, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const run = await res.json();
+
+        overlay.querySelector('.qp-view-rerun-btn').addEventListener('click', () =>
+            onRerun?.(run.upload_id, run.filename || run.upload_id), { once: true });
+
+        const pages   = run.pages  || [];
+        const bboxMap = run.bboxes || {};
+
+        // Reconstruct regions array for a page from saved bbox_ids + bboxes dict
+        const buildRegions = p => (p.bbox_ids || []).map(bid => {
+            const b = bboxMap[bid];
+            if (!b) return null;
+            const colonIdx = (b.description || '').indexOf(': ');
+            const label = colonIdx >= 0 ? b.description.slice(0, colonIdx) : (b.description || bid);
+            const hint  = colonIdx >= 0 ? b.description.slice(colonIdx + 2) : '';
+            return { id: bid, label, bbox: [b.x1, b.y1, b.x2, b.y2], extraction_hint: hint, importance: b.importance || 'medium' };
+        }).filter(Boolean);
+
+        // Seed pageClassifications so the editor and sidebar pre-populate correctly.
+        pages.forEach(p => {
+            if (p.sheet_type) {
+                pageClassifications[p.idx] = {
+                    sheet_type:  p.sheet_type,
+                    importance:  p.importance || 'low',
+                    description: p.description || '',
+                    regions:     buildRegions(p),
+                };
+            }
+        });
+
+        // Callback that immediately persists a single page edit to results.json.
+        const persistSave = (pageIdx, sheet_type, importance) => {
+            fetch(`/api/quick_proposal/runs/${runId}/classifications`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pages: [{ idx: pageIdx, sheet_type, importance }] }),
+                credentials: 'same-origin',
+            }).catch(e => console.warn('[quick_proposal] classification save failed:', e));
+        };
+
+        pages.forEach(p => {
+            const url = `/api/quick_proposal/pages/${runId}/${p.idx}`;
+            addThumbnail(sidebarPages, mainOutput, p.idx, url);
+            if (p.sheet_type) {
+                updateThumbnailClassification(sidebarPages, {
+                    page_idx:    p.idx,
+                    sheet_type:  p.sheet_type,
+                    importance:  p.importance || 'low',
+                    description: p.description || '',
+                    regions:     buildRegions(p),
+                }, persistSave);
+            }
+        });
+
+        placeholder.textContent = pages.length ? 'Click a page to preview' : 'No pages saved for this run.';
+
+        // Restore phase3 extraction log and index values if they were saved.
+        const extractedValues = run.extracted_values || {};
+        const hasValues = Object.keys(extractedValues).length > 0;
+        try {
+            const logRes = await fetch(`/api/quick_proposal/runs/${runId}/phase3_log`, { credentials: 'same-origin' });
+            const log = logRes.ok ? await logRes.json() : [];
+            if (log.length > 0 || hasValues) {
+                renderExtractionPanel(mainOutput);
+                for (const entry of log) {
+                    if (entry.type === 'extraction_message') appendExtractionMessage(mainOutput, entry);
+                    else if (entry.type === 'region_preview')  addRegionPreview(mainOutput, entry);
+                }
+                for (const [key, meta] of Object.entries(extractedValues)) {
+                    updateLiveIndex(mainOutput, { key, value: meta.value, confidence: meta.confidence, source_bbox_id: meta.source_bbox_id });
+                }
+            }
+        } catch (_) { /* log not available — no-op */ }
+    } catch (e) {
+        placeholder.textContent = `Error loading run: ${e.message}`;
+    }
+
+    return overlay;
+}
+
+export function buildRunsPanel({ onClose, onSelectRun, onOpenRun }) {
+    injectStyles();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'qp-overlay';
+    overlay.id = 'qp-runs-overlay';
+
+    overlay.innerHTML = `
+        <div class="qp-header">
+            <span class="qp-title">Quick Proposal — Runs</span>
+            <button class="qp-close-btn" id="qp-runs-close-btn" title="Close">✕</button>
+        </div>
+        <div class="qp-runs-body" id="qp-runs-body">
+            <div class="qp-main-placeholder"><span class="qp-spinner"></span>Loading runs…</div>
+        </div>
+    `;
+
+    overlay.querySelector('#qp-runs-close-btn').addEventListener('click', onClose);
+    const body = overlay.querySelector('#qp-runs-body');
+
+    fetch('/api/quick_proposal/runs', { credentials: 'same-origin' })
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then(runs => {
+            body.innerHTML = '';
+            if (!runs.length) {
+                body.innerHTML = `<div class="qp-runs-empty">No proposal runs yet.</div>`;
+                return;
+            }
+            runs.forEach(run => {
+                const date = run.timestamp
+                    ? new Date(run.timestamp * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+                    : '—';
+                const statusClass = `qp-run-status-${run.status || 'unknown'}`;
+                const row = document.createElement('div');
+                row.className = 'qp-run-row';
+                row.innerHTML = `
+                    <div class="qp-run-info">
+                        <div class="qp-run-filename">${_escHtml(run.filename || run.upload_id)}</div>
+                        <div class="qp-run-meta">${_escHtml(date)} · <span class="${statusClass}">${_escHtml(run.status || 'unknown')}</span></div>
+                        ${run.notes ? `<div class="qp-run-notes">${_escHtml(run.notes)}</div>` : ''}
+                    </div>
+                    <div class="qp-run-actions">
+                        ${(run.status === 'complete' || run.status === 'error' || run.status === 'cancelled' || run.status === 'running') ? '<button class="qp-run-open-btn">Open</button>' : ''}
+                        <button class="qp-run-rerun-btn">Re-run</button>
+                    </div>
+                `;
+                row.querySelector('.qp-run-open-btn')?.addEventListener('click', () => {
+                    onOpenRun?.(run.id || run.run_id);
+                });
+                row.querySelector('.qp-run-rerun-btn').addEventListener('click', () => {
+                    onSelectRun(run.upload_id, run.filename || run.upload_id);
+                });
+                body.appendChild(row);
+            });
+        })
+        .catch(e => {
+            body.innerHTML = `<div class="qp-runs-empty">Error loading runs: ${_escHtml(e.message)}</div>`;
+        });
+
+    return overlay;
+}
+
+function renderJobList(mainOutput, jobs) {
+    // Remove existing panel if re-rendered
+    mainOutput.querySelector('#qp-jobs-panel')?.remove();
+
+    const panel = document.createElement('div');
+    panel.className = 'qp-jobs-panel';
+    panel.id = 'qp-jobs-panel';
+    panel.innerHTML = `
+        <div class="qp-jobs-title">Select Jobs To Reference</div>
+        <div class="qp-jobs-grid" id="qp-jobs-grid"></div>
+    `;
+
+    const grid = panel.querySelector('#qp-jobs-grid');
+    jobs.forEach(job => {
+        const chip = document.createElement('label');
+        chip.className = 'qp-job-chip';
+        chip.innerHTML = `<input type="checkbox" value="${job.id}" checked> ${job.name}`;
+        grid.appendChild(chip);
+    });
+
+    // Insert before the preview area so the jobs panel persists while previewing
+    const previewArea = mainOutput.querySelector('#qp-preview-area');
+    mainOutput.insertBefore(panel, previewArea);
+}

@@ -1,0 +1,335 @@
+/* ── Week view: hour grid ──────────────────────────────────────────
+   Vertical hour rail on the left, 7 day columns on the right with their
+   own all-day strip and an absolute-positioned hour grid below it. */
+.cal-wk-wrap {
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  /* The wrap itself scrolls so the hour rail and day columns move
+     together; column headers and the rail spacer are sticky-pinned. */
+  overflow: auto;
+  max-height: calc(100vh - 220px);
+  min-height: 360px;
+  position: relative;
+}
+.cal-wk-rail {
+  flex: 0 0 56px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--fg) 2%, var(--bg));
+  position: sticky;
+  left: 0;
+  z-index: 5;
+}
+.cal-wk-rail-spacer {
+  /* Lines up the rail's first hour cell with the column's grid origin
+     (column header + all-day strip). 32 + 24 = 56 px. Doubles as the
+     zoom-control corner since the toolbar is crowded. */
+  height: 56px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  background: color-mix(in srgb, var(--fg) 2%, var(--bg));
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+.cal-wk-zoom {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 5px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  opacity: 0.55;
+  transition: opacity 0.15s, background 0.15s, border-color 0.15s;
+}
+.cal-wk-zoom:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--fg) 8%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent, var(--fg)) 50%, var(--border));
+}
+.cal-wk-rail-cell {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  padding: 4px 8px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+.cal-wk-cols {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  position: relative;
+}
+.cal-wk-col {
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.cal-wk-col:first-child { border-left: none; }
+.cal-wk-col-head {
+  height: 32px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--fg) 3%, var(--bg));
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);
+  position: sticky;
+  top: 0;
+  z-index: 4;
+}
+.cal-wk-col.cal-wk-today .cal-wk-col-head { background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--bg)); }
+.cal-wk-col.cal-wk-today .cal-wk-dn,
+.cal-wk-col.cal-wk-today .cal-wk-dt { color: var(--accent, var(--red)); font-weight: 700; }
+/* Sunday: a softer rest-day tint so the week edge reads visually, even
+   when today is mid-week. Falls back gracefully under the .cal-wk-today
+   rules above (today on a Sunday still gets the accent treatment). */
+.cal-wk-col.cal-wk-sun .cal-wk-col-head { background: color-mix(in srgb, var(--fg) 7%, var(--bg)); }
+.cal-wk-col.cal-wk-sun .cal-wk-grid { background: color-mix(in srgb, var(--fg) 2.5%, var(--bg)); }
+.cal-wk-col.cal-wk-sun .cal-wk-allday { background: color-mix(in srgb, var(--fg) 3%, var(--bg)); }
+.cal-wk-col.cal-wk-sun .cal-wk-dn,
+.cal-wk-col.cal-wk-sun .cal-wk-dt { color: color-mix(in srgb, var(--fg) 60%, transparent); }
+/* Today on a Sunday still wins the accent treatment. */
+.cal-wk-col.cal-wk-today.cal-wk-sun .cal-wk-col-head { background: color-mix(in srgb, var(--accent, var(--fg)) 12%, var(--bg)); }
+.cal-wk-col.cal-wk-today.cal-wk-sun .cal-wk-dn,
+.cal-wk-col.cal-wk-today.cal-wk-sun .cal-wk-dt { color: var(--accent, var(--fg)); }
+.cal-wk-dn { font-weight: 600; opacity: 0.6; }
+.cal-wk-dt { font-variant-numeric: tabular-nums; opacity: 0.5; }
+.cal-wk-allday {
+  height: 24px;
+  padding: 2px 4px;
+  display: flex;
+  flex-direction: row;
+  gap: 2px;
+  align-items: center;
+  background: color-mix(in srgb, var(--fg) 1.5%, var(--bg));
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  position: sticky;
+  top: 32px;
+  z-index: 3;
+}
+.cal-wk-allday::-webkit-scrollbar { display: none; }
+.cal-wk-allday-event {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 5px;
+  border-radius: 3px;
+  color: var(--cal-event-fg, var(--fg));
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Hour grid body */
+.cal-wk-grid {
+  position: relative;
+  flex: 0 0 auto;
+  cursor: cell;
+  user-select: none;
+}
+.cal-wk-cell {
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 6%, transparent);
+  box-sizing: border-box;
+}
+.cal-wk-cell:hover { background: color-mix(in srgb, var(--fg) 3%, transparent); }
+/* "Now" line */
+.cal-wk-now {
+  position: absolute;
+  left: 0; right: 0;
+  height: 0;
+  border-top: 2px solid color-mix(in srgb, var(--accent, var(--red, #f87171)) 90%, transparent);
+  pointer-events: none;
+  z-index: 4;
+}
+.cal-wk-now::before {
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: -4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent, var(--red, #f87171));
+}
+/* Event blocks */
+.cal-wk-block {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  border-left: 3px solid var(--fg);
+  border-radius: 4px;
+  padding: 4px 7px;
+  font-size: 11px;
+  line-height: 1.25;
+  cursor: pointer;
+  overflow: hidden;
+  z-index: 2;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--fg) 8%, transparent);
+  transition: filter 0.12s, transform 0.12s;
+  box-sizing: border-box;
+}
+.cal-wk-block:hover { filter: brightness(1.05); transform: translateY(-0.5px); }
+.cal-wk-block-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+.cal-wk-block-time { font-size: 10px; opacity: 0.75; font-variant-numeric: tabular-nums; margin-top: 1px; }
+@media (max-width: 768px) {
+  /* Mobile week view: the hour rail already shows the time, so drop it from the
+     card and let the title wrap to fill the freed space (more readable text). */
+  .cal-wk-block-time { display: none; }
+  .cal-wk-block-name {
+    white-space: normal;
+    line-height: 1.15;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+  }
+}
+/* Resize handle: a 6 px hit zone along the block's bottom edge. The
+   visible 2-px stripe only shows on hover so blocks at rest stay clean. */
+.cal-wk-block-resize {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: 0;
+  height: 6px;
+  cursor: ns-resize;
+  z-index: 3;
+}
+.cal-wk-block:hover .cal-wk-block-resize::after {
+  content: '';
+  position: absolute;
+  left: 30%;
+  right: 30%;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--fg) 35%, transparent);
+}
+.cal-wk-block-resize:hover::after {
+  background: color-mix(in srgb, var(--fg) 65%, transparent);
+}
+/* Body of a block while it's being repositioned: lifted shadow + above
+   siblings so the drop target reads clearly. */
+.cal-wk-block-ghost {
+  z-index: 6 !important;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--fg) 24%, transparent) !important;
+  cursor: grabbing;
+}
+.cal-wk-block { cursor: grab; }
+.cal-wk-block:active { cursor: grabbing; }
+/* Drag-to-create ghost */
+.cal-wk-ghost {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  background: color-mix(in srgb, var(--accent, var(--fg)) 28%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--accent, var(--fg)) 70%, transparent);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 3;
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent, var(--fg));
+  font-variant-numeric: tabular-nums;
+}
+.cal-year { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; }
+.cal-year-month { background:color-mix(in srgb, var(--fg) 3%, var(--bg)); border:1px solid var(--border); border-radius:6px; padding:6px; cursor:pointer; transition:background 0.15s, border-color 0.15s, transform 0.15s; }
+.cal-year-month:hover { background:color-mix(in srgb, var(--fg) 8%, var(--bg)); border-color:var(--accent); transform:translateY(-1px); }
+.cal-year-month-title { font-size:11px; font-weight:600; text-align:center; margin-bottom:4px; opacity:0.7; }
+.cal-year-month:hover .cal-year-month-title { opacity:1; color:var(--accent); }
+.cal-year-grid { display:grid; grid-template-columns:repeat(7, 1fr); gap:1px; }
+.cal-year-wd { font-size:7px; text-align:center; opacity:0.3; padding:1px 0; }
+.cal-year-cell { font-size:8px; text-align:center; padding:2px 0; min-height:14px; border-radius:2px; transition:transform 0.12s, background 0.12s; }
+.cal-year-day { cursor:pointer; opacity:0.5; }
+.cal-year-day:hover { background:var(--accent, var(--red)); color:#fff; opacity:1; transform:scale(1.15); font-weight:700; z-index:2; position:relative; }
+.cal-year-today { color:var(--accent, var(--red)); font-weight:700; opacity:1; }
+.cal-year-has { opacity:1; background:color-mix(in srgb, var(--accent) 15%, transparent); }
+.cal-year-has.cal-year-today { background:color-mix(in srgb, var(--accent, var(--red)) 25%, transparent); }
+.cal-loading { display:flex; justify-content:center; padding:40px 0; }
+.cal-badge { background:var(--accent); border-radius:50%; width:6px; height:6px; margin-left:auto; display:inline-block; flex-shrink:0; }
+/* Search input — in-panel variant lives inside the day-detail panel and
+   spans its width; no width animation since growing/shrinking on every
+   keystroke would jitter beside the events list. */
+.cal-search-input { background:color-mix(in srgb, var(--fg) 5%, var(--bg)); border:1px solid var(--border); border-radius:5px; padding:0 8px; height:24px; color:var(--fg); font-size:11px; font-family:inherit; width:120px; box-sizing:border-box; transition:width 0.15s; }
+.cal-search-input:focus { outline:none; border-color:var(--accent); width:180px; }
+.cal-search-input.cal-day-search { width:100%; margin-bottom:0; transition:none; padding-left: 28px; }
+.cal-search-input.cal-day-search:focus { width:100%; }
+/* Wrap for the search input so the magnifying-glass icon can be absolute-
+   positioned inside the field. */
+.cal-search-wrap {
+  position: relative;
+  display: block;
+  margin-bottom: 6px;
+}
+.cal-search-wrap .cal-search-icon {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  opacity: 0.45;
+  color: var(--fg);
+}
+.cal-day-search-meta { font-size:10px; opacity:0.5; margin:0 2px 6px; }
+.cal-search-results { display:flex; flex-direction:column; gap:4px; }
+.cal-search-count { font-size:10px; opacity:0.5; padding:4px 2px 8px; }
+/* Agenda view */
+.cal-agenda { display:flex; flex-direction:column; gap:10px; flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
+.cal-agenda-day { display:flex; flex-direction:column; gap:2px; }
+.cal-agenda-date { font-size:11px; font-weight:600; opacity:0.6; padding:4px 2px 2px; border-bottom:1px solid var(--border); }
+.cal-agenda-day.is-today .cal-agenda-date { opacity: 1; color: var(--accent, var(--red)); border-bottom-color: color-mix(in srgb, var(--accent, var(--red)) 35%, var(--border)); }
+.cal-agenda-today-badge {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+  color: var(--accent, var(--red));
+  vertical-align: 1px;
+}
+.cal-agenda-empty { font-size:11px; opacity:0.4; padding:8px; font-style:italic; }
+.cal-agenda-event { display:flex; gap:8px; padding:8px; border-radius:5px; cursor:pointer; align-items:center; position:relative; }
+.cal-agenda-event:hover { background:color-mix(in srgb, var(--fg) 6%, transparent); }
+.cal-agenda-event .cal-event-more,
+.cal-event-item .cal-event-more { opacity:0; transition:opacity 0.15s; }
+.cal-agenda-event:hover .cal-event-more,
+.cal-event-item:hover .cal-event-more { opacity:0.6; }
+.cal-event-item { position:relative; }
+

@@ -1,0 +1,27 @@
+    /* ── Model category grouping ── */
+    .models-category-header {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 8px; cursor: pointer;
+      font-size: 0.85em; font-weight: 600;
+      color: color-mix(in srgb, var(--fg) 55%, transparent);
+      border-radius: 4px; user-select: none;
+      margin-top: 4px;
+      transition: opacity 0.08s, background 0.08s, color 0.08s;
+    }
+    .models-category-header:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 4%, transparent); }
+    .models-category-header .folder-count { font-weight: 400; opacity: 0.5; font-size: 0.9em; }
+    .models-endpoint-label {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 8px; cursor: pointer;
+      font-size: 0.85em; font-weight: 600;
+      color: color-mix(in srgb, var(--fg) 55%, transparent);
+      border-radius: 4px; user-select: none;
+      transition: opacity 0.08s, background 0.08s;
+    }
+    .models-endpoint-label:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 4%, transparent); }
+    .models-endpoint-label .folder-count { font-weight: 400; opacity: 0.5; }
+    .models-group-content.indented {
+      padding-left: 4px;
+    }
+    .models-group-content.indented .models-row { border-bottom: 1px solid color-mix(in srgb, var(--fg) 7%, transparent); }
+    .models-group-content.indented .models-row:last-child { border-bottom: none; }

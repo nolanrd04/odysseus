@@ -1,0 +1,18 @@
+/* ── Continue research hint ────────────────────────── */
+.continue-research-wrap {
+  margin-top: 8px;
+}
+.continue-research-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78em;
+  color: var(--fg-dim, var(--fg));
+  opacity: 0.5;
+  padding: 4px 0;
+}
+.continue-research-hint svg {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+

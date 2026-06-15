@@ -1,0 +1,70 @@
+/* ── Sort Dropdown ── */
+
+.sort-dropdown {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 1000;
+  min-width: 120px !important;
+  width: max-content;
+  padding: 4px !important;
+  margin-top: 4px;
+  background: var(--panel) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4) !important;
+  backdrop-filter: none !important;
+}
+.sort-dropdown-item {
+  cursor: pointer;
+  padding: 6px 8px !important;
+  font-size: 11px !important;
+  border-radius: 6px !important;
+  border-bottom: none !important;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+.sort-dropdown-item:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
+}
+.sort-dropdown-sep {
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+  padding-top: 6px;
+}
+
+/* Mobile: bigger taps for the chats sort/funnel menu and the select-mode
+   bulk-action bar. Also drop the "Rearrange" item — it's a touch-finicky
+   feature better left to desktop. */
+@media (max-width: 768px) {
+  /* Nudge the funnel/sort button right on mobile so it doesn't hug the
+     chevron next to it. */
+  #session-sort-btn { transform: translateX(11px); }
+  #session-sort-dropdown.sort-dropdown {
+    min-width: 200px !important;
+    padding: 6px !important;
+  }
+  #session-sort-dropdown .sort-dropdown-item {
+    padding: 12px 14px !important;
+    font-size: 14px !important;
+  }
+  #session-rearrange-toggle { display: none !important; }
+
+  /* Select-mode bar — make Archive / Delete / Cancel buttons + the
+     Select-all toggle finger-sized. */
+  .session-bulk-bar {
+    padding: 8px 10px;
+    font-size: 14px;
+    gap: 10px;
+  }
+  .session-bulk-btn {
+    padding: 10px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .session-bulk-btn svg { width: 20px; height: 20px; }
+  #session-select-all-dot { font-size: 22px !important; padding: 6px; }
+  #session-select-all-label { font-size: 14px !important; padding: 4px; }
+}
+
+

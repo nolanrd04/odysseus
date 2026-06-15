@@ -1,0 +1,21 @@
+/* ── Contacts manager (Settings → Integrations → CardDAV) ── */
+.contacts-add-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+.contacts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.contact-row {
+  padding: 6px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 35%, transparent);
+}
+.contact-row:last-child { border-bottom: none; }
+.contact-row-edit { margin-top: 4px; }
+

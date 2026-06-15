@@ -1,0 +1,47 @@
+/* ── Group Chat ────────────────────────────────────── */
+.msg-group .role {
+  font-weight: 600;
+}
+#group-toggle-btn.active,
+.overflow-menu-item#overflow-group-btn.active {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+/* Group model picker — match app theme */
+#group-model-picker .modal-content {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+#group-model-picker .modal-header {
+  border-bottom: 1px solid var(--border);
+}
+#group-model-picker .memory-item {
+  border-radius: 6px;
+  transition: background 0.1s;
+}
+#group-model-picker .memory-item:hover {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+#group-model-picker input[type="checkbox"] {
+  accent-color: var(--accent, var(--red));
+}
+#group-model-picker input[type="radio"] {
+  accent-color: var(--accent, var(--red));
+}
+#group-model-picker .btn-primary {
+  background: var(--accent, var(--red));
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+}
+#group-model-picker .btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+#group-model-picker .btn-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+

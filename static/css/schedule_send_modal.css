@@ -1,0 +1,564 @@
+/* ── Schedule Send modal ── */
+.schedule-send-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 18px 12px;
+}
+.schedule-send-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: var(--fg);
+  opacity: 0.55;
+  margin-top: 6px;
+}
+.schedule-send-label:first-child { margin-top: 0; }
+.schedule-send-presets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.schedule-send-presets .memory-toolbar-btn {
+  padding: 5px 10px 11px;
+  font-size: 12px;
+  justify-content: center;
+  line-height: 1;
+}
+.schedule-send-confirm svg {
+  width: 12px;
+  height: 12px;
+  vertical-align: -1px;
+  margin-right: 6px;
+}
+.schedule-send-datetime {
+  font-size: 13px;
+  padding: 8px 10px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+.schedule-send-datetime:focus {
+  border-color: var(--hl-function);
+}
+.schedule-send-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px 14px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+.schedule-send-confirm {
+  background: var(--accent-primary, var(--red)) !important;
+  color: #fff !important;
+  border-color: var(--accent-primary, var(--red)) !important;
+}
+.schedule-send-confirm:hover {
+  background: color-mix(in srgb, var(--accent-primary, var(--red)) 85%, white) !important;
+}
+
+/* Senders embed inline colors in their HTML that clash with the app's
+   theme (black text in dark mode, white backgrounds, yellow highlights,
+   etc.). Force theme colors on every descendant of the rendered body so
+   emails inherit the user's chosen palette regardless of what the
+   sender's mail client emits. */
+.email-reader-body *,
+.email-bubble-body * {
+  color: var(--fg) !important;
+  -webkit-text-fill-color: currentColor !important;
+  background-color: transparent !important;
+  background-image: none !important;
+}
+.email-reader-body a,
+.email-bubble-body a,
+.email-thread-turn-body a {
+  color: var(--hl-function) !important;
+}
+.email-reader-body a[href^="tel:"],
+.email-reader-body a[href^="sms:"],
+.email-reader-body a[href^="x-apple-data-detectors:"],
+.email-reader-body a[x-apple-data-detectors],
+.email-bubble-body a[href^="tel:"],
+.email-bubble-body a[href^="sms:"],
+.email-bubble-body a[href^="x-apple-data-detectors:"],
+.email-bubble-body a[x-apple-data-detectors],
+.email-thread-turn-body a[href^="tel:"],
+.email-thread-turn-body a[href^="sms:"],
+.email-thread-turn-body a[href^="x-apple-data-detectors:"],
+.email-thread-turn-body a[x-apple-data-detectors] {
+  color: inherit !important;
+  -webkit-text-fill-color: currentColor !important;
+  text-decoration: none !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  -webkit-background-clip: border-box !important;
+  background-clip: border-box !important;
+}
+
+/* Prefer local/system emoji fonts; avoid remote font providers. */
+.doc-editor-textarea, .doc-editor-highlight, #doc-editor-code,
+.doc-md-preview, .doc-csv-preview {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', 'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', monospace;
+  font-variant-emoji: text;
+}
+/* Preview panes claim the editor's space so the action footer stays pinned
+   at the bottom of the pane even when the rendered content is short
+   (shorter table, single-paragraph markdown, etc). */
+.doc-csv-preview,
+.doc-md-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Email documents override: use colored system emoji in compose. */
+.doc-editor-textarea.email-mode,
+#doc-editor-code.email-mode,
+#doc-editor-code.email-mode .doc-editor-highlight,
+#doc-editor-code.email-mode .doc-editor-textarea {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif,
+               "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla" !important;
+  font-variant-emoji: emoji;
+}
+
+/* Single-layer rendering for ALL documents (not just email): the highlight
+   overlay (<pre> with hljs spans) and the transparent textarea use two
+   different rendering paths internally — the textarea uses the browser's
+   native form line-breaker, the overlay uses CSS line-breaking — and they
+   can never be guaranteed to wrap byte-identical no matter how many CSS
+   properties are pinned. Pick one source of truth: make the textarea its
+   own visible text, hide the overlay. Trade-off: no syntax highlighting in
+   the live editor (rendered markdown preview / chat output still has it).
+   The caret is now glued to the typed text by definition since both are
+   rendered by the same element. */
+.doc-editor-highlight,
+#doc-editor-code.email-mode .doc-editor-highlight {
+  display: none !important;
+}
+/* Find bar is open: float the highlight overlay ON TOP of the
+   textarea with transparent background + transparent text, so only
+   the solid <mark.doc-find-mark> spans are visible. pointer-events
+   off so clicks still go through to the textarea below. */
+body.doc-find-active .doc-editor-highlight,
+body.doc-find-active #doc-editor-code.email-mode .doc-editor-highlight {
+  display: block !important;
+  z-index: 5 !important;
+  background: transparent !important;
+  pointer-events: none;
+}
+body.doc-find-active .doc-editor-highlight,
+body.doc-find-active .doc-editor-highlight * {
+  color: transparent !important;
+  background: transparent !important;
+}
+/* Marks remain solid so they pop through the otherwise-invisible
+   overlay; outlined extra-bright for the currently-focused one. */
+body.doc-find-active mark.doc-find-mark {
+  background: var(--accent) !important;
+  color: var(--bg) !important;
+}
+body.doc-find-active mark.doc-find-mark.current {
+  background: var(--accent) !important;
+  box-shadow: 0 0 0 2px var(--fg) !important;
+  outline: 1px solid var(--fg) !important;
+}
+.doc-editor-textarea,
+#doc-editor-code.email-mode .doc-editor-textarea {
+  color: var(--fg) !important;
+  caret-color: var(--fg) !important;
+  z-index: 1;
+}
+
+/* Emoji picker (monochrome icon picker) */
+.emoji-picker-btn {
+  background: none; border: none; color: var(--fg); opacity: 0.35;
+  padding: 4px 7px; cursor: pointer; min-height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: opacity 0.1s;
+}
+.emoji-picker-btn:hover { opacity: 1; }
+.emoji-picker {
+  width: min(300px, 92vw); max-height: min(300px, 55vh);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.emoji-picker-search {
+  padding: 8px 12px; background: var(--panel); border: none;
+  border-bottom: 1px solid var(--border); color: var(--fg);
+  font-size: 12px; font-family: inherit; outline: none;
+}
+.emoji-picker-groups { overflow-y: auto; padding: 4px 0; flex: 1; }
+.emoji-picker-group { padding: 0 6px 4px 6px; }
+.emoji-picker-group-name {
+  font-size: 10px; font-weight: 600; opacity: 0.5;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 4px 4px 2px 4px;
+}
+.emoji-picker-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 1px; }
+.emoji-picker-item {
+  background: none; border: none; cursor: pointer;
+  padding: 4px; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--fg); transition: background 0.1s;
+}
+.emoji-picker-item:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.emoji-picker-item svg { width: 16px; height: 16px; }
+
+.email-avatar {
+  width: 28px; height: 28px; border-radius: 50%; background: var(--accent, #4a9eff);
+  color: #fff; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600; flex-shrink: 0; margin-top: 1px;
+}
+.email-item-content { flex: 1; min-width: 0; overflow: hidden; }
+.email-item-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.email-sender { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.email-sender-clickable { cursor: pointer; }
+.email-sender-clickable:hover { text-decoration: underline; }
+.email-filter-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 4px 8px 6px;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
+  color: var(--fg);
+}
+.email-filter-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.email-filter-chip-clear {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0.6;
+}
+.email-filter-chip-clear:hover { opacity: 1; }
+.email-date { font-size: 10px; opacity: 0.5; white-space: nowrap; flex-shrink: 0; }
+.email-subject { font-size: 11px; opacity: 0.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.email-tags { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
+.email-tag {
+  display: inline-block;
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 8px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  background: rgba(127, 127, 127, 0.18);
+  color: var(--fg);
+}
+.email-tag-work { background: rgba(96, 165, 250, 0.22); color: #60a5fa; }
+.email-tag-personal { background: rgba(74, 222, 128, 0.22); color: #4ade80; }
+.email-tag-finance { background: rgba(250, 204, 21, 0.22); color: #facc15; }
+.email-tag-bills { background: rgba(251, 146, 60, 0.22); color: #fb923c; }
+.email-tag-receipt { background: rgba(251, 146, 60, 0.22); color: #fb923c; }
+.email-tag-travel { background: rgba(167, 139, 250, 0.22); color: #a78bfa; }
+.email-tag-newsletter { background: rgba(148, 163, 184, 0.22); color: #94a3b8; }
+.email-tag-promo,
+.email-tag-marketing { background: rgba(244, 114, 182, 0.22); color: #f472b6; }
+.email-tag-notification { background: rgba(148, 163, 184, 0.22); color: #94a3b8; }
+.email-tag-security { background: rgba(248, 113, 113, 0.22); color: #f87171; }
+.email-tag-urgent { background: color-mix(in srgb, var(--color-error, #e06c75) 25%, transparent); color: var(--color-error, #e06c75); font-weight: 600; }
+.email-tag-reply-soon { background: rgba(240, 173, 78, 0.22); color: #f0ad4e; }
+.email-tag-social { background: rgba(56, 189, 248, 0.22); color: #38bdf8; }
+.email-tag-shopping { background: rgba(236, 72, 153, 0.22); color: #ec4899; }
+.email-tag-calendar { background: rgba(167, 139, 250, 0.22); color: #a78bfa; }
+.email-menu-wrap { position: relative; flex-shrink: 0; }
+.email-menu-btn {
+  background: none; border: none; color: var(--fg); opacity: 0; cursor: pointer;
+  padding: 4px; transition: opacity 0.15s;
+  position: relative; top: 0px;
+}
+.email-dropdown {
+  position: absolute; right: 0; top: 100%; z-index: 9999;
+  min-width: 120px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); padding: 4px 0;
+}
+.email-loading { padding: 16px; text-align: center; font-size: 12px; opacity: 0.5; }
+.email-load-more { padding: 8px; text-align: center; }
+.email-load-more-btn {
+  background: transparent; border: 1px solid var(--border); border-radius: 4px;
+  color: var(--fg); padding: 4px 12px; font-size: 11px; cursor: pointer;
+}
+.email-load-more-btn:hover { background: var(--hover-bg, rgba(255,255,255,0.05)); }
+.email-spinner {
+  display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #fff; border-radius: 50%; animation: email-spin 0.6s linear infinite;
+  vertical-align: middle; margin-right: 4px;
+}
+@keyframes email-spin { to { transform: rotate(360deg); } }
+
+/* Email section doesn't collapse — hide the auto-injected chevron */
+#email-section .section-collapse-btn { display: none !important; }
+
+/* Compose + button: show on section hover, spin on button hover */
+#email-compose-btn {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+#email-section:hover #email-compose-btn {
+  opacity: 0.7;
+}
+#email-compose-btn:hover {
+  opacity: 1 !important;
+  background: none !important;
+}
+#email-compose-btn svg {
+  width: 11px;
+  height: 11px;
+  transition: transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+#email-compose-btn .list-item-plus-label {
+  top: calc(50% - 0.5px);
+  color: var(--fg);
+  font-size: 10px;
+}
+#email-compose-btn:hover svg {
+  transform: rotate(180deg) scale(1.15);
+}
+
+/* Library row "+" — identical to the email compose "+": hidden until the row
+   is hovered, no accent box, and the same rotate-in animation. */
+#library-new-doc-btn {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+#tool-library-btn:hover #library-new-doc-btn {
+  opacity: 0.7;
+}
+#library-new-doc-btn:hover {
+  opacity: 1 !important;
+  background: none !important;
+}
+#library-new-doc-btn svg {
+  transition: transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+#library-new-doc-btn .list-item-plus-label {
+  top: calc(50% + 1px);
+}
+#library-new-doc-btn:hover svg {
+  transform: rotate(180deg) scale(1.15);
+}
+
+/* Satisfying send effect: email slides out to the right and fades */
+.email-send-fx {
+  animation: email-send-slide 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  pointer-events: none;
+}
+@keyframes email-send-slide {
+  0% {
+    transform: translateX(0);
+    opacity: 1;
+    filter: blur(0);
+  }
+  60% {
+    filter: blur(1px);
+  }
+  100% {
+    transform: translateX(110%);
+    opacity: 0;
+    filter: blur(3px);
+  }
+}
+
+/* MD toolbar attach button — matches other toolbar buttons */
+.md-toolbar-attach-btn {
+  background: none; border: none; color: var(--fg); opacity: 0.35;
+  padding: 4px 7px; cursor: pointer; min-height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: opacity 0.1s;
+}
+.md-toolbar-attach-btn:hover { opacity: 1; }
+
+/* Email reader icon buttons — vertical icon + label stack. */
+.memory-toolbar-btn.reader-icon-btn {
+  width: 48px;
+  height: 44px;
+  padding: 4px 2px;
+  position: relative;
+  top: 1px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+.memory-toolbar-btn.reader-icon-btn svg { width: 18px; height: 18px; }
+.memory-toolbar-btn.reader-icon-btn.active {
+  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
+  color: var(--accent, var(--red));
+}
+/* The "More" (kebab) reader button — accent-colored so it stands out as the
+   actions-menu trigger. When the dropdown is open we add .reader-more-active
+   for a filled tint, matching the toggle states elsewhere. */
+.memory-toolbar-btn.reader-icon-btn[data-act="more"] {
+  color: var(--accent, var(--red));
+}
+.memory-toolbar-btn.reader-icon-btn[data-act="more"] svg { fill: currentColor; }
+.memory-toolbar-btn.reader-icon-btn.reader-more-active {
+  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
+  color: var(--accent, var(--red));
+}
+/* Cookbook Serve dropdown triggers (the cached-model kebab + the saved-config
+   arrow) — accent-colored to signal they open a menu, with a filled tint when
+   their dropdown is open. Matches the email reader More button pattern. */
+.hwfit-cached-menu-btn,
+.cookbook-saved-arrow {
+  color: var(--accent, var(--red));
+  /* Base .memory-item-btn is flex with align-items but no justify-content,
+     so the kebab SVG sat left-aligned inside the button instead of being
+     horizontally centered. Pin it center. */
+  justify-content: center;
+}
+.hwfit-cached-menu-btn svg { fill: currentColor; }
+.hwfit-cached-menu-btn.cookbook-menu-active,
+.cookbook-saved-arrow.cookbook-menu-active {
+  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
+  color: var(--accent, var(--red));
+}
+/* Mobile: center the kebab/menu dropdowns in the viewport so they don't
+   slide left/right as the window width changes (they were positioned via
+   inline `right: ...px` relative to the kebab button). Stable position is
+   easier to land on by touch. The inline `top:` set by the menu code is
+   preserved; we only override the horizontal axis. */
+@media (max-width: 768px) {
+  .email-card-dropdown,
+  .cookbook-saved-menu,
+  .cookbook-dep-menu {
+    left: 50% !important;
+    right: auto !important;
+    transform: translateX(-50%);
+  }
+}
+/* Mobile-only Cancel item appended to dropdowns (kebab/More menus). On
+   desktop outside-click closes them cleanly; on touch that's fiddly, so
+   give an explicit Cancel row. Visually separated from the action items
+   above by a top divider + slight muted color. */
+.dropdown-cancel-mobile { display: none; }
+@media (max-width: 768px) {
+  .dropdown-cancel-mobile {
+    display: flex;
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+    padding-top: 8px;
+    opacity: 0.85;
+  }
+}
+/* Launch-command Copy button morphs into Cancel once Launch has been clicked. */
+.hwfit-serve-copy.hwfit-serve-cancel {
+  border-color: var(--color-danger, #e06c75) !important;
+  color: var(--color-danger, #e06c75) !important;
+}
+.hwfit-serve-copy.hwfit-serve-cancel:hover {
+  background: color-mix(in srgb, var(--color-danger, #e06c75) 14%, transparent);
+}
+/* Email modal title unread badge — small accent pill next to "Email". */
+.email-lib-unread-badge {
+  display: inline-block;
+  font-size: 0.55em;
+  font-weight: 700;
+  background: var(--accent-primary, var(--red));
+  color: var(--bg, #1a1a1a);
+  border-radius: 9px;
+  padding: 1px 7px;
+  margin-left: 8px;
+  vertical-align: 2px;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+.email-lib-unread-badge:hover { filter: brightness(1.08); }
+#email-lib-modal.email-lib-unread-active .doclib-modal-content {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 22%, transparent),
+    0 0 18px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent),
+    var(--shadow-lg, 0 18px 50px rgba(0, 0, 0, 0.35));
+}
+#email-lib-modal .email-lib-header-actions .minimize-btn {
+  position: relative;
+  left: 6px;
+}
+/* Per-card prev/next nav — only visible on the currently expanded card,
+   sits at the right of the title row next to the done check. */
+.email-card-nav-arrows {
+  display: none;
+  margin-left: auto;
+  gap: 2px;
+  flex-shrink: 0;
+  align-items: center;
+  position: relative;
+  top: -3px;
+  left: 19px;
+}
+.doclib-card.email-card-expanded .email-card-nav-arrows {
+  display: inline-flex;
+}
+.email-card-header-menu {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg);
+  opacity: 0.65;
+  cursor: pointer;
+  position: relative;
+  top: -3px;
+  transition: opacity 0.12s, background 0.12s;
+}
+.doclib-card.email-card-expanded .email-card-header-menu {
+  display: inline-flex;
+}
+.email-card-header-menu:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.email-card-nav-btn {
+  background: none;
+  border: none;
+  color: var(--fg);
+  opacity: 0.65;
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.12s, background 0.12s;
+}
+.email-card-nav-btn:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.email-card-nav-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+  pointer-events: none;
+}
+

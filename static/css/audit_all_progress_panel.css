@@ -1,0 +1,18 @@
+/* ── Audit-all progress panel ── */
+.skills-audit-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+.skills-audit-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.skills-audit-title { font-size: 12px; font-weight: 600; }
+.skills-audit-bar { height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--fg) 12%, transparent); margin: 6px 0; overflow: hidden; }
+.skills-audit-fill { height: 100%; background: var(--accent, var(--red)); transition: width 0.3s ease; }
+.skills-audit-summary { font-size: 11px; opacity: 0.7; margin-bottom: 4px; }
+.skills-audit-log {
+  max-height: 22vh; overflow-y: auto;
+  font-family: ui-monospace, 'SF Mono', 'Fira Code', monospace;
+  font-size: 10.5px; line-height: 1.5; opacity: 0.8;
+}

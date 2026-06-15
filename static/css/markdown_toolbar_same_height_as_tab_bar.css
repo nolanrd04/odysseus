@@ -1,0 +1,96 @@
+  /* ── Markdown toolbar — same height as tab bar ── */
+  .doc-md-toolbar {
+    height: 40px !important;
+    padding: 4px 8px;
+    gap: 2px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* The toolbar's padding-left is forced to 0 by the hamburger rules, so give
+     the Edit/Preview toggle its own left margin to clear the screen edge +
+     the 18px mask fade. Margin isn't overridden by those !important paddings. */
+  .doc-md-toolbar .md-view-toggle { margin-left: 8px; }
+  .doc-md-toolbar button {
+    font-size: 13px !important;
+    padding: 6px 10px !important;
+    min-width: 34px;
+    min-height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .md-toolbar-sep {
+    height: 18px;
+    margin: 0 4px;
+  }
+}
+
+/* Opacity slider in the theme tabs row — lets the user see the page behind
+   the modal while tweaking colors. JS toggles .hidden based on active tab. */
+.theme-opacity-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  margin-right: 6px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  opacity: 0.65;
+  transition: opacity 0.15s, border-color 0.15s, background 0.15s, color 0.15s;
+  height: 22px;
+  align-self: center;
+  /* Now a <button> toggle, not a slider wrapper. */
+  cursor: pointer;
+  color: var(--fg);
+  font: inherit;
+  background: transparent;
+}
+.theme-opacity-wrap.hidden { display: none; }
+.theme-opacity-wrap:hover { opacity: 1; }
+/* The title h4 already carries margin-right:auto to group header controls
+   on the right. BOTH the Peek button AND the injected minimize button also
+   have margin-left:auto — and multiple competing auto-margins split the
+   free space, stranding Peek in the middle. Zero their left-autos here so
+   the h4 alone pushes Peek + minimize + close together, flush right. */
+.modal-header .theme-opacity-wrap,
+.modal-header .modal-minimize-btn { margin-left: 0 !important; }
+/* On = peeking through; highlight with the accent so the state is obvious. */
+.theme-opacity-wrap.active {
+  opacity: 1;
+  border-color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  color: var(--accent, var(--red));
+}
+.theme-opacity-label { font-size: 10px; font-weight: 600; letter-spacing: 0.02em; }
+.theme-opacity-wrap > svg { flex-shrink: 0; opacity: 0.7; }
+.theme-opacity-wrap input[type="range"] {
+  width: 92px;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: color-mix(in srgb, var(--fg) 18%, transparent);
+  border-radius: 2px;
+  outline: none;
+  margin: 0;
+}
+.theme-opacity-wrap input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent, var(--red));
+  border: none;
+  cursor: pointer;
+}
+.theme-opacity-wrap input[type="range"]::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent, var(--red));
+  border: none;
+  cursor: pointer;
+}
+

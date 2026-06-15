@@ -1,0 +1,13 @@
+/* ── Research reconnect & timer ────────────────────── */
+.msg.research-reconnect {
+  border-left: 3px solid var(--red);
+  background: color-mix(in srgb, var(--red) 5%, transparent);
+}
+.research-timer {
+  font-size: 0.8em;
+  opacity: 0.6;
+  margin-top: 4px;
+  font-family: monospace;
+  color: var(--fg-dim, var(--fg));
+}
+

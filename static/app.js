@@ -3425,6 +3425,7 @@ function startOdysseusApp() {
     'rail-calendar':  'tool-calendar-btn',
     'rail-notes':     'tool-notes-btn',
     'rail-memory':    'tool-memory-btn',
+    'rail-quick-proposal': 'qp-new-proposal-btn',
     'rail-theme':     'tool-theme-btn',
     'rail-email':     'email-section-title',
   };

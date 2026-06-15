@@ -1,0 +1,219 @@
+/* ── Settings Form Utilities ── */
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-label {
+  font-size: 12px;
+  min-width: 70px;
+}
+.settings-select {
+  flex: 1;
+  /* Allow the select to shrink below its longest option's width inside a flex
+     row — without this a long model name (e.g. the Vision picker) overflowed
+     the card off-screen on mobile. */
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  transition: border-color 0.15s;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: textfield;
+  outline: none;
+}
+input.settings-select::-webkit-outer-spin-button,
+input.settings-select::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input.settings-select::placeholder { color: color-mix(in srgb, var(--fg) 35%, transparent); }
+.settings-select:focus {
+  outline: none;
+  border-color: var(--red);
+}
+
+/* Default-chat fallback chain editor. Each row mirrors the primary
+   endpoint/model selectors, indented under them to read as a chain. */
+.settings-fallbacks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-fallbacks:not(:empty) { margin-top: 2px; }
+.settings-fallback-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 2px solid color-mix(in srgb, var(--fg) 12%, transparent);
+}
+.settings-fallback-num {
+  font-size: 11px;
+  opacity: 0.4;
+  min-width: 14px;
+  text-align: right;
+}
+.settings-fallback-row .settings-select { flex: 1; min-width: 0; }
+/* Cookbook Serve Advanced fold — wraps the rarely-touched tuning rows
+   (KV/Attention/Swap/Env for vLLM, llama.cpp batch/cache/split, VRAM
+   monitor, speculative, extra args). Matches the existing .hwfit-panel-
+   advanced look: muted-gray label, no caps, no letter-spacing, no
+   warning-y opacity. Content flows into the parent's existing scroll
+   surface (no inner max-height) and inner rows reset their margin so
+   stacking gaps don't double when the fold opens. */
+/* Styled to match the Add Models page collapsible sections
+   (.adm-section-toggle) — same border/background/caret pattern, so the
+   two folds across the app read consistently. */
+details.hwfit-serve-advanced {
+  margin-top: 8px;
+  overflow: visible;
+}
+details.hwfit-serve-advanced > summary.hwfit-serve-advanced-summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg);
+  opacity: 0.8;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 9px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  transition: border-color 0.12s, background 0.12s, opacity 0.12s, border-radius 0s;
+}
+details.hwfit-serve-advanced > summary.hwfit-serve-advanced-summary::-webkit-details-marker {
+  display: none;
+}
+details.hwfit-serve-advanced > summary.hwfit-serve-advanced-summary:hover {
+  opacity: 1;
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+/* Caret on the right, rotates open/closed. SVG-style rectangles via
+   borders keep this glyph-free + crisp at small sizes. */
+details.hwfit-serve-advanced > summary.hwfit-serve-advanced-summary::after {
+  content: '';
+  margin-left: auto;
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  opacity: 0.6;
+  transform: rotate(90deg);
+  transition: transform 0.18s ease;
+}
+details.hwfit-serve-advanced:not([open]) > summary.hwfit-serve-advanced-summary::after {
+  transform: rotate(0deg);
+}
+/* Body rows below the header — tight rhythm so the fold doesn't
+   feel airy. The cookbook modal's existing .cookbook-body is the
+   scroll surface; nothing inside the fold should add its own scroll. */
+details.hwfit-serve-advanced[open] > summary.hwfit-serve-advanced-summary {
+  margin-bottom: 6px;
+}
+details.hwfit-serve-advanced > .hwfit-serve-row,
+details.hwfit-serve-advanced > .hwfit-serve-checks,
+details.hwfit-serve-advanced > .hwfit-serve-cmd-wrap,
+details.hwfit-serve-advanced > .hwfit-serve-extra {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+/* Pull the vLLM/SGLang checks row, Extra args, and the trailing
+   model-specific (Speculative) checks row up tight against the row
+   above — the previous 4px gap plus per-row baseline padding left a
+   ~8px gap that read as too airy in the Advanced fold. */
+details.hwfit-serve-advanced > .hwfit-serve-checks.hwfit-backend-vllm,
+details.hwfit-serve-advanced > .hwfit-serve-checks.hwfit-backend-sglang,
+details.hwfit-serve-advanced > .hwfit-serve-extra {
+  margin-top: -8px;
+}
+details.hwfit-serve-advanced > .hwfit-serve-row:last-of-type,
+details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
+  margin-bottom: 0;
+}
+
+.settings-fallback-remove {
+  flex-shrink: 0;
+  margin-right: 4px;
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  font-size: 15px;
+  /* Nudge the × glyph 5px left within the button (button size unchanged). */
+  text-indent: -5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+  position: relative;
+  top: -6px;
+  /* Glyph baseline trim: nudge × up 1px inside the button without moving the
+     button. line-height < 1 lets the glyph float toward the top of its line box. */
+  line-height: 0.85;
+}
+.settings-fallback-remove:hover {
+  border-color: var(--red);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+.settings-fallback-add {
+  align-self: flex-start;
+  margin-top: 2px;
+  font-size: 11px;
+  padding: 3px 9px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+}
+.settings-fallback-add:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+.settings-input {
+  flex: 1;
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  transition: border-color 0.15s;
+}
+/* Hide the native number-input spinner arrows (e.g. SMTP/IMAP Port) — they
+   render unstyled and ugly. Field still accepts only numbers. */
+.settings-input[type="number"]::-webkit-outer-spin-button,
+.settings-input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.settings-input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.settings-input:focus {
+  outline: none;
+  border-color: var(--red);
+}

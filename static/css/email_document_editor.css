@@ -1,0 +1,399 @@
+/* ── Email document editor ── */
+.doc-email-header {
+  display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  border-bottom: 1px solid var(--border); background: var(--bg); flex-shrink: 0;
+}
+.doc-email-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.doc-email-collapse-btn {
+  width: 100%;
+  min-height: 24px;
+  display: none;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 4px 3px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.72;
+  text-align: left;
+}
+.doc-email-collapse-btn:hover { opacity: 1; color: var(--accent, var(--red)); }
+.doc-email-collapse-btn svg {
+  flex-shrink: 0;
+  opacity: 0.65;
+  transition: transform 0.14s ease;
+}
+.doc-email-collapse-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.74;
+}
+.doc-email-header:not(.doc-email-header-collapsed) .doc-email-collapse-summary {
+  opacity: 0.45;
+}
+.doc-email-header.doc-email-header-collapsed {
+  gap: 0;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+.doc-email-header.doc-email-header-collapsed .doc-email-fields {
+  display: none;
+}
+.doc-email-header.doc-email-header-collapsed .doc-email-collapse-btn svg {
+  transform: rotate(180deg);
+}
+.email-field { display: flex; align-items: center; gap: 8px; position: relative; }
+.email-field label { font-size: 11px; font-weight: 600; color: var(--fg); opacity: 0.5; min-width: 50px; text-align: right; flex-shrink: 0; }
+.email-field input {
+  flex: 1; width: 100%; background: transparent; border: 1px solid var(--border); border-radius: 4px;
+  padding: 5px 8px; font-size: 13px; font-family: inherit; color: var(--fg); outline: none;
+  min-width: 0;
+}
+.email-field input:focus { border-color: var(--accent, #4a9eff); }
+@container docpane (max-width: 460px) {
+  .doc-email-header .email-field {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 3px;
+    align-items: stretch;
+  }
+  .doc-email-header .email-field label {
+    min-width: 0;
+    text-align: left;
+  }
+  .doc-email-header .email-field input {
+    width: 100%;
+  }
+}
+/* Cc toggle and attach button are absolute so they don't steal width from the To input */
+.email-field .email-cc-toggle {
+  position: absolute; right: 6px; top: calc(50% + 4px); transform: translateY(-50%);
+  z-index: 2;
+}
+@media (min-width: 769px) {
+  .email-field .email-cc-toggle {
+    top: calc(50% + 4px);
+  }
+}
+.email-field input { padding-right: 60px; }
+.email-field #doc-email-cc, .email-field #doc-email-bcc, .email-field #doc-email-subject { padding-right: 8px; }
+
+.doc-email-actions {
+  display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px;
+  border-top: 1px solid var(--border); background: var(--bg); flex-shrink: 0;
+  align-items: center;
+}
+/* Documents footer — X + Undo stay on the LEFT, Copy/Export group pushed
+   to the RIGHT. Email composer keeps its original flex-end layout. */
+#doc-actions-footer {
+  justify-content: flex-start;
+}
+#doc-actions-footer .email-send-split {
+  margin-left: auto;
+}
+/* WYSIWYG email body — what the recipient sees, edited in place. */
+.doc-email-richbody {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--fg);
+  background: var(--bg);
+  outline: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.doc-email-richbody:empty::before {
+  content: "Write your email\2026";
+  opacity: 0.4;
+  pointer-events: none;
+}
+.doc-email-richbody a { color: var(--accent, #4af); }
+.doc-email-richbody blockquote {
+  margin: 6px 0; padding-left: 10px;
+  border-left: 3px solid var(--border); opacity: 0.8;
+}
+.doc-email-richbody h1, .doc-email-richbody h2, .doc-email-richbody h3 { margin: 0.4em 0; }
+.doc-email-richbody p { margin: 0.5em 0; }
+.email-more-menu {
+  position: absolute; bottom: 100%; right: 0; margin-bottom: 6px;
+  min-width: 160px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: 0 -4px 12px rgba(0,0,0,0.2); padding: 4px;
+  z-index: 100;
+}
+.email-send-btn {
+  background: color-mix(in srgb, var(--accent-primary, var(--red)) 20%, transparent);
+  color: var(--accent-primary, var(--red));
+  border: 1px solid color-mix(in srgb, var(--accent-primary, var(--red)) 50%, transparent);
+  border-radius: 6px;
+  padding: 0 14px; height: 28px; font-size: 11px; font-weight: 600; cursor: pointer;
+  font-family: inherit; transition: all 0.15s; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+/* Split send button: [ Send │ ▾ ] — the caret drops the send-options menu UP. */
+.email-send-split { position: relative; display: inline-flex; }
+.email-send-split .email-send-main {
+  border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: none;
+}
+.email-send-split .email-send-caret {
+  border-top-left-radius: 0; border-bottom-left-radius: 0;
+  padding: 0 8px; gap: 0;
+  /* its left border is the single divider between the two halves */
+  border-left: 1px solid color-mix(in srgb, var(--accent-primary, var(--red)) 50%, transparent);
+}
+.email-send-split .email-send-caret svg { transition: transform 0.15s ease; }
+.email-send-split .email-send-caret[aria-expanded="true"] svg { transform: rotate(180deg); }
+.email-send-btn svg { flex-shrink: 0; }
+.email-send-btn:hover {
+  background: color-mix(in srgb, var(--accent-primary, var(--red)) 30%, transparent);
+  border-color: var(--accent-primary, var(--red));
+}
+.email-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.email-draft-btn {
+  background: none; border: 1px solid var(--border);
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  border-radius: 6px;
+  padding: 0 12px; height: 28px; font-size: 11px; cursor: pointer;
+  font-family: inherit; transition: all 0.15s; white-space: nowrap;
+}
+.email-draft-btn:hover { border-color: var(--fg); color: var(--fg); }
+.email-draft-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.email-discard-btn {
+  background: transparent;
+  /* Dim the label text via color-mix instead of `opacity:0.6` on the whole
+     button — opacity multiplies through to the SVG and washes out the accent
+     X glyph. Per-element color dimming keeps the X at full accent strength. */
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 14px; font-size: 12px; cursor: pointer; font-family: inherit;
+}
+/* The ✕ glyph itself reads in accent. */
+.email-discard-btn svg { color: var(--accent-primary, var(--red)); opacity: 1; }
+.email-discard-btn:hover { opacity: 1; color: var(--red, #e55); border-color: var(--red, #e55); }
+
+/* Compose email "more" menu button — icon only, matches draft btn height */
+#doc-email-more-btn {
+  background: none; border: 1px solid var(--border);
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  border-radius: 6px;
+  width: 28px; height: 28px; padding: 0;
+  cursor: pointer; font-family: inherit; transition: all 0.15s;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+#doc-email-more-btn:hover {
+  border-color: var(--fg); color: var(--fg);
+}
+#doc-email-more-btn svg { opacity: 0.8; }
+.email-more-wrap { display: inline-flex; }
+.email-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0 0 58px;
+}
+.email-attachment-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 8px; font-size: 11px; background: var(--hover-bg, rgba(255,255,255,0.05));
+  border: 1px solid var(--border); border-radius: 12px; color: var(--fg);
+  text-decoration: none; cursor: pointer; transition: background 0.15s, border-color 0.15s;
+  max-width: 200px; min-width: 0;
+}
+.email-attachment-chip:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: var(--accent);
+  /* Expand chip on hover so the full filename is revealed. Native title-
+     attribute tooltips were slow / unreliable, so we just grow the chip. */
+  max-width: 90vw;
+}
+.email-attachment-chip > span:not(.att-size) {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1 1 auto; min-width: 0;
+}
+.email-attachment-chip:hover > span:not(.att-size) {
+  overflow: visible;
+  text-overflow: clip;
+}
+.email-attachment-chip .att-size { opacity: 0.5; font-size: 10px; flex-shrink: 0; }
+/* "Open in editor" launch icon — same prominent style on desktop AND mobile
+   (was 24px / dim / no border on desktop, easy to miss). Accent-tinted
+   background + border makes it read as a real action. */
+.email-attachment-open {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px; padding: 0 9px; border-radius: 11px;
+  margin-left: 6px; flex-shrink: 0;
+  font-size: 10px; font-weight: 500; letter-spacing: 0.02em;
+  color: var(--accent-primary, var(--red));
+  background: color-mix(in srgb, var(--accent-primary, var(--red)) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-primary, var(--red)) 40%, transparent);
+  cursor: pointer; transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.email-attachment-open svg,
+.email-attachment-open > svg {
+  width: 12px; height: 12px;
+  opacity: 0.9;
+}
+.email-attachment-open:hover {
+  background: color-mix(in srgb, var(--accent-primary, var(--red)) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent-primary, var(--red)) 70%, transparent);
+}
+.email-attachment-open-label { line-height: 1; }
+/* Collapsed chip: open button is icon-only (the labeled pill crowds the
+   small chip). Hover expands the chip and reveals the "Open" label too. */
+.email-attachment-chip:not(:hover) .email-attachment-open-label {
+  display: none;
+}
+.email-attachment-chip:not(:hover) .email-attachment-open {
+  width: 22px;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+}
+@media (max-width: 768px) {
+  .doc-email-collapse-btn {
+    background: inherit;
+  }
+  /* Mobile: keep the pill but ensure a comfortable touch target. */
+  .email-attachment-open {
+    height: 26px; padding: 0 10px;
+    min-height: 26px !important;
+  }
+  .email-attachments,
+  .email-compose-atts {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-left: 0;
+    padding-bottom: 2px;
+  }
+  .email-attachments::-webkit-scrollbar,
+  .email-compose-atts::-webkit-scrollbar {
+    display: none;
+  }
+  /* Attachment chip body — modest minimum height so the open icon sits
+     neatly without dominating. */
+  .email-attachment-chip,
+  .email-compose-chip {
+    flex: 0 0 auto;
+    padding: 6px 8px !important;
+    min-height: 36px !important;
+  }
+  .email-compose-chip .compose-chip-name {
+    max-width: 190px;
+  }
+}
+
+/* Compose attachment chips (when sending new email) */
+.email-compose-atts {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 6px 0 0 58px;
+}
+.email-compose-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 4px 4px 8px; font-size: 11px;
+  background: var(--hover-bg, rgba(255,255,255,0.05));
+  border: 1px solid var(--border); border-radius: 12px; color: var(--fg);
+}
+.email-compose-chip .compose-chip-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.email-compose-chip .att-size { opacity: 0.5; font-size: 10px; }
+.email-compose-chip .compose-chip-remove {
+  background: none; border: none; color: var(--fg); opacity: 0.5;
+  font-size: 16px; line-height: 1; padding: 0 4px; cursor: pointer;
+}
+.email-compose-chip .compose-chip-remove:hover { opacity: 1; color: var(--red, #e55); }
+
+.email-cc-toggle {
+  background: none; border: none; color: var(--fg);
+  opacity: 0.4; font-size: 11px; cursor: pointer;
+  padding: 4px 8px; font-family: inherit;
+}
+.email-cc-toggle:hover {
+  opacity: 1;
+  color: var(--accent, #4a9eff);
+  background: none !important;
+}
+
+@media (max-width: 768px) {
+  .doc-email-collapse-btn {
+    display: flex;
+  }
+}
+@media (min-width: 769px) {
+  #doc-email-header #doc-email-collapse-btn.doc-email-collapse-btn {
+    display: none !important;
+  }
+  #doc-email-header.doc-email-header-collapsed .doc-email-fields {
+    display: flex !important;
+  }
+}
+
+.email-autocomplete {
+  position: absolute; top: 100%; left: 58px; right: 0; z-index: 1000;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2); max-height: 240px; overflow-y: auto;
+  margin-top: 2px;
+}
+.contact-suggestion {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding: 6px 10px; font-size: 12px; cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.contact-suggestion:last-child { border-bottom: none; }
+.contact-suggestion:hover, .contact-suggestion.active {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.contact-suggestion .contact-name { font-weight: 600; color: var(--fg); }
+.contact-suggestion .contact-email { opacity: 0.6; font-size: 11px; }
+.email-ai-reply-btn {
+  background: none;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 12px; height: 28px; font-size: 11px; cursor: pointer;
+  font-family: inherit; transition: all 0.15s;
+  display: inline-flex; align-items: center; white-space: nowrap;
+}
+.email-ai-reply-btn:hover {
+  border-color: var(--accent, #4a9eff);
+  color: var(--accent, #4a9eff);
+}
+.email-ai-reply-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Align select/new buttons in popup library toolbar */
+#email-lib-select-btn, #email-lib-refresh-btn, #email-lib-compose-btn { position: relative; top: -4px; }
+/* Select + Refresh sit slightly lower than Compose on desktop. */
+#email-lib-select-btn, #email-lib-refresh-btn { top: -2px; }
+@media (max-width: 768px) {
+  /* On mobile they're 1px higher than desktop. */
+  #email-lib-select-btn, #email-lib-refresh-btn { top: -3px; }
+}
+
+/* On mobile, the "New" (compose) button deserves a touch-friendly size
+   so it stands out from the smaller toolbar buttons next to it. Lift
+   it slightly visually with a bigger SVG, padding, and font. */
+@media (max-width: 768px) {
+  #email-lib-compose-btn {
+    padding: 8px 14px !important;
+    font-size: 13px !important;
+    min-height: 36px;
+    border-radius: 8px;
+    font-weight: 600;
+    top: -2px;
+  }
+  #email-lib-compose-btn svg {
+    width: 14px !important;
+    height: 14px !important;
+    margin-right: 5px !important;
+  }
+}
+

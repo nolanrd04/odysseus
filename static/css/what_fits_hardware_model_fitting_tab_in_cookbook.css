@@ -1,0 +1,807 @@
+/* ── What Fits? (hardware model fitting tab in cookbook) ── */
+.cookbook-group.hidden { display: none !important; }
+
+/* Section titles */
+.cookbook-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  opacity: 0.7;
+  margin: 10px 0 4px;
+}
+.cookbook-section-title:first-child { margin-top: 0; }
+
+/* Download input */
+.cookbook-dl-input {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 4px;
+  align-items: stretch;
+}
+.cookbook-dl-repo {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-family: 'Fira Code', monospace;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.cookbook-dl-repo:focus {
+  border-color: var(--accent, var(--red));
+  outline: none;
+}
+.cookbook-dl-repo::placeholder {
+  color: var(--fg-muted);
+  opacity: 0.5;
+  font-family: inherit;
+}
+/* Brief border+glow flash when an Ollama row in the hwfit list autofills the
+   Download input — helps the user see what landed when the input is offscreen
+   or above a tall list. */
+.cookbook-dl-repo.cookbook-dl-flash {
+  border-color: var(--red) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 25%, transparent) !important;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.cookbook-dl-btn {
+  background: var(--accent, var(--red));
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 0 14px;
+  height: 28px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  margin-top: -4px;
+}
+.cookbook-dl-btn:hover {
+  opacity: 0.9;
+}
+
+/* HF link in search panel */
+.hwfit-panel-hf-link {
+  font-size: 10px;
+  color: var(--red);
+  text-decoration: none;
+  margin-left: auto;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
+  border-radius: 3px;
+  transition: all 0.15s;
+}
+.hwfit-panel-hf-link:hover {
+  color: #fff;
+  background: var(--red);
+  border-color: var(--red);
+}
+
+/* Add Server collapsible */
+.cookbook-server-details {
+  margin: 4px 0 6px;
+}
+.cookbook-server-toggle {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+  list-style: none;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  transition: background 0.1s, color 0.1s;
+}
+.cookbook-server-toggle::-webkit-details-marker { display: none; }
+.cookbook-server-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.cookbook-server-toggle svg {
+  opacity: 0.5;
+  transition: transform 0.2s;
+}
+.cookbook-server-details[open] .cookbook-server-toggle svg {
+  transform: rotate(45deg);
+}
+.cookbook-settings-content {
+  padding: 6px 0;
+}
+.cookbook-settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.cookbook-settings-label {
+  font-size: 10px;
+  color: var(--fg-muted);
+}
+.cookbook-settings-hint {
+  opacity: 0.5;
+  font-weight: 400;
+}
+.cookbook-settings-input {
+  width: 100%;
+  font-size: 11px;
+  padding: 4px 6px;
+}
+.cookbook-settings-subtitle {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin: 8px 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cookbook-server-add {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-muted);
+  font-size: 13px;
+  width: 16px;
+  height: 16px;
+  position: relative;
+  top: -3px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 0;
+  padding-bottom: 3px;
+  line-height: 16px;
+  text-align: center;
+  transition: color 0.1s, border-color 0.1s;
+}
+.cookbook-server-add:hover {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+.cookbook-server-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.cookbook-srv-status {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #777;
+  transition: background 0.2s, box-shadow 0.2s, transform 0.15s;
+  cursor: pointer;
+}
+.cookbook-srv-status:hover { transform: scale(1.3); }
+.cookbook-srv-status.testing {
+  background: var(--color-warning, #f0ad4e);
+  animation: cookbook-srv-pulse 0.9s ease-in-out infinite;
+}
+.cookbook-srv-status.ok {
+  background: var(--color-success, #50fa7b);
+  /* Soft outer ring + breathing halo so active servers glow like LEDs. */
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--color-success, #50fa7b) 25%, transparent),
+    0 0 10px 2px color-mix(in srgb, var(--color-success, #50fa7b) 55%, transparent);
+  animation: cookbook-srv-glow-ok 2.4s ease-in-out infinite;
+}
+.cookbook-srv-status.fail {
+  background: var(--red, #e06c75);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--red, #e06c75) 25%, transparent),
+    0 0 10px 2px color-mix(in srgb, var(--red, #e06c75) 55%, transparent);
+}
+@keyframes cookbook-srv-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+@keyframes cookbook-srv-glow-ok {
+  0%, 100% {
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--color-success, #50fa7b) 22%, transparent),
+      0 0 8px 1px color-mix(in srgb, var(--color-success, #50fa7b) 45%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--color-success, #50fa7b) 38%, transparent),
+      0 0 14px 3px color-mix(in srgb, var(--color-success, #50fa7b) 75%, transparent);
+  }
+}
+.cookbook-server-row input.hwfit-sf,
+.cookbook-server-row select.hwfit-sf {
+  font-size: 11px;
+  padding: 0 6px;
+  margin: 0;
+  height: 24px;
+  min-height: 24px;
+  max-height: 24px;
+  line-height: 24px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+}
+.cookbook-server-row select.hwfit-sf {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23999'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  padding-right: 18px;
+}
+/* Each server is its own card block (mirrors the Running tab's task cards):
+   full border + accent left-rail + rounded corners + subtle fill, spaced. */
+.cookbook-server-entry {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--fg) 30%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 3%, var(--bg));
+  box-sizing: border-box;
+}
+.cookbook-server-entry:last-child { margin-bottom: 0; }
+/* Keep the row inside the card on narrow screens — the fixed-width host/path
+   inputs would otherwise overflow the card's background to the right. */
+@media (max-width: 768px) {
+  .cookbook-server-row .cookbook-srv-host,
+  .cookbook-server-row .cookbook-srv-path { flex: 1 1 100% !important; width: auto !important; min-width: 0 !important; }
+}
+.cookbook-server-row .cookbook-srv-name { width: 60px; flex-shrink: 0; flex-grow: 0; }
+.cookbook-server-row .cookbook-srv-host { flex: 1; min-width: 100px; }
+.cookbook-server-row .cookbook-srv-host[readonly] { opacity: 0.4; cursor: default; }
+.cookbook-server-row .cookbook-srv-port { width: 40px; flex-shrink: 0; flex-grow: 0; }
+.cookbook-server-row .cookbook-srv-env { width: 65px; flex-shrink: 0; flex-grow: 0; }
+.cookbook-server-row .cookbook-srv-path { flex: 1; min-width: 80px; }
+/* Normalize every control on a server row to the same 24-px height — with
+   many servers the small per-control height drift was very visible. */
+.cookbook-server-row > * {
+  height: 24px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+.cookbook-server-row > input.hwfit-sf,
+.cookbook-server-row > select.hwfit-sf,
+.cookbook-server-row > button,
+.cookbook-server-row .cookbook-srv-actions > button {
+  height: 24px;
+  line-height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  box-sizing: border-box;
+}
+.cookbook-server-row .cookbook-srv-actions > .close-btn { width: 24px; padding: 0; line-height: 22px; }
+.cookbook-server-row .cookbook-dep-tag { display: inline-flex; align-items: center; height: 24px; padding: 0 6px; line-height: 1; }
+.cookbook-server-row .cookbook-srv-status { width: 8px; height: 8px; align-self: center; }
+.cookbook-server-rm {
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+  opacity: 0.55;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s, border-color 0.12s;
+}
+.cookbook-server-rm:hover {
+  opacity: 1;
+  background: var(--red);
+  color: #fff;
+  border-color: var(--red);
+}
+/* Labelled "Delete server" variant (lives in the Model Directory row) — override
+   the 22x22 icon box with a normal text button. */
+.cookbook-server-rm-btn {
+  width: auto;
+  height: auto;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: inherit;
+  background: none;
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border));
+  white-space: nowrap;
+  position: relative;
+  top: -3px;
+}
+/* The "+" glyph in the Servers-header "+ Add" button, nudged up 1px (scoped so
+   the shared calendar +New pill is unaffected). */
+#cookbook-server-add .cal-add-plus { position: relative; top: -1px; }
+/* Save button on a new server entry — same shape as Delete, accent-colored;
+   turns green once saved. */
+.cookbook-server-save-btn {
+  width: auto;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+  background: none;
+  color: var(--accent, var(--red));
+  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.cookbook-server-save-btn:hover { background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent); }
+/* Cancel (discard a new server) — same shape/size as Save, muted. */
+.cookbook-server-cancel-btn {
+  width: auto;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+  background: none;
+  color: var(--fg-muted, var(--fg));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.cookbook-server-cancel-btn:hover { color: var(--fg); border-color: var(--fg); }
+.cookbook-server-save-btn.saved {
+  color: var(--green, #50fa7b);
+  border-color: color-mix(in srgb, var(--green, #50fa7b) 45%, var(--border));
+  cursor: default;
+}
+.cookbook-path-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 3px;
+  align-items: center;
+}
+.cookbook-path-input {
+  flex: 1;
+}
+.cookbook-path-add {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  transition: color 0.1s, border-color 0.1s;
+}
+.cookbook-path-add:hover {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+
+/* Server selector in search toolbar */
+.hwfit-server-select {
+  min-width: 70px;
+}
+/* GPU toggle buttons */
+.hwfit-gpu-toggles {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  position: relative;
+  top: -3px;
+}
+.hwfit-gpu-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  font-size: 10px;
+  padding: 0 5px;
+  cursor: pointer;
+  min-width: 20px;
+  height: 28px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  font-family: inherit;
+}
+.hwfit-gpu-btn:hover {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+.hwfit-gpu-btn.active {
+  background: var(--accent, var(--red));
+  color: #fff;
+  border-color: var(--accent, var(--red));
+}
+/* Pool selector for heterogeneous GPU boxes — sits left of the RAM/GPU buttons */
+.hwfit-gpu-group {
+  background: var(--bg-elev, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: 10px;
+  height: 28px;
+  padding: 0 4px;
+  cursor: pointer;
+  box-sizing: border-box;
+  font-family: inherit;
+  max-width: 190px;
+}
+.hwfit-gpu-group:hover { border-color: var(--fg); }
+/* Brief highlight on the serve command box when a saved config is loaded, so
+   the click clearly registers (loading is otherwise silent). */
+.cookbook-cmd-flash {
+  animation: cookbookCmdFlash 0.6s ease;
+}
+@keyframes cookbookCmdFlash {
+  0%   { box-shadow: 0 0 0 0 var(--accent, var(--red)); border-color: var(--accent, var(--red)); }
+  30%  { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 40%, transparent); border-color: var(--accent, var(--red)); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+/* "Confirmed working" tick on a saved serve config (auto-saved once its endpoint registered) */
+.cookbook-saved-confirmed {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+.hwfit-container { display: flex; flex-direction: column; gap: 8px; }
+.hwfit-toolbar {
+  display: flex; gap: 4px; align-items: center; flex-wrap: wrap;
+}
+.hwfit-toolbar select,
+.hwfit-toolbar input {
+  height: 28px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-family: inherit;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+.hwfit-toolbar select:focus,
+.hwfit-toolbar input:focus { outline: none; border-color: var(--red); }
+.hwfit-toolbar .hwfit-server-select { min-width: 70px; flex-shrink: 0; }
+.hwfit-toolbar .hwfit-usecase { min-width: 70px; flex-shrink: 0; }
+.hwfit-toolbar .hwfit-quant { min-width: 50px; flex-shrink: 0; }
+.hwfit-toolbar .hwfit-search { flex: 1; min-width: 80px; }
+/* Lower-opacity "Search models..." placeholder so it reads as a hint, not
+   a label — matches the muted form-field feel of the inline filters. */
+.hwfit-search::placeholder { opacity: 0.5; }
+.hwfit-search::-webkit-input-placeholder { opacity: 0.5; }
+.hwfit-search::-moz-placeholder { opacity: 0.5; }
+
+/* Dot inside the Fit column header — click to toggle the fit-only filter
+   (off = show too-tight rows; on = hide them). */
+.hwfit-fit-dot {
+  display: inline-block;
+  margin-right: 4px;
+  font-size: 8px;
+  line-height: 1;
+  color: color-mix(in srgb, var(--fg) 35%, transparent);
+  cursor: pointer;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;  /* nudge 1px up so the small dot sits centered with the "Fit" caps */
+  transition: color 0.12s ease, text-shadow 0.12s ease;
+}
+/* Quant suffix appended to model names when the storage format isn't in the
+   repo id — e.g. "(FP4-MoE-Mixed)" after DeepSeek-V4-Flash. Muted to read as
+   metadata, not part of the name. */
+.hwfit-name-quant {
+  font-size: 0.78em;
+  opacity: 0.55;
+  font-weight: 400;
+  margin-left: 4px;
+}
+.hwfit-fit-dot:hover { color: var(--accent, var(--red)); }
+.hwfit-fit-dot.active {
+  color: var(--green, #50fa7b);
+  text-shadow: 0 0 4px color-mix(in srgb, var(--green, #50fa7b) 55%, transparent);
+}
+.hwfit-help-chip {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  position: relative;
+  top: -1px;
+  margin-left: -1px;
+}
+.hwfit-help-chip:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--fg) 45%, transparent);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.hwfit-help-chip-inline {
+  margin-left: -2px;
+  margin-right: 0;
+  top: 0;  /* parent rule sets top:-1px; nudge inline variant 1px lower */
+}
+/* Quant select + inline ? wrapper — the ? sits inside the dropdown's bordered
+   box, anchored on the right just left of the chevron. */
+.hwfit-quant-wrap, .hwfit-engine-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.hwfit-quant-wrap .hwfit-quant,
+.hwfit-engine-wrap .hwfit-engine {
+  /* Make room for the ? on the right edge, in addition to the native chevron. */
+  padding-right: 32px;
+}
+.hwfit-quant-wrap .hwfit-quant-help,
+.hwfit-engine-wrap .hwfit-engine-help {
+  position: absolute;
+  right: 20px;   /* sits just left of the native select chevron */
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: auto;
+  margin: 0;
+}
+.hwfit-ctx-control {
+  height: 28px;
+  min-width: 134px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  background: var(--bg);
+  font-size: 12px;  /* match .cookbook-field-input — was 10px and read smaller than siblings */
+  box-sizing: border-box;
+}
+.hwfit-ctx-control span {
+  /* Match Quant/Engine select label style: no uppercase, no letter-spacing. */
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.9;
+}
+.hwfit-ctx-control input[type="range"] {
+  width: 64px;
+  min-width: 64px;
+  height: 4px;
+  padding: 0;
+  border: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  /* Hardcoded grey rail — was background:transparent here, which was the
+     LATER-in-cascade override that kept making the rail invisible. */
+  background: rgba(150, 150, 150, 0.65) !important;
+  border-radius: 999px;
+  accent-color: var(--accent, var(--red));
+}
+.hwfit-ctx-control output {
+  min-width: 28px;
+  text-align: right;
+  color: var(--fg);
+  font-weight: 600;
+}
+.hwfit-server-toggle { flex-shrink: 0; font-size: 10px !important; padding: 3px 8px !important; white-space: nowrap; }
+.hwfit-toolbar .hwfit-host { width: 110px; flex-shrink: 0; }
+.hwfit-env-row { gap: 6px; flex-wrap: wrap; }
+.hwfit-env-row .hwfit-envtype { width: auto; min-width: 70px; flex-shrink: 0; }
+.hwfit-env-row .hwfit-envpath { flex: 1; min-width: 100px; }
+.hwfit-env-row .hwfit-gpus { width: 90px; flex-shrink: 0; }
+.hwfit-hw {
+  display: flex; flex-wrap: wrap; column-gap: 4px; row-gap: 7px; padding: 4px 0;
+}
+.hwfit-hw-chip {
+  font-size: 10px; padding: 0 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg); opacity: 0.7; white-space: nowrap;
+  border: 0;
+  font-family: inherit;
+  line-height: 1;
+  height: 17px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  /* Cap chip width so a long label (e.g. heterogeneous GPU group
+     "1× RTX 4090 + 1× RTX 3060") wraps to the next row instead of
+     overflowing the modal. Full text stays in the tooltip. */
+  max-width: 100%;
+}
+.hwfit-hw-chip-toggle {
+  /* Allow the chip body to truncate with an ellipsis when the chip
+     itself is capped at its container's width. Without this, the
+     toggle button keeps its intrinsic width and pushes the × button
+     off-screen on narrow viewports. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hwfit-hw-chip button,
+.hwfit-hw-chip-dismiss,
+.hwfit-hw-chip-manual,
+.hwfit-hw-chip-toggle,
+.hwfit-hw-chip-x {
+  appearance: none;
+  -webkit-appearance: none;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  /* Inherit the chip's line-height so a slightly larger × glyph
+     doesn't push past the 17px chip height (which was clipping the
+     text vertically in the multi-button layout). */
+  line-height: inherit;
+}
+.hwfit-chip-x {
+  display: inline-block;
+  transform: translateY(-1px);
+}
+.hwfit-hw-chip-dismiss { cursor: pointer; }
+.hwfit-hw-chip-dismiss:hover { opacity: 1; }
+/* Two-part chip: text body toggles dim on click, × removes the chip.
+   Visual minimal — just a slightly bigger × so it's easier to hit. */
+.hwfit-hw-chip-toggle {
+  cursor: pointer;
+  /* `!important` because the earlier `.hwfit-hw-chip button { font:
+     inherit }` reset (same specificity, defined later in source)
+     was winning over the plain rule and leaving the manual chip's
+     button at the browser-default ~13px. Forcing it locally so the
+     manual chip's text matches every other chip's text. */
+  font-size: 10px !important;
+  line-height: 1 !important;
+  transform: translateY(-3px);
+}
+.hwfit-hw-chip-x {
+  cursor: pointer;
+  /* `!important` for the same cascade reason as the toggle button —
+     the `.hwfit-hw-chip button { font: inherit }` reset was leaving
+     the regular chips' × inheriting the chip's 10px while the
+     manual chip's × landed on the browser default (~13px), making
+     manual look bigger. Lock every × at 13px. */
+  font-size: 13px !important;
+  line-height: 1 !important;
+  transform: translateY(-5px);
+}
+.hwfit-hw-chip-x:hover { opacity: 1; }
+.hwfit-hw-chip-off {
+  /* Ghosted: drop the pill background so it reads as "off" rather than
+     "selected but faded". Lower text opacity matches the muted feel. */
+  background: transparent !important;
+  opacity: 0.4;
+}
+.hwfit-hw-chip-manual {
+  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
+  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  color: var(--accent, var(--red));
+  opacity: 1;
+  cursor: pointer;
+  font-family: inherit;
+  margin-inline: 3px;
+  padding-left: 7px;
+  padding-right: 7px;
+}
+.hwfit-hw-chip-manual:hover {
+  background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent);
+}
+.hwfit-hw-manual-btn {
+  min-width: 42px;
+}
+.hwfit-manual-panel {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  width: 100%;
+  margin-top: 2px;
+}
+.hwfit-manual-panel.hidden { display: none; }
+.hwfit-manual-panel label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  color: var(--fg-muted);
+}
+.hwfit-manual-panel select,
+.hwfit-manual-panel input,
+.hwfit-manual-panel button {
+  height: 24px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 10px;
+  padding: 0 6px;
+  box-sizing: border-box;
+}
+.hwfit-manual-panel input { width: 72px; }
+.hwfit-manual-panel button { cursor: pointer; }
+.hwfit-manual-panel .hwfit-hw-manual-save,
+.hwfit-manual-panel .hwfit-hw-manual-clear {
+  /* -3 (was -2) — 1px more up to optically align with the labeled
+     inputs to their left. */
+  transform: translateY(-3px);
+}
+.hwfit-manual-panel button:hover { border-color: var(--fg); }
+/* GPU driver error (e.g. NVML version mismatch) — stands out from the muted
+   chips and hints there's a real problem, with the full message on hover. */
+.hwfit-hw-chip-error {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+  color: var(--red); opacity: 1; cursor: help;
+  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
+}
+.hwfit-list {
+  max-height: 52vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;
+}
+.hwfit-loading {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--fg-muted); padding: 16px 0; font-size: 12px;
+}
+.hwfit-row {
+  display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 11px;
+  transition: background 0.1s;
+}
+.hwfit-row:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+/* Already-downloaded rows: dim slightly so attention falls on undownloaded
+   options. The green dot stays bright as the "this is local" cue. */
+.hwfit-row:has(.hwfit-dl-dot) { opacity: 0.55; }
+.hwfit-row:has(.hwfit-dl-dot):hover { opacity: 0.9; }
+.hwfit-row:has(.hwfit-dl-dot) .hwfit-dl-dot { opacity: 1; }
+.hwfit-header {
+  cursor: default; position: sticky; top: 0; z-index: 1;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+  padding: 4px 8px; font-weight: 600;
+}
+.hwfit-header:hover { background: var(--panel); }
+.hwfit-header .hwfit-col { font-size: 9px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.hwfit-header .hwfit-name { font-size: 9px; }
+.hwfit-sortable { cursor: pointer; user-select: none; }
+.hwfit-sortable:hover { color: var(--fg) !important; }
+.hwfit-sort-active { color: var(--red) !important; }
+.hwfit-col {
+  flex-shrink: 0; white-space: nowrap; text-align: left;
+  font-size: 9px; color: var(--fg-muted);
+}
+.hwfit-fit { width: 52px; font-weight: 700; text-transform: uppercase; }
+.hwfit-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-weight: 500; font-size: 11px; color: var(--fg);
+}
+.hwfit-c-params { width: 42px; }
+.hwfit-c-quant  { width: 52px; }
+.hwfit-c-vram   { width: 42px; }
+.hwfit-c-ctx    { width: 32px; }
+.hwfit-c-speed  { width: 44px; }
+.hwfit-c-score  { width: 40px; font-weight: 700; font-size: 11px; color: var(--fg); }
+.hwfit-c-mode   { width: 72px; }
+.hwfit-moe {
+  display: inline-block; padding: 0 4px; border-radius: 4px; margin-left: 4px;
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+  color: var(--red); font-weight: 600; font-size: 8px;
+}
+.hwfit-sort, .hwfit-quant { width: auto; min-width: 70px; flex-shrink: 0; }
+.hwfit-row-active { background: color-mix(in srgb, var(--red) 8%, transparent); }
+

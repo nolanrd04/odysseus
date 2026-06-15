@@ -1,0 +1,75 @@
+/* ── Inline action panel (expands below a model row) ── */
+.hwfit-action-panel {
+  border: 1px solid var(--border); border-left: 3px solid var(--red);
+  border-radius: 0 6px 6px 6px; background: var(--panel);
+  padding: 10px 12px; margin: 2px 0 6px; font-size: 11px;
+  display: flex; flex-direction: column; gap: 8px;
+  animation: hwfit-panel-in 0.15s ease-out;
+}
+@keyframes hwfit-panel-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.hwfit-panel-header {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+}
+.hwfit-panel-model {
+  font-size: 11px; font-weight: 600; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+}
+.hwfit-panel-badge {
+  font-size: 9px; padding: 2px 8px; border-radius: 10px;
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  color: var(--red); font-weight: 600; flex-shrink: 0;
+}
+.hwfit-panel-fields {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+}
+.hwfit-panel-fields label, .hwfit-adv-grid label {
+  display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--fg-muted); white-space: nowrap;
+}
+.hwfit-panel-fields input, .hwfit-panel-fields select,
+.hwfit-adv-grid input, .hwfit-adv-grid select {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--fg); font-size: 11px; padding: 3px 6px; font-family: inherit;
+  outline: none; transition: border-color 0.15s;
+}
+.hwfit-panel-fields input:focus, .hwfit-adv-grid input:focus,
+.hwfit-panel-fields select:focus, .hwfit-adv-grid select:focus {
+  border-color: var(--red);
+}
+.hwfit-panel-fields input[type="text"] { width: 60px; }
+.hwfit-adv-grid input[type="text"] { width: 80px; }
+.hwfit-adv-grid {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 6px 0;
+}
+.hwfit-cb { cursor: pointer; }
+.hwfit-cb input[type="checkbox"] { margin: 0 2px 0 0; }
+.hwfit-panel-advanced, .hwfit-panel-settings {
+  font-size: 10px;
+}
+.hwfit-panel-advanced summary, .hwfit-panel-settings summary {
+  cursor: pointer; color: var(--fg-muted); font-size: 10px;
+  user-select: none; padding: 2px 0;
+}
+.hwfit-panel-advanced summary:hover, .hwfit-panel-settings summary:hover { color: var(--fg); }
+.hwfit-panel-cmd {
+  font-family: 'Berkeley Mono', 'SF Mono', 'Fira Code', monospace;
+  font-size: 10px; padding: 6px 8px; border-radius: 4px;
+  background: var(--bg); border: 1px solid var(--border);
+  white-space: pre-wrap; word-break: break-all; max-height: 60px; overflow-y: auto;
+  color: var(--fg-muted);
+}
+.hwfit-panel-actions {
+  display: flex; gap: 4px; flex-wrap: wrap;
+}
+.hwfit-panel-note {
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--fg-muted);
+  background: color-mix(in srgb, var(--yellow, #f1fa8c) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--yellow, #f1fa8c) 18%, var(--border));
+  border-radius: 4px;
+  padding: 5px 7px;
+}
+

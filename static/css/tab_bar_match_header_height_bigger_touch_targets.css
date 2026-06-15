@@ -1,0 +1,42 @@
+  /* ── Tab bar — match header height, bigger touch targets ── */
+  .doc-tab-bar {
+    padding: 0;
+    height: 40px;
+  }
+  .doc-tab {
+    padding: 0 12px;
+    font-size: 13px;
+  }
+  /* Bigger × touch target on mobile. */
+  .doc-tab-close {
+    font-size: 22px;
+    padding: 0 8px;
+    opacity: 0.5;
+  }
+  .doc-tab .doc-tab-menu-btn {
+    opacity: 0.4 !important;
+    padding: 4px 6px !important;
+  }
+  .doc-tab .doc-tab-menu-btn svg {
+    width: 14px !important;
+    height: 14px !important;
+  }
+  /* Footer is identical to desktop now, so the separate mobile Close/Copy
+     footer is dropped and the per-tab × stays (matching desktop). */
+  .doc-mobile-footer { display: none !important; }
+  .doc-tab-new {
+    font-size: 13px !important;
+    padding: 0 14px !important;
+    gap: 4px;
+  }
+  /* No hamburger padding — it's hidden in doc-view */
+  body.doc-view.sidebar-collapsed.hamburger-left .doc-tab-bar,
+  body.doc-view.sidebar-collapsed.hamburger-left .doc-editor-header,
+  body.doc-view.sidebar-collapsed.hamburger-left .doc-md-toolbar {
+    padding-left: 0 !important;
+  }
+  body.doc-view.sidebar-collapsed.hamburger-right .doc-tab-bar,
+  body.doc-view.sidebar-collapsed.hamburger-right .doc-editor-header,
+  body.doc-view.sidebar-collapsed.hamburger-right .doc-md-toolbar {
+    padding-right: 0 !important;
+  }

@@ -1,0 +1,103 @@
+/* ── Sources section — collapsible source citations ── */
+.sources-section {
+  margin: 8px 0 12px;
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+.sources-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--red) 20%, transparent);
+  transition: background 0.2s ease;
+  user-select: none;
+}
+.sources-header:hover {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+.sources-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85em;
+  font-weight: 500;
+  color: var(--red);
+}
+.sources-header-left svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.sources-toggle {
+  font-size: 0.8em;
+  color: var(--red);
+  opacity: 0.7;
+  transition: none;
+}
+.sources-toggle::after {
+  content: '\25B6'; /* ▶ right arrow */
+}
+.sources-toggle[data-arrow="down"]::after {
+  content: '\25BC'; /* ▼ down arrow */
+}
+.sources-content {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, padding 0.3s ease;
+  padding: 0 10px;
+}
+.sources-content.expanded {
+  max-height: 3000px;
+  padding: 8px 10px;
+}
+.sources-content-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.source-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  text-decoration: none;
+  color: var(--fg);
+  transition: background 0.15s ease;
+}
+.source-link:hover {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+.source-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 15%, transparent);
+  color: var(--fg);
+  font-size: 0.7em;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.source-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82em;
+}
+.source-domain {
+  font-size: 0.72em;
+  opacity: 0.45;
+  flex-shrink: 0;
+}
+

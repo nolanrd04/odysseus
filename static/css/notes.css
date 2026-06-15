@@ -1,0 +1,68 @@
+/* ── Notes ── */
+/* Notes panel — body-level flex sibling of chat-container */
+body.notes-view .chat-container { flex: 1; min-width: 0; }
+
+/* Mobile: notes panel takes over full screen */
+@media (max-width: 768px) {
+  body.notes-view .notes-pane {
+    position: fixed;
+    inset: 0;
+    max-width: 100%;
+    width: 100% !important;
+    /* Desktop sets height: min(80vh, 820px) which wins over inset:0's bottom:0
+       and leaves a gap at the bottom of the viewport. Force full height here. */
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    z-index: 170;
+    /* Bottom-sheet treatment like the document editor: stroked, rounded top,
+       slides up from the bottom. */
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 14px 14px 0 0;
+    /* Pane itself never scrolls — its inner .notes-pane-body is the scroller.
+       Two nested scrollers caused the body's flex:1 to lose its height bound
+       on Firefox mobile and the last row got clipped off-screen. */
+    overflow: hidden;
+    animation: sheet-enter 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    transform-origin: bottom center;
+  }
+  /* Required for the flex:1 body to actually constrain to remaining pane
+     height instead of expanding to its content (default min-height:auto on
+     flex items). Without this both grid and list views overflow the viewport
+     bottom on phones. */
+  body.notes-view .notes-pane-body {
+    min-height: 0;
+    -webkit-overflow-scrolling: touch;
+  }
+  body.notes-view #notes-divider {
+    display: none;
+  }
+  body.notes-view .notes-mobile-grabber {
+    display: block;
+    flex-shrink: 0;
+    height: 18px;
+    position: relative;
+    background: var(--bg);
+    touch-action: none;
+    cursor: grab;
+  }
+  body.notes-view .notes-mobile-grabber::before {
+    content: '';
+    position: absolute;
+    top: 7px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 36px;
+    height: 4px;
+    background: var(--fg);
+    opacity: 0.25;
+    border-radius: 2px;
+  }
+  body.notes-view .chat-container {
+    display: none;
+  }
+  body.notes-view .mobile-new-chat-btn,
+  body.notes-view .hamburger-btn {
+    display: none !important;
+  }
+}

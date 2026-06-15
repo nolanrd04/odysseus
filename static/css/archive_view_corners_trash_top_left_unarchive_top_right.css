@@ -1,0 +1,51 @@
+/* ── Archive view corners — trash (top-left) + unarchive (top-right) ── */
+/* Background fill stays fully opaque (var(--panel)) so the note text or
+   image behind doesn't bleed through. Visibility is gated by `visibility`
+   + a faded ICON instead of `opacity` on the whole button. */
+.note-card-corner-trash,
+.note-card-corner-unarchive {
+  position: absolute;
+  top: 6px;
+  width: 28px;
+  height: 28px;
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg);
+  visibility: hidden;
+  touch-action: manipulation;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  z-index: 2;
+}
+.note-card-corner-trash svg,
+.note-card-corner-unarchive svg { opacity: 0.85; transition: opacity 0.15s; }
+.note-card-corner-trash { left: 6px; }
+.note-card-corner-unarchive { right: 6px; }
+.note-card:hover .note-card-corner-trash,
+.note-card:hover .note-card-corner-unarchive { visibility: visible; }
+.note-card-corner-trash:hover,
+.note-card-corner-trash:focus-visible {
+  background: color-mix(in srgb, var(--red) 18%, var(--panel));
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
+  color: var(--red);
+}
+.note-card-corner-trash:hover svg,
+.note-card-corner-unarchive:hover svg { opacity: 1; }
+.note-card-corner-unarchive:hover,
+.note-card-corner-unarchive:focus-visible {
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  color: var(--accent);
+}
+@media (hover: none) {
+  .note-card-corner-trash,
+  .note-card-corner-unarchive { visibility: visible; }
+  .note-card-corner-trash svg,
+  .note-card-corner-unarchive svg { opacity: 0.7; }
+}
+

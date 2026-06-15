@@ -1,0 +1,31 @@
+/* ── Drag & Drop ── */
+
+/* ---------- Color palette (dark / light) ---------- */
+
+    /* Drag and drop styling */
+    .section[dnd-active="true"] {
+      background: color-mix(in srgb, var(--red) 10%, transparent) !important;
+      border-color: var(--red) !important;
+    }
+    
+    .section[dnd-over="true"] {
+      background: color-mix(in srgb, var(--red) 20%, transparent) !important;
+      border-color: var(--red) !important;
+      transform: scale(1.02);
+    }
+    
+    .drag-handle {
+      cursor: grab;
+      opacity: 0.5;
+      padding: 0 6px;
+      user-select: none;
+    }
+    
+    .drag-handle:hover {
+      opacity: 0.8;
+    }
+    
+    .drag-handle:active {
+      cursor: grabbing;
+    }
+    

@@ -83,15 +83,13 @@ export function initSectionCollapse(Storage) {
       }
     }
 
-    // Click title to collapse/expand
-    const title = header.querySelector('h4') || header.querySelector('.section-title');
-    if (title) {
-      title.style.cursor = 'pointer';
-      title.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleCollapse();
-      });
-    }
+    // Click anywhere on the header bar to toggle (action buttons excluded)
+    header.style.cursor = 'pointer';
+    header.addEventListener('click', (e) => {
+      if (e.target.closest('button, a, select, [role="button"]')) return;
+      e.stopPropagation();
+      toggleCollapse();
+    });
 
     // Click chevron button
     const chevronBtn = header.querySelector('.section-collapse-btn');

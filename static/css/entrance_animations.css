@@ -1,0 +1,170 @@
+/* ── Entrance Animations ── */
+
+/* Welcome name — left-to-right wipe with a touch of horizontal stretch.
+   Fires on initial render via the .welcome-name rule; restarts on Nobody⇄
+   Odysseus toggle via JS reflow trick. */
+.welcome-name {
+  transform-origin: left center;
+  animation: welcome-name-reveal 0.55s cubic-bezier(0.34, 1.32, 0.55, 1) both;
+}
+/* Hold the welcome-screen entrance animations until the app has finished its
+   initial load (fonts loaded + layout settled). Running them mid-load made the
+   splash jump/flicker as the page reflowed ("haywire"). Until body.welcome-ready
+   is set by JS, the splash sits in its final, static state (no flash, since the
+   non-animated state IS the resting state); adding the class then plays the
+   entrance once, cleanly. */
+body:not(.welcome-ready) #welcome-screen,
+body:not(.welcome-ready) .welcome-name {
+  animation: none !important;
+}
+/* Hold the splash invisible (the entrance's start state) until ready, so when
+   the animation is released it fades/wipes in smoothly instead of flashing
+   from fully-visible to the animation's hidden first frame. */
+body:not(.welcome-ready) #welcome-screen {
+  opacity: 0;
+}
+@keyframes welcome-name-reveal {
+  from {
+    clip-path: inset(0 100% 0 0);
+    transform: scaleX(0.96);
+    opacity: 0.5;
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+@keyframes welcome-enter {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -45%);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+}
+
+@keyframes msg-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes picker-roll-up {
+  from {
+    opacity: 0;
+    transform: scaleY(0.4) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1) translateY(0);
+  }
+}
+@keyframes picker-roll-down {
+  from {
+    opacity: 1;
+    transform: scaleY(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scaleY(0.4) translateY(8px);
+  }
+}
+
+@keyframes modal-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+@keyframes modal-exit {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.97) translateY(6px);
+  }
+}
+.modal-content.modal-closing {
+  animation: modal-exit 0.18s ease-in both;
+}
+
+@keyframes cookbook-modal-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.94);
+    filter: saturate(0.85);
+  }
+  65% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.012);
+    filter: saturate(1.05);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: none;
+  }
+}
+#cookbook-modal .modal-content.cookbook-modal-entering {
+  animation: cookbook-modal-enter 0.28s cubic-bezier(0.22, 1.35, 0.36, 1) both;
+}
+/* Mobile: real bottom-sheet slide-up — the existing 12px translate is
+   too subtle on a phone, the modal effectively just appeared. */
+@media (max-width: 768px) {
+  #cookbook-modal .modal-content.cookbook-modal-entering {
+    animation: cookbook-modal-enter-mobile 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+@keyframes cookbook-modal-enter-mobile {
+  0%   { opacity: 0; transform: translateY(100%); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+#cookbook-modal .modal-content:not(.cookbook-modal-entering):not(.modal-closing) {
+  animation: none;
+}
+#cookbook-modal .modal-content.modal-closing {
+  animation: modal-exit 0.18s cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+/* Per-token streaming fade — new words materialize */
+.token-new {
+  animation: token-fade 0.4s ease-out both;
+}
+
+@keyframes token-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Disable entrance animations when loading chat history (bulk render) */
+.chat-history.no-animate .msg {
+  animation: none;
+}
+
+/* Prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .msg,
+  .modal-content,
+  #welcome-screen,
+  .toast,
+  .token-new {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+

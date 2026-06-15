@@ -674,6 +674,10 @@ app.include_router(setup_hwfit_routes())
 from routes.compare_routes import setup_compare_routes
 app.include_router(setup_compare_routes(session_manager))
 
+# Quick Proposal
+from routes.quick_proposal_routes import setup_quick_proposal_routes
+app.include_router(setup_quick_proposal_routes())
+
 # User Preferences
 from routes.prefs_routes import setup_prefs_routes
 app.include_router(setup_prefs_routes())

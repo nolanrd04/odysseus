@@ -1,0 +1,318 @@
+/* ── Admin: Built-in tools ── */
+.admin-tool-category {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.admin-tool-category:hover {
+  border-color: color-mix(in srgb, var(--fg) 20%, var(--border));
+}
+.admin-tool-cat-header {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 8px 10px;
+  transition: background 0.15s;
+}
+.admin-tool-cat-header:hover {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.admin-tool-cat-body {
+  border-top: 1px solid var(--border);
+  padding: 4px 0;
+}
+.admin-tool-cat-body.hidden {
+  display: none;
+}
+.admin-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  padding-right: 28px; /* align toggles with header toggle (chevron 12px + gap 6px + padding) */
+  transition: background 0.08s;
+}
+.admin-tool-row:hover {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.admin-tool-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.admin-tool-name {
+  font-size: 11px;
+  font-weight: 500;
+}
+.admin-tool-desc {
+  font-size: 10px;
+  opacity: 0.4;
+}
+.admin-tool-ctx {
+  font-size: 9px;
+  opacity: 0.3;
+  flex-shrink: 0;
+  min-width: 35px;
+  text-align: right;
+  font-family: 'Berkeley Mono', 'SF Mono', 'Fira Code', monospace;
+}
+
+/* Cookbook serve param hints */
+.hwfit-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+  font-size: 8px;
+  font-weight: 600;
+  opacity: 0.35;
+  cursor: help;
+  margin-left: 2px;
+  vertical-align: middle;
+  transition: opacity 0.1s;
+}
+.hwfit-hint:hover {
+  opacity: 0.8;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.hwfit-dl-dot {
+  color: var(--green);
+  font-size: 8px;
+  margin-left: 4px;
+  opacity: 0.7;
+}
+.hwfit-parser-tag {
+  font-size: 9px;
+  opacity: 0.4;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 4px;
+  font-family: 'Berkeley Mono', 'SF Mono', 'Fira Code', monospace;
+}
+
+/* Cookbook output copy — show only on hover */
+.cookbook-output-wrap .cookbook-output-copy {
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.cookbook-output-wrap:hover .cookbook-output-copy {
+  opacity: 0.5;
+}
+.cookbook-output-wrap .cookbook-output-copy:hover {
+  opacity: 1;
+}
+#cookbook-dl-btn-search {
+  position: relative;
+  top: -4px;
+  padding-top: 0;
+  padding-bottom: 0;
+  height: 28px;
+}
+
+/* Cached model menu button */
+.hwfit-cached-menu-btn {
+  background: none;
+  border: none;
+  color: var(--fg);
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: opacity 0.1s;
+  flex-shrink: 0;
+  position: relative;
+  top: -2px;
+}
+.memory-item:hover .hwfit-cached-menu-btn,
+.hwfit-cached-item:hover .hwfit-cached-menu-btn { opacity: 0.4; }
+.hwfit-cached-menu-btn:hover { opacity: 1 !important; }
+.hwfit-cached-menu-btn svg { pointer-events: none; }
+@media (max-width: 768px) {
+  #cookbook-modal .hwfit-cached-menu-btn {
+    opacity: 0.72 !important;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+    justify-content: center;
+    top: -4px;
+  }
+  #cookbook-modal .hwfit-cached-menu-btn:active {
+    opacity: 1 !important;
+    background: color-mix(in srgb, var(--fg) 9%, transparent);
+  }
+}
+
+/* Quick run button */
+.cookbook-run-btn {
+  background: var(--accent, var(--red)) !important;
+  color: var(--panel) !important;
+  border-color: var(--accent, var(--red)) !important;
+  font-weight: 600;
+}
+.cookbook-run-btn:hover {
+  opacity: 0.9;
+}
+#hwfit-cache-scan {
+  position: relative;
+  top: 1px;
+  width: 51px;
+}
+#serve-search {
+  height: 32px;
+}
+#cookbook-dl-btn {
+  position: relative;
+  top: -4px;
+}
+
+/* Cookbook model directory tags */
+.cookbook-modeldir-tag {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: 'Berkeley Mono', 'SF Mono', monospace;
+}
+.cookbook-modeldir-default {
+  opacity: 0.5;
+}
+/* Default-server radio-check in a Settings server title (same look as the
+   model-dir download target). Active = accent-tinted. */
+.cookbook-srv-default {
+  cursor: pointer;
+  opacity: 0.35;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  line-height: 1;
+  transition: opacity 0.12s, color 0.12s;
+}
+.cookbook-srv-default:hover { opacity: 0.8; }
+.cookbook-srv-default.active { opacity: 1; color: var(--accent, var(--red)); }
+.cookbook-srv-default-label { font-size: 10px; font-weight: 600; letter-spacing: 0.02em; }
+/* Download-target toggle inside a model-dir tag */
+.cookbook-modeldir-dl {
+  cursor: pointer;
+  opacity: 0.35;
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+  transition: opacity 0.12s, color 0.12s;
+}
+.cookbook-modeldir-dl:hover { opacity: 0.8; }
+.cookbook-modeldir-dl.active { opacity: 1; color: var(--accent, var(--red)); }
+/* The tag currently flagged as the download target — clearly highlighted so
+   it's obvious where downloads land. */
+.cookbook-modeldir-target {
+  opacity: 1;
+  color: var(--accent, var(--red));
+  font-weight: 600;
+  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 60%, transparent);
+}
+.cookbook-modeldir-rm {
+  cursor: pointer;
+  opacity: 0.4;
+  font-size: 10px;
+}
+.cookbook-modeldir-rm:hover {
+  opacity: 1;
+}
+.cookbook-modeldir-add {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: 10px;
+  font-weight: 500;
+  height: 19.5px;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  position: relative;
+  top: -3px;
+  padding: 0 9px;
+  transition: border-color 0.12s, background 0.12s;
+}
+.cookbook-modeldir-add:hover { border-color: var(--accent, var(--red)); background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent); }
+
+/* Cookbook serve optimizations */
+.hwfit-serve-opts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+.hwfit-apply-opts {
+  font-size: 11px !important;
+  min-width: auto !important;
+  white-space: nowrap;
+}
+.hwfit-opts-desc {
+  font-size: 9px;
+  opacity: 0.4;
+  font-style: italic;
+}
+
+/* Library modal tabs */
+.lib-tabs,
+.admin-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.lib-tab,
+.admin-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+}
+.lib-tab:hover,
+.admin-tab:hover { color: var(--fg); }
+.lib-tab.active,
+.admin-tab.active {
+  color: var(--accent, var(--red));
+  border-bottom-color: var(--accent, var(--red));
+}
+
+/* Cookbook tab count badge */
+.cookbook-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, var(--red)) 20%, transparent);
+  color: var(--accent, var(--red));
+  font-size: 9px;
+  font-weight: 700;
+  margin-left: 4px;
+  line-height: 1;
+}
+

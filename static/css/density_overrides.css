@@ -1,0 +1,11 @@
+/* ── Density Overrides ── */
+
+:root.density-compact { font-size: 13px; }
+:root.density-compact .msg { padding: 6px 10px; margin-bottom: 4px; }
+:root.density-compact .list-item { padding: 4px 8px; }
+:root.density-compact .sidebar .section { padding: 0; }
+:root.density-spacious { font-size: 16px; }
+:root.density-spacious .msg { padding: 14px 18px; margin-bottom: 12px; }
+:root.density-spacious .list-item { padding: 8px 12px; }
+:root.density-spacious .sidebar .section { padding: 0; }
+

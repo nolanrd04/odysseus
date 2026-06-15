@@ -1,0 +1,704 @@
+    /* ── Model A/B Comparison ── */
+
+    /* -- Extracted inline-style classes -- */
+    .cmp-header-action-btn {
+      background: none; border: 1px solid var(--border); color: var(--fg);
+      cursor: pointer; padding: 3px 10px; font-size: 11px; font-weight: 600;
+      opacity: 0.7; transition: all 0.15s; line-height: 1; border-radius: 4px;
+      display: inline-flex; align-items: center; font-family: inherit;
+    }
+    .cmp-form-control {
+      padding: 8px; background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 6px; font-size: 0.85em;
+    }
+    .cmp-btn-secondary {
+      background: transparent; color: var(--fg); border: 1px solid var(--border);
+      border-radius: 6px; cursor: pointer;
+    }
+    .cmp-btn-primary {
+      background: var(--fg); color: var(--bg); border: none;
+      border-radius: 6px; cursor: pointer; font-weight: 600;
+      transition: filter 0.12s, background 0.12s, color 0.12s;
+    }
+    /* Override global button:hover (which switches bg to var(--panel) =
+       very dark) — keep the bright primary look and just brighten slightly. */
+    .cmp-btn-primary:hover:not(:disabled) {
+      background: var(--fg); color: var(--bg);
+      filter: brightness(1.1);
+    }
+    .cmp-btn-primary:active:not(:disabled) { filter: brightness(0.95); }
+    .cmp-btn-secondary:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--fg) 8%, transparent);
+      border-color: var(--fg); color: var(--fg);
+    }
+    .cmp-model-row {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+      transition: margin-left 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .cmp-row-label {
+      color: var(--fg); font-size: 0.82em; font-weight: 600; min-width: 20px;
+      opacity: 0.4; text-align: center; flex-shrink: 0;
+    }
+    .cmp-rm-btn {
+      background: none; border: none; color: var(--fg); cursor: pointer;
+      min-width: 20px; font-size: 16px; font-weight: 600; opacity: 0.3;
+      transition: all 0.15s; padding: 0; line-height: 1; text-align: center;
+      position: relative; top: -1px;
+    }
+    .cmp-prov-select {
+      flex: 0 0 auto; width: 120px; font-size: 0.8em;
+    }
+    /* Eval-prompts picker — only shown during compare; absolute top-right
+       inside .chat-input-top, matching .model-picker-wrap's slot. */
+    .chat-input-top > .cmp-eval-wrap {
+      position: absolute;
+      top: 0; right: 0;
+      z-index: 2;
+    }
+    .cmp-eval-btn {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 8px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--fg);
+      font-size: 11px; font-weight: 500;
+      font-family: inherit;
+      cursor: pointer; opacity: 0.75;
+      transition: opacity 0.15s, border-color 0.15s;
+    }
+    .cmp-eval-btn:hover { opacity: 1; border-color: var(--fg); }
+    .cmp-eval-caret { opacity: 0.7; transform: rotate(180deg); }
+    .cmp-eval-menu {
+      position: absolute; bottom: calc(100% + 4px); right: 0;
+      min-width: 220px; max-width: 280px;
+      max-height: 360px; overflow-y: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      box-shadow: 0 -4px 16px rgba(0,0,0,0.3);
+      padding: 4px;
+      z-index: 1000;
+    }
+    .cmp-eval-menu.hidden { display: none; }
+    .cmp-eval-group-label {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px;
+      opacity: 0.45; font-weight: 600;
+      padding: 6px 8px 2px;
+    }
+    .cmp-eval-item {
+      display: block; width: 100%;
+      text-align: left;
+      padding: 5px 8px;
+      background: none; border: none;
+      color: var(--fg); font-size: 11px;
+      font-family: inherit;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .cmp-eval-item:hover {
+      background: color-mix(in srgb, var(--fg) 8%, transparent);
+    }
+    .cmp-eval-empty {
+      padding: 10px; text-align: center;
+      font-size: 11px; opacity: 0.5;
+    }
+    /* Tick on items that ship a known expected answer */
+    .cmp-eval-item-tick {
+      float: right;
+      margin-left: 6px;
+      font-size: 10px;
+      color: var(--color-success, #4caf50);
+      opacity: 0.8;
+    }
+    /* Expected-answer panel — floats as its own little window above the
+       chat-input-bar. Distinct surface, padded, drop-shadow, slightly
+       lifted so it reads as a separate UI element, not part of the input. */
+    .chat-input-bar:has(.cmp-eval-expected) { position: relative; }
+    .cmp-eval-expected {
+      position: absolute;
+      bottom: calc(100% + 8px);
+      right: 0;
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 12px;
+      font-size: 11px;
+      background: var(--panel);
+      border: 1px solid color-mix(in srgb, var(--color-success, #4caf50) 50%, transparent);
+      border-radius: 8px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.2);
+      color: var(--fg);
+      width: fit-content;
+      z-index: 5;
+      pointer-events: auto;
+    }
+    .cmp-eval-expected.hidden { display: none; }
+    .cmp-eval-expected-label {
+      opacity: 0.6;
+      text-transform: uppercase;
+      font-size: 9px;
+      letter-spacing: 0.5px;
+      font-weight: 600;
+    }
+    .cmp-eval-expected-value {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+    }
+    .cmp-eval-expected-close {
+      background: none; border: none; color: var(--fg);
+      font-size: 14px; line-height: 1; padding: 0 0 0 4px;
+      opacity: 0.5; cursor: pointer; font-family: inherit;
+    }
+    .cmp-eval-expected-close:hover { opacity: 1; }
+    /* Auto-grade badge — stamped on a pane after stream completes when an
+       eval prompt with a known expected answer was used. */
+    .pane-grade-badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px;
+      margin: 0 4px;
+      font-size: 12px; font-weight: 700;
+      border-radius: 50%;
+      border: 1px solid currentColor;
+      flex-shrink: 0;
+    }
+    .pane-grade-badge.pass {
+      color: var(--color-success, #4caf50);
+      background: color-mix(in srgb, var(--color-success, #4caf50) 12%, transparent);
+    }
+    .pane-grade-badge.fail {
+      color: var(--color-error, #e55);
+      background: color-mix(in srgb, var(--color-error, #e55) 12%, transparent);
+    }
+
+    /* Compare probe overlay */
+    .compare-probe-overlay {
+      position: fixed; inset: 0; z-index: 300;
+      background: rgba(0,0,0,0.5); display: flex;
+      align-items: center; justify-content: center;
+    }
+    .compare-probe-card {
+      background: var(--panel); border-radius: 12px; padding: 20px 24px;
+      display: flex; flex-direction: column; align-items: center; gap: 12px;
+      min-width: 280px; max-width: 90vw; box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+    .compare-probe-title {
+      font-size: 13px; font-weight: 600; opacity: 0.7;
+    }
+    .compare-probe-list {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px; min-width: 320px; width: 100%;
+    }
+    .compare-probe-row {
+      display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+      border-radius: 6px; background: color-mix(in srgb, var(--fg) 4%, transparent);
+      font-size: 12px; transition: background 0.2s; overflow: hidden;
+    }
+    .compare-probe-row.fail {
+      background: color-mix(in srgb, var(--color-error, #f44) 8%, transparent);
+    }
+    .compare-probe-spinner {
+      width: 24px; text-align: center; font-size: 10px; flex-shrink: 0;
+      letter-spacing: -1px; opacity: 0.6;
+    }
+    .compare-probe-spinner.ok { color: var(--color-success); animation: none; }
+    .compare-probe-spinner.fail { color: var(--color-error, #f44); animation: none; }
+    .compare-probe-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .compare-probe-status { font-size: 11px; opacity: 0.5; flex-shrink: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .compare-probe-status.ok { color: var(--color-success); opacity: 1; }
+    .compare-probe-status.fail { color: var(--color-error, #f44); opacity: 1; }
+    .compare-probe-action-btn {
+      padding: 2px 8px; background: transparent; color: var(--fg); border: 1px solid var(--border);
+      border-radius: 4px; cursor: pointer; font-size: 10px; font-family: inherit;
+      opacity: 0.7; transition: opacity 0.15s, border-color 0.15s; white-space: nowrap; flex-shrink: 0;
+    }
+    .compare-probe-action-btn:hover { opacity: 1; border-color: var(--accent); }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes pane-shake {
+      0%, 100% { transform: translateX(0); }
+      15% { transform: translateX(-3px) rotate(-0.5deg); }
+      30% { transform: translateX(3px) rotate(0.5deg); }
+      45% { transform: translateX(-2px); }
+      60% { transform: translateX(2px); }
+      75% { transform: translateX(-1px); }
+    }
+
+    .chat-container.compare-active {
+      display: flex;
+      flex-direction: column;
+      padding: 0;
+      overflow: hidden;
+      animation: compare-enter 0.3s ease-out;
+    }
+    @keyframes compare-enter {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .chat-container.compare-active .chat-input-bar {
+      margin-bottom: 0;
+    }
+    .chat-container.compare-active #model-picker-wrap {
+      display: none !important;
+    }
+    .compare-grid {
+      display: grid;
+      gap: 4px;
+      flex: 1 1 0;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .compare-grid[data-cols="2"] { grid-template-columns: 1fr 1fr; }
+    .compare-grid[data-cols="3"] { grid-template-columns: 1fr 1fr 1fr; }
+    .compare-grid[data-cols="4"] { grid-template-columns: repeat(4, 1fr); }
+    .compare-grid[data-cols="5"] { grid-template-columns: repeat(4, 1fr); }
+    .compare-grid[data-cols="6"] { grid-template-columns: repeat(4, 1fr); }
+    .compare-grid[data-cols="7"] { grid-template-columns: repeat(4, 1fr); }
+    .compare-grid[data-cols="8"] { grid-template-columns: repeat(4, 1fr); }
+    .compare-grid { grid-auto-rows: 1fr; }
+    /* Sequential waterfall layout — stacked rows, staggered left, flush right */
+    .compare-grid.sequential-layout {
+      display: flex !important;
+      flex-direction: column !important;
+      grid-template-columns: none !important;
+      gap: 4px;
+      overflow-y: auto;
+    }
+    .compare-grid.sequential-layout .compare-pane {
+      flex-shrink: 0;
+      min-height: 200px;
+      transition: margin-left 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease;
+    }
+    /* Herringbone diagonal cut on left side of sequential pane headers */
+    .compare-grid.sequential-layout .compare-pane .pane-header {
+      clip-path: polygon(20px 0, 100% 0, 100% 100%, 0 100%);
+      padding-left: 26px;
+    }
+    .compare-pane {
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      min-height: 0;
+      min-width: 0;
+    }
+    .compare-pane .pane-header {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      background: color-mix(in srgb, var(--fg) 4%, transparent);
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82em;
+      font-weight: 600;
+      color: var(--fg);
+      transition: background 0.4s;
+      flex-shrink: 0;
+      overflow: hidden;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+    .pane-actions {
+      display: flex; gap: 4px; align-items: center; margin-left: auto; flex-shrink: 0;
+    }
+    .compare-pane-footer {
+      font-size: 0.72em; opacity: 0.4; padding: 4px 10px;
+      border-top: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+      text-align: center; flex-shrink: 0;
+    }
+    /* Per-pane vote button. Sits at the bottom of each compare pane so
+       the action lives right under the response it judges. */
+    .pane-vote-footer {
+      padding: 6px 8px;
+      border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+      background: color-mix(in srgb, var(--fg) 3%, transparent);
+      flex-shrink: 0;
+    }
+    .pane-vote-btn {
+      width: 100%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      background: var(--bg);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+    }
+    .pane-vote-btn:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--accent, var(--fg)) 12%, var(--bg));
+      border-color: var(--accent, var(--fg));
+    }
+    .pane-vote-btn:disabled { cursor: not-allowed; }
+    .pane-vote-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .pane-action-btn {
+      background: none; border: none; color: var(--fg); cursor: pointer;
+      opacity: 0.3; padding: 2px; border-radius: 4px;
+      display: flex; align-items: center; transition: all 0.15s;
+    }
+    .pane-action-btn:hover { opacity: 0.8; background: color-mix(in srgb, var(--fg) 6%, transparent); }
+    /* Pane title as clickable model-swap button */
+    .pane-title-btn {
+      background: none; border: none; cursor: pointer;
+      font-size: 10px; font-weight: 400; font-family: inherit;
+      color: var(--fg); padding: 0;
+      text-align: left; display: flex; align-items: center; gap: 4px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      transition: opacity 0.15s;
+      min-width: 0; flex: 1 1 0;
+    }
+    .pane-title-btn:hover { opacity: 0.7; }
+    .pane-title-caret { font-size: 0.6em; opacity: 0.35; flex-shrink: 0; position: relative; top: 2px; }
+    .pane-title-btn:hover .pane-title-caret { opacity: 0.7; }
+    .compare-pane .pane-close-btn { opacity: 0.3; }
+    .compare-pane .pane-close-btn:hover { opacity: 1; color: var(--color-error); }
+    /* Model swap dropdown under pane title */
+    .pane-model-dropdown {
+      position: absolute;
+      z-index: 1000;
+      min-width: 220px;
+      max-height: 300px;
+      overflow-y: auto;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+      padding: 4px;
+    }
+    .pane-model-item {
+      display: block; width: 100%;
+      padding: 6px 10px; font-size: 0.7em;
+      text-align: left; background: none; border: none; border-radius: 4px;
+      color: var(--fg); cursor: pointer; transition: background 0.1s;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .pane-model-item:hover { background: color-mix(in srgb, var(--fg) 10%, transparent); }
+    .pane-model-item.current { color: var(--red); font-weight: 600; }
+    .pane-timer {
+      font-size: 10px; font-weight: 400; opacity: 0.45; font-variant-numeric: tabular-nums;
+      white-space: nowrap; padding-right: 4px;
+    }
+    /* When 4+ panes, timer wraps to its own row */
+    .compare-grid[data-cols="4"] .pane-timer,
+    .compare-grid[data-cols="5"] .pane-timer,
+    .compare-grid[data-cols="6"] .pane-timer {
+      width: 100%; order: 99; margin-top: -4px; padding-bottom: 2px; padding-left: 2px;
+    }
+    .pane-finish-badge {
+      font-weight: 600; color: var(--red);
+    }
+    .compare-pane.winner .pane-header {
+      background: color-mix(in srgb, var(--red) 12%, transparent);
+      border-bottom-color: color-mix(in srgb, var(--red) 30%, var(--border));
+    }
+    .compare-pane.winner .pane-title {
+      color: var(--red);
+    }
+    .compare-pane.loser .pane-header {
+      opacity: 0.5;
+    }
+    .confetti-piece {
+      position: fixed;
+      pointer-events: none;
+      z-index: 1000000;
+    }
+    .compare-pane.expanded { grid-column: 1 / -1; }
+    .compare-pane .chat-history {
+      flex: 1 1 0;
+      min-height: 0;
+      overflow-y: auto !important;
+      overflow-x: hidden;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+    }
+    .compare-pane .chat-history .msg {
+      flex-shrink: 0;
+    }
+    .compare-gen-image {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .compare-section {
+      margin-bottom: 14px;
+    }
+    .compare-section:last-child {
+      margin-bottom: 0;
+    }
+    .compare-section-label {
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      opacity: 0.5;
+      margin-bottom: 5px;
+      font-weight: 600;
+    }
+    /* Active-type/mode readout next to "Type:"/"Mode:" — only needed on mobile
+       (where the tab/toggle text labels are hidden); hidden on desktop. */
+    .compare-type-current,
+    .compare-mode-current { display: none; }
+    /* Contextual one-liner under the mode toggles describing what you just
+       changed — empty until the first toggle, then a subtle hint. */
+    .compare-mode-hint {
+      font-size: 11px;
+      opacity: 0.55;
+      margin-top: 6px;
+      min-height: 0;
+      line-height: 1.3;
+    }
+    .compare-mode-hint:empty { display: none; }
+    .compare-mode-tabs {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    /* Type tabs match Mode toggles 1:1 (same flex column layout, same metrics) */
+    .compare-mode-tab {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      width: 56px; height: auto; flex: 1 1 0;
+      padding: 5px 4px 4px; border: 1px solid var(--border); border-radius: 6px;
+      cursor: pointer; user-select: none; transition: all 0.15s;
+      background: none; color: var(--fg); opacity: 0.35;
+      flex-shrink: 0; gap: 0;
+      font-family: inherit;
+    }
+    .compare-mode-tab:hover {
+      opacity: 0.7; background: color-mix(in srgb, var(--fg) 6%, transparent);
+    }
+    .compare-mode-tab.active {
+      opacity: 1; border-color: var(--fg);
+      background: color-mix(in srgb, var(--fg) 10%, transparent);
+    }
+    .compare-sources-box {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 10px; margin-bottom: 8px;
+      border-radius: 6px; font-size: 0.78em;
+      background: color-mix(in srgb, var(--red) 8%, transparent);
+      border: 1px solid color-mix(in srgb, var(--red) 20%, transparent);
+      color: color-mix(in srgb, var(--fg) 70%, transparent);
+      cursor: default;
+    }
+    .compare-sources-box .sources-label { font-weight: 600; }
+    /* Compact tool blocks inside compare panes */
+    .compare-pane .agent-thread-node {
+      margin: 4px 0; font-size: 0.85em;
+    }
+    .compare-pane .agent-thread-cmd {
+      max-height: 80px; overflow-y: auto;
+    }
+    .compare-pane .agent-tool-output pre {
+      max-height: 120px; overflow-y: auto;
+    }
+    .compare-vote-bar {
+      display: flex; justify-content: center; gap: 8px;
+      padding: 8px; border-top: 1px solid var(--border);
+      flex-shrink: 0; flex-wrap: wrap;
+    }
+    .compare-vote-bar.hidden { display: none; }
+    .compare-vote-btn {
+      padding: 6px 13px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--panel); color: var(--fg); cursor: pointer; font-size: 0.8em;
+      transition: all 0.15s; white-space: nowrap;
+    }
+    .compare-vote-btn:hover { border-color: var(--red); background: color-mix(in srgb, var(--red) 11%, transparent); }
+    .compare-vote-tie { opacity: 0.7; }
+    .compare-rematch-btn { display: flex; align-items: center; gap: 6px; margin-left: 8px; border-color: color-mix(in srgb, var(--fg) 20%, transparent); opacity: 0.6; }
+    .compare-rematch-btn:hover { opacity: 1; }
+    /* Preview button accent in pane header */
+    .pane-preview-btn.active { color: var(--red); }
+    /* Full-pane iframe for HTML preview */
+    .compare-pane-iframe {
+      flex: 1;
+      width: 100%;
+      border: none;
+      border-radius: 0 0 8px 8px;
+      background: #fff;
+    }
+    /* ---- Add-pane "+" button in pane header (last pane only) ---- */
+    .pane-add-btn { display: none !important; font-size: 16px; font-weight: 600; }
+    .compare-pane:last-child .pane-add-btn { display: flex !important; }
+    /* Dropdown for adding a pane */
+    .add-pane-dropdown {
+      position: absolute;
+      right: 0;
+      z-index: 100;
+      background: var(--panel, var(--bg));
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      max-height: 300px;
+      overflow-y: auto;
+      min-width: 220px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      padding: 4px;
+    }
+    .add-pane-search {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      color: var(--fg);
+      font-size: 0.85em;
+      box-sizing: border-box;
+      margin-bottom: 4px;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    /* Compare toggle buttons — icon + label stacked */
+    .compare-toggle-label {
+      display: block;
+      font-size: 9px;
+      line-height: 1;
+      margin-top: 2px;
+      font-weight: 500;
+    }
+    .compare-blind-toggle,
+    .compare-save-toggle,
+    .compare-dice-toggle,
+    .compare-parallel-toggle,
+    .compare-reset-toggle {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      width: 56px; height: auto; flex: 1 1 0;
+      padding: 5px 4px 4px; border: 1px solid var(--border); border-radius: 6px;
+      cursor: pointer; user-select: none; transition: all 0.15s;
+      background: none; color: var(--fg); opacity: 0.35;
+      flex-shrink: 0; gap: 0;
+    }
+    .compare-blind-toggle:hover,
+    .compare-save-toggle:hover,
+    .compare-dice-toggle:hover,
+    .compare-parallel-toggle:hover,
+    .compare-reset-toggle:hover {
+      opacity: 0.7; background: color-mix(in srgb, var(--fg) 6%, transparent);
+    }
+    .compare-blind-toggle.active {
+      opacity: 1; color: var(--color-blind-orange); border-color: var(--color-blind-orange);
+      background: rgba(255, 152, 0, 0.1);
+    }
+    .compare-save-toggle.active {
+      opacity: 1; color: var(--color-save-green); border-color: var(--color-save-green);
+      background: color-mix(in srgb, var(--red) 10%, transparent);
+    }
+    .compare-dice-toggle.active {
+      opacity: 1; color: var(--red); border-color: var(--red);
+      background: color-mix(in srgb, var(--red) 10%, transparent);
+    }
+    .compare-parallel-toggle {
+      opacity: 1; color: #e0a050; border-color: #e0a050;
+      background: rgba(224, 160, 80, 0.1);
+    }
+    .compare-parallel-toggle.active {
+      color: #5b8def; border-color: #5b8def;
+      background: rgba(91, 141, 239, 0.1);
+    }
+    @media (max-width: 520px) {
+      .compare-toggle-label { display: none; }
+      /* Tab text labels are hidden on mobile, so spell out the active type next
+         to "Type:" with its icon. */
+      .compare-type-current {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        margin-left: 5px;
+        font-weight: 600;
+        vertical-align: -3px;
+      }
+      .compare-type-current svg { width: 14px; height: 14px; }
+      /* Mode list — comma-separated, each name already coloured inline. */
+      .compare-mode-current {
+        display: inline;
+        margin-left: 5px;
+        font-weight: 600;
+      }
+      .compare-blind-toggle,
+      .compare-save-toggle,
+      .compare-dice-toggle,
+      .compare-parallel-toggle,
+      .compare-reset-toggle {
+        width: 32px; height: 32px; min-width: 32px; padding: 0;
+      }
+      /* The Group tab's seq/parallel toggle is a single full-width button (not
+         a row of compact icons like the Compare header), so keep its label and
+         make it a comfortable touch target with the text beside the icon. */
+      #group-mode-btn {
+        flex-direction: row !important;
+        width: auto !important;
+        height: auto !important;
+        min-height: 44px;
+        padding: 8px 14px !important;
+        gap: 8px !important;
+        font-size: 13px;
+      }
+      #group-mode-btn .compare-toggle-label {
+        display: inline !important;
+        font-size: 13px;
+        margin-top: 0;
+      }
+      #group-mode-btn svg { width: 18px; height: 18px; }
+      /* Compare header: hide labels + close button, show icons only */
+      #compare-shuffle-btn span {
+        display: none;
+      }
+      #compare-shuffle-btn,
+      #compare-check-btn,
+      #compare-add-btn {
+        padding: 3px 6px;
+      }
+      /* Save space so the header buttons fit on one row: tighter padding +
+         smaller labels (icons kept full size). (Score now lives in the vote bar.) */
+      .compare-header-bar button { padding: 3px 5px !important; }
+      .compare-header-bar #compare-check-btn > span,
+      .compare-header-bar #compare-add-btn > span {
+        font-size: 10px; margin-left: 2px;
+      }
+      /* Compare mobile: keep the close X visible — it's the only way out
+         now that the hamburger is hidden during compare mode. */
+      .compare-header-bar {
+        padding: 14px 8px 10px 8px !important;
+        min-height: 44px;
+      }
+      /* Mode tabs: icons only, centered */
+      .compare-mode-tab span { display: none; }
+      .compare-mode-tabs { justify-content: center; }
+      /* Header action buttons: hide text labels on Export / Shuffle /
+         Model on mobile so the close X fits on the right. Score keeps
+         its "Score" label because its icon (4-square grid) reads too
+         similar to Shuffle's icon without text. */
+      .compare-header-bar #compare-export-btn > span,
+      .compare-header-bar #compare-shuffle-btn > span {
+        display: none;
+      }
+      /* Override the desktop override: on mobile the model picker overlay
+         MUST cap its height to the viewport so the dropdown doesn't run
+         past the bottom of the screen. */
+      #compare-model-overlay .modal-content {
+        max-height: 85dvh !important;
+        max-height: 85vh !important;
+        overflow: hidden !important;
+      }
+      #compare-model-overlay .modal-body {
+        overflow: auto !important;
+        flex: 1 1 auto !important;
+        min-height: 0 !important;
+      }
+    }
+    /* Hide number input spinners */
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button {
+      -webkit-appearance: none; margin: 0;
+    }
+

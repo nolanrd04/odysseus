@@ -1,0 +1,577 @@
+/* ── Suggestion comments (Google Docs style) ── */
+.doc-suggestion-highlight {
+  position: absolute;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-left: 3px solid var(--accent);
+  pointer-events: none;
+  z-index: 1;
+  transition: top 0.1s, opacity 0.15s;
+}
+/* Suggestion card — fixed next to editor, anchored to the change */
+.doc-suggestion-card {
+  position: fixed;
+  width: 250px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 12px 12px 10px;
+  font-size: 12px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+  animation: suggestion-enter 0.25s ease-out;
+  z-index: 250;
+  overflow: visible;
+}
+/* Arrow pointing toward the editor */
+.doc-suggestion-card::before {
+  content: '';
+  position: absolute;
+  top: 16px;
+  left: -10px;
+  width: 18px;
+  height: 18px;
+  background: var(--panel);
+  border-left: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  transform: rotate(45deg);
+  z-index: 1;
+}
+.doc-suggestion-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.doc-suggestion-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.doc-suggestion-nav-btn {
+  background: none;
+  border: none;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  opacity: 0.35;
+  transition: opacity 0.1s;
+}
+.doc-suggestion-nav-btn:hover { opacity: 1; }
+.doc-suggestion-close {
+  background: none;
+  border: none;
+  color: var(--fg);
+  opacity: 0.3;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 6px 8px;
+  margin: -6px -8px;
+  border-radius: 6px;
+  transition: opacity 0.1s, background 0.1s;
+}
+.doc-suggestion-close:hover { opacity: 1; background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.doc-suggestion-counter {
+  font-size: 10px;
+  opacity: 0.4;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+/* Inline diff markers — injected into the code highlight element */
+.sugg-inline-del {
+  background: color-mix(in srgb, var(--red) 20%, transparent);
+  color: color-mix(in srgb, var(--red) 70%, var(--fg));
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--red) 40%, transparent);
+  border-radius: 2px;
+  padding: 0 2px;
+}
+.sugg-inline-add {
+  background: color-mix(in srgb, var(--green) 25%, transparent);
+  color: var(--green);
+  border-radius: 2px;
+  padding: 0 2px;
+}
+/* ---- Diff mode ---- */
+.diff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.diff-toolbar-status {
+  opacity: 0.5;
+  font-size: 10px;
+  margin-right: auto;
+}
+.diff-toolbar-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color 0.15s, background 0.15s;
+}
+.diff-toolbar-btn:hover {
+  border-color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent);
+}
+.diff-toolbar-btn-accept { color: var(--green); border-color: color-mix(in srgb, var(--green) 30%, transparent); }
+.diff-toolbar-btn-accept:hover { border-color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
+.diff-toolbar-btn-reject { color: var(--red); border-color: color-mix(in srgb, var(--red) 30%, transparent); }
+.diff-toolbar-btn-reject:hover { border-color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); }
+.diff-line-del {
+  display: block;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-left: 3px solid var(--accent);
+  padding-left: 4px;
+  margin-left: -7px;
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.diff-line-add {
+  display: block;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  border-left: 3px solid var(--accent);
+  padding-left: 4px;
+  margin-left: -7px;
+}
+/* Inline diff summary (version history cards) */
+.diff-del {
+  color: var(--accent);
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.diff-add {
+  color: var(--accent);
+  font-weight: 600;
+}
+.diff-line-equal {
+  display: block;
+}
+.diff-chunk-resolved {
+  opacity: 0.3;
+  transition: opacity 0.3s;
+}
+.diff-chunk-actions {
+  position: absolute;
+  right: 8px;
+  top: 0;
+  display: flex;
+  gap: 4px;
+  z-index: 5;
+  pointer-events: auto;
+}
+/* Diff mode: textarea sits on top of the highlight where chunk buttons live.
+   Disable its pointer events so clicks reach the buttons in the layer below. */
+.doc-editor-wrap.diff-mode .doc-editor-textarea {
+  pointer-events: none;
+}
+.doc-editor-wrap.diff-mode .doc-editor-highlight {
+  pointer-events: auto;
+  z-index: 2;
+}
+.diff-chunk-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  transition: border-color 0.15s, background 0.15s;
+  opacity: 0.6;
+}
+.diff-chunk-btn:hover { opacity: 1; }
+.diff-chunk-btn-accept { color: var(--green); }
+.diff-chunk-btn-accept:hover { border-color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }
+.diff-chunk-btn-reject { color: var(--red); }
+.diff-chunk-btn-reject:hover { border-color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }
+
+.doc-suggestion-accept-all {
+  flex: 1;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 10px;
+  font-family: inherit;
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  transition: background 0.1s;
+}
+.doc-suggestion-accept-all:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.doc-suggestion-reason {
+  opacity: 0.6;
+  margin-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.doc-suggestion-diff {
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: var(--code-font, monospace);
+  font-size: 11px;
+  margin-bottom: 8px;
+  max-height: 100px;
+  overflow-y: auto;
+  word-break: break-word;
+}
+.doc-suggestion-del {
+  color: var(--red);
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.doc-suggestion-add {
+  color: var(--green);
+}
+.doc-suggestion-actions {
+  display: flex;
+  gap: 6px;
+}
+.doc-suggestion-accept,
+.doc-suggestion-dismiss {
+  flex: 1;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  transition: background 0.1s;
+}
+.doc-suggestion-accept {
+  background: var(--accent, var(--red));
+  color: #fff;
+}
+.doc-suggestion-accept:hover {
+  filter: brightness(1.15);
+}
+.doc-suggestion-dismiss {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+.doc-suggestion-dismiss:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+@keyframes suggestion-enter {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+/* Mobile: suggestion card overlays top of editor (no room on side) */
+@media (max-width: 768px) {
+  .doc-suggestion-card {
+    right: 8px;
+    right: 8px;
+    width: auto;
+    top: 8px !important;
+  }
+  .doc-suggestion-card::before { display: none; }
+}
+
+/* ---- Streaming animation ---- */
+.doc-editor-textarea[readonly] {
+  caret-color: var(--red);
+}
+.doc-editor-wrap.animating::after {
+  content: '';
+  position: absolute;
+  top: 6px; right: 8px;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--red);
+  animation: doc-pulse 0.8s ease-in-out infinite;
+  z-index: 3;
+  pointer-events: none;
+}
+@keyframes doc-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+/* Diff overlay */
+.doc-diff-overlay {
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  z-index: 5;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: 'Fira Code', monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  border-radius: 6px;
+}
+.doc-diff-overlay.visible { opacity: 1; }
+.doc-diff-overlay.fading { opacity: 0; transition: opacity 0.4s ease; }
+.doc-diff-stats {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.diff-stat-del { color: var(--warn); }
+.diff-stat-add { color: var(--green); }
+.doc-diff-content { }
+.doc-diff-line {
+  padding: 1px 8px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.doc-diff-line.same {
+  opacity: 0.4;
+}
+.doc-diff-line.del {
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
+  color: var(--warn);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.doc-diff-line.add {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  color: var(--green);
+}
+.doc-diff-sep {
+  text-align: center;
+  padding: 2px 0;
+  font-size: 0.7rem;
+  opacity: 0.3;
+  color: var(--fg);
+}
+
+/* Version history panel (slide-out) */
+.doc-version-panel {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 300px;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  z-index: 200;
+  box-shadow: 4px 0 16px rgba(0,0,0,0.35);
+  animation: version-slide-in 0.2s ease-out;
+  /* Match the app modal aesthetic so nothing inherits the large body font. */
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 12px;
+  letter-spacing: -0.01em;
+}
+@keyframes version-slide-in {
+  from { opacity: 0; transform: translateX(-30px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.doc-version-panel.hidden {
+  display: none;
+}
+@media (max-width: 768px) {
+  .doc-version-panel {
+    left: 0;
+    right: 0;
+    top: auto;
+    bottom: 0;
+    width: 100%;
+    height: 50vh;
+    border-right: none;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -4px 16px rgba(0,0,0,0.3);
+    /* It's a bottom sheet on mobile — slide UP from the bottom, not in from
+       the left (the desktop animation looked like a black box janking in). */
+    animation: version-slide-up 0.2s ease-out;
+  }
+}
+@keyframes version-slide-up {
+  from { opacity: 0; transform: translateY(30px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.doc-version-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.doc-version-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.doc-version-item {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+.doc-version-item:hover {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-color: var(--fg);
+}
+
+.doc-version-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.doc-version-num {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--fg);
+}
+.doc-version-source {
+  font-size: 10px;
+  color: var(--fg);
+  opacity: 0.5;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.doc-version-time {
+  font-size: 10px;
+  color: var(--fg);
+  opacity: 0.4;
+  margin-left: auto;
+}
+.doc-version-summary {
+  font-size: 11px;
+  color: var(--fg);
+  opacity: 0.5;
+  margin-bottom: 4px;
+}
+
+.doc-version-restore {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.doc-version-restore:hover {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-color: var(--fg);
+}
+/* "latest" badge */
+.doc-version-latest {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+/* Diff preview lines — small and muted so they don't dominate the item. */
+.doc-version-diff {
+  font-size: 10px;
+  line-height: 1.5;
+  opacity: 0.8;
+  margin-top: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-word;
+}
+.doc-version-diff .diff-del { color: var(--red); opacity: 0.75; }
+.doc-version-diff .diff-add { color: #3fb950; }
+
+/* Mobile: doc editor takes over full screen as toggle */
+@media (max-width: 768px) {
+  body.doc-view .doc-editor-pane {
+    /* Force its own full-screen window on mobile. !important on these so an
+       inline width/position left over from desktop drag-resize, or the base
+       desktop split layout (flex: 1; max-width: 70vw; border-left), can never
+       render it as a narrow side pane ("sidebar") on a phone. */
+    position: fixed !important;
+    inset: 0 !important;
+    top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    flex: none !important;
+    z-index: 170;
+    /* Stroke the top edge so the rounded corners read as a curved sheet edge. */
+    border: 1px solid var(--border);
+    border-bottom: none;
+    /* Rounded top corners like the other mobile sheet windows. */
+    border-radius: 14px 14px 0 0;
+    /* Slide up from the bottom (sheet), not in from the side, on mobile. */
+    animation: sheet-enter 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    transform-origin: bottom center;
+  }
+  body.doc-view .doc-divider {
+    display: none;
+  }
+  /* Hide chat behind doc panel on mobile */
+  body.doc-view .chat-container {
+    display: none;
+  }
+  /* Doc + email windows alternate: whichever was opened last is in front.
+     Default (a doc was opened last) → email windows sit BELOW the full-screen
+     doc pane (170) so the draft is on top. When the user re-opens an email
+     window (body.email-front, set by openEmailLibrary / reader open+restore) →
+     the email windows jump ABOVE the doc. Covers the email library AND any open
+     reader window (email-reader-<uid>); both are .modal at z-250 by default. */
+  body.doc-view #email-lib-modal,
+  body.doc-view .modal[id^="email-reader-"] { z-index: 150 !important; }
+  body.doc-view.email-front #email-lib-modal,
+  body.doc-view.email-front .modal[id^="email-reader-"] { z-index: 300 !important; }
+  /* Hide new-session button and hamburger when doc editor is open on mobile */
+  body.doc-view .mobile-new-chat-btn,
+  /* Hide the global hamburger while Compare Mode is active — the compare
+   header has its own close button in the top-right, and overlapping the
+   two looks like a bug. The .compare-active class lives on the chat
+   container, not body, so use :has(). */
+body:has(.compare-active) .hamburger-btn { display: none !important; }
+/* Mobile: hide the sidebar hamburger when a document panel (or notes pane)
+   is open — those sheets cover the whole screen on mobile, so a floating
+   hamburger sticking out over them is just clutter / mis-tap bait. */
+@media (max-width: 768px) {
+  body.doc-view .hamburger-btn,
+  body:has(#notes-pane) .hamburger-btn { display: none !important; }
+}
+  /* Make room for hamburger button alongside the tab/header bars (fallback if shown) */
+  body.doc-view.sidebar-collapsed.hamburger-left .doc-tab-bar,
+  body.doc-view.sidebar-collapsed.hamburger-left .doc-editor-header,
+  body.doc-view.sidebar-collapsed.hamburger-left .doc-md-toolbar {
+    padding-left: 44px;
+  }
+  body.doc-view.sidebar-collapsed.hamburger-right .doc-tab-bar,
+  body.doc-view.sidebar-collapsed.hamburger-right .doc-editor-header,
+  body.doc-view.sidebar-collapsed.hamburger-right .doc-md-toolbar {
+    padding-right: 44px;
+  }

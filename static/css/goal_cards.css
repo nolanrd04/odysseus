@@ -1,0 +1,42 @@
+/* ── Goal cards ──────────────────────────────────────────────────────── */
+/* A goal note is structurally a checklist (note_type='goal') but visually
+   marked with a small Goal pill in the corner + a slightly warmer accent
+   so users can spot it at a glance among regular todos. */
+.note-card-goal {
+  border-left: 3px solid color-mix(in srgb, var(--accent-warm) 80%, transparent);
+}
+.note-goal-pill {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px 2px 5px;
+  background: color-mix(in srgb, var(--accent-warm) 18%, transparent);
+  color: var(--accent-warm);
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+  z-index: 2;
+}
+.note-card-goal .note-card-header {
+  /* Goal cards reserve space for the pill so the title doesn't collide. */
+  padding-left: 56px;
+}
+/* In select mode the left-side checkbox takes the pill's spot — drop it
+   so the row stays legible. */
+.note-card-selectmode.note-card-goal .note-goal-pill { display: none; }
+.note-card-selectmode.note-card-goal .note-card-header { padding-left: 0; }
+/* Description blurb above the checklist on goal cards */
+.note-goal-desc {
+  font-size: 12px;
+  opacity: 0.7;
+  margin: 4px 0 6px;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+

@@ -1,0 +1,124 @@
+/* ── Research synapse visualization ───────────────────────────────
+   Live SVG graph of an in-flight deep-research run. The query is the
+   central node; sub-questions branch off per round; sources are leaf
+   nodes that pop in as they're captured. Pulses indicate activity. */
+.research-synapse {
+  margin: 6px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background:
+    radial-gradient(ellipse at center, color-mix(in srgb, var(--accent, var(--red)) 10%, transparent) 0%, transparent 70%),
+    color-mix(in srgb, var(--panel) 50%, var(--bg));
+  overflow: hidden;
+}
+.research-synapse .rs-stage {
+  height: 200px;
+  position: relative;
+}
+.research-synapse-compact .rs-stage { height: 130px; }
+.research-synapse-compact .rs-meta { padding: 4px 8px 5px; font-size: 10px; }
+.research-synapse-compact .rs-label-sub { font-size: 8px; }
+.research-synapse svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.research-synapse .rs-edge {
+  stroke: var(--border);
+  stroke-width: 1.2;
+  fill: none;
+  opacity: 0.55;
+}
+.research-synapse .rs-edge.rs-edge-firing {
+  stroke: var(--accent, var(--red));
+  stroke-width: 2;
+  opacity: 1;
+  filter: drop-shadow(0 0 4px var(--accent, var(--red)));
+  animation: rs-fire 1.1s ease-out;
+}
+@keyframes rs-fire {
+  0%   { stroke-dasharray: 4 200; stroke-dashoffset: 200; opacity: 0; }
+  20%  { opacity: 1; }
+  100% { stroke-dasharray: 200 4; stroke-dashoffset: -200; opacity: 0.55; }
+}
+.research-synapse .rs-node {
+  fill: var(--bg);
+  stroke: var(--accent, var(--red));
+  stroke-width: 1.5;
+  transition: all 0.3s ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.research-synapse .rs-node-root {
+  fill: var(--accent, var(--red));
+  stroke: var(--accent, var(--red));
+}
+/* Sub & leaf nodes stay inside the accent palette so the whole graph
+   reads as one organism. Leaves are softer/lower-contrast dots that
+   float around their sub — not green-on-stem (which read as palm fronds). */
+.research-synapse .rs-node-sub {
+  stroke: color-mix(in srgb, var(--accent, var(--red)) 70%, var(--fg));
+}
+.research-synapse .rs-node-leaf {
+  stroke: color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+  fill: color-mix(in srgb, var(--accent, var(--red)) 22%, var(--bg));
+}
+.research-synapse .rs-node-new {
+  animation: rs-pop 0.6s ease-out;
+}
+@keyframes rs-pop {
+  0%   { transform: scale(0); opacity: 0; }
+  60%  { transform: scale(1.25); opacity: 1; }
+  100% { opacity: 1; }
+}
+.research-synapse .rs-pulse {
+  fill: var(--accent, var(--red));
+  opacity: 0;
+  animation: rs-pulse 2.6s ease-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+@keyframes rs-pulse {
+  0%   { transform: scale(1); opacity: 0.65; }
+  100% { transform: scale(5); opacity: 0; }
+}
+.research-synapse .rs-label {
+  fill: var(--fg);
+  font-size: 10px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  pointer-events: none;
+  opacity: 0.85;
+}
+.research-synapse .rs-label-sub {
+  font-size: 9px;
+  opacity: 0.7;
+}
+.research-synapse .rs-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 10px 8px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--fg-dim, var(--fg));
+  opacity: 0.85;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.research-synapse .rs-meta .rs-status {
+  color: var(--accent, var(--red));
+  font-weight: 600;
+}
+.research-synapse .rs-meta b {
+  color: var(--fg);
+  font-weight: 600;
+}
+.research-synapse .rs-meta .rs-sep { opacity: 0.4; }
+.research-synapse.rs-complete .rs-pulse { animation: none; opacity: 0; }
+.research-synapse.rs-complete .rs-node-root {
+  fill: var(--color-success, #4caf50);
+  stroke: var(--color-success, #4caf50);
+}
+.research-synapse.rs-complete .rs-meta .rs-status { color: var(--color-success, #4caf50); }
+.research-synapse.rs-error .rs-meta .rs-status { color: var(--red); }
+

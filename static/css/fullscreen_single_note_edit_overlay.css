@@ -1,0 +1,977 @@
+/* ── Fullscreen single-note edit overlay ──────────────── */
+.note-fullscreen-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10500;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  /* Bigger zoom range so the transition reads as a real "tile expands
+     into a page" motion. transform-origin is set per-tile by JS. */
+  transform: scale(0.45);
+  transform-origin: center center;
+  transition: opacity 0.28s ease, transform 0.32s cubic-bezier(0.18, 0.74, 0.24, 1.06);
+  will-change: transform, opacity;
+}
+.note-fullscreen-overlay.open {
+  opacity: 1;
+  transform: scale(1);
+}
+.note-fullscreen-overlay.closing {
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity 0.22s ease, transform 0.22s cubic-bezier(0.4, 0, 0.6, 1);
+}
+.note-fullscreen-header {
+  flex-shrink: 0;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.note-fullscreen-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* Compact the relocated Archive/Delete buttons so two of them fit
+   alongside the back chevron without crowding. */
+.note-fullscreen-actions .note-form-text-btn {
+  padding: 8px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+.note-fullscreen-actions .note-form-text-btn svg {
+  width: 14px;
+  height: 14px;
+  margin-right: 4px;
+}
+.note-fullscreen-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px; height: 40px;
+  background: none;
+  border: none;
+  color: var(--fg);
+  border-radius: 8px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.note-fullscreen-back:active {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.note-fullscreen-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 14px 24px;
+}
+/* The reused .note-form inside the fullscreen overlay should breathe —
+   it was originally sized to slot into a grid cell. */
+.note-fullscreen-body .note-form {
+  max-width: 720px;
+  margin: 0 auto;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+}
+
+/* Bigger touch targets inside the fullscreen overlay. The default form
+   is tuned for the grid-card context (tiny icons fit a 200px wide
+   tile); on a phone-sized full-bleed page we want chunky thumb-sized
+   controls. */
+.note-fullscreen-back svg {
+  width: 28px;
+  height: 28px;
+}
+.note-fullscreen-overlay .note-form-type-pill {
+  padding: 10px 16px;
+  font-size: 14px;
+}
+.note-fullscreen-overlay .note-form-type-pill svg {
+  width: 16px;
+  height: 16px;
+}
+.note-fullscreen-overlay .note-cl-row {
+  padding: 8px 0;
+  gap: 8px;
+  align-items: center;
+}
+.note-fullscreen-overlay .note-cl-grip {
+  font-size: 22px;
+  line-height: 1;
+  padding: 6px 8px;
+  opacity: 0.5;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  /* Pull 4px toward the left edge of the row. */
+  margin-left: -4px;
+}
+.note-fullscreen-overlay .note-cl-grip:active { cursor: grabbing; opacity: 0.9; }
+.note-fullscreen-overlay .note-cl-dot {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  position: relative;
+  /* Generous invisible tap target around the visible dot */
+}
+.note-fullscreen-overlay .note-cl-dot::before {
+  content: '';
+  position: absolute;
+  inset: -12px;
+}
+/* Filled checkmark glyph when the row is marked done — gives a clear
+   visual cue beyond the colored fill. Nudged up 2px so it sits
+   centered in the smaller dot. */
+.note-fullscreen-overlay .note-cl-row.done .note-cl-dot::after {
+  content: '';
+  position: absolute;
+  left: 2px; top: 1px;
+  width: 8px; height: 4px;
+  border-left: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+  transform: rotate(-45deg);
+}
+.note-fullscreen-overlay .note-cl-text {
+  font-size: 14px;
+  padding: 7px 6px;
+  min-height: 32px;
+}
+.note-fullscreen-overlay .note-cl-rm {
+  width: 40px;
+  height: 40px;
+  font-size: 28px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.7;
+  /* Nudge 4px further toward the right edge of the row. */
+  margin-right: -4px;
+}
+.note-fullscreen-overlay .note-cl-rm:active { opacity: 1; }
+/* Lifted row + placeholder while dragging a checklist item. Mirrors
+   the card-drag look so the two interactions feel consistent. */
+.note-cl-row-dragging {
+  box-shadow: 0 12px 28px rgba(0,0,0,0.4);
+  background: var(--bg);
+  border-radius: 8px;
+  opacity: 0.98;
+}
+.note-cl-row-placeholder {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border: 2px dashed color-mix(in srgb, var(--fg) 22%, transparent);
+  border-radius: 6px;
+  margin: 4px 0;
+  box-sizing: border-box;
+  transition: height 0.16s ease;
+}
+.note-fullscreen-overlay .note-form-text-btn {
+  padding: 10px 16px;
+  font-size: 14px;
+}
+.note-fullscreen-overlay .note-form-text-btn svg {
+  width: 16px;
+  height: 16px;
+}
+/* + Add (new checklist item) was tiny — bump for thumbs */
+.note-fullscreen-overlay .note-cl-add {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 18px;
+  font-size: 15px;
+  font-weight: 600;
+  border-radius: 8px;
+  letter-spacing: -0.01em;
+  opacity: 0.85;
+}
+.note-fullscreen-overlay .note-cl-add:active { opacity: 1; }
+/* + Add and the camera/photo button share a row inside checklists, so
+   they're both within thumb reach when editing items. The whole row
+   reads as a single dashed "tap to add" surface — tapping ANYWHERE
+   on it triggers + Add (the photo button stays its own target). */
+.note-fullscreen-overlay .note-cl-add-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 4px 8px 4px 4px;
+  border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.note-fullscreen-overlay .note-cl-add-row:active {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-color: color-mix(in srgb, var(--fg) 36%, transparent);
+}
+.note-fullscreen-overlay .note-cl-add-row .note-cl-add {
+  flex: 1;
+  justify-content: flex-start;
+  background: transparent;
+  border: none;
+}
+.note-fullscreen-overlay .note-cl-add-row .note-cl-add { margin: 0; }
+.note-fullscreen-overlay .note-cl-add-row .note-form-photo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: auto;
+  height: 36px;
+  padding: 0 12px 0 10px;
+  border-radius: 8px;
+  /* No border / no background — the surrounding +Add row provides the
+     bordered container, the camera is just an icon inside it. */
+  border: none;
+  background: transparent;
+}
+.note-fullscreen-overlay .note-cl-add-row .note-form-photo-btn::before {
+  content: '+';
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1;
+  opacity: 0.85;
+}
+.note-fullscreen-overlay .note-cl-add-row .note-form-photo-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Read-mode overlay shown over the textarea for plain notes. Renders
+   linkified content so URLs are tappable. Click anywhere off a link
+   to flip to edit mode (focuses the underlying textarea). */
+.note-form-content-reader {
+  font-size: 15px;
+  line-height: 1.55;
+  padding: 10px 6px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  color: var(--fg);
+  cursor: text;
+  min-height: 40px;
+}
+.note-form-content-reader a {
+  color: var(--accent, var(--red));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.note-form-content-reader a:active { opacity: 0.7; }
+
+/* Per-row read mode for todo items — replaces the bare <input> with a
+   clickable linkified span when the value contains a URL. */
+.note-fullscreen-overlay .note-cl-text-reader {
+  flex: 1;
+  padding: 7px 6px;
+  font-size: 14px;
+  line-height: 1.4;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  word-break: break-word;
+  color: var(--fg);
+  cursor: text;
+}
+.note-fullscreen-overlay .note-cl-text-reader a {
+  color: var(--accent, var(--red));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.note-fullscreen-overlay .note-cl-text-reader a:active { opacity: 0.7; }
+.note-fullscreen-overlay .note-cl-row.done .note-cl-text-reader {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+/* Reminder bell + other header icon-buttons. Tightened down 2px so
+   the bell sits more proportionally next to the title field. */
+.note-fullscreen-overlay .note-form-icon-btn {
+  width: 36px;
+  height: 36px;
+}
+.note-fullscreen-overlay .note-form-icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* The plain-note textarea was rows="4" — fine for an in-grid card but
+   cramped in fullscreen. Let it grow to fill the available height so
+   writing feels like a real notepad, not a tweet box. The read-mode
+   reader inherits the same minimum so the layout doesn't jump when
+   the user taps to edit. */
+.note-fullscreen-overlay .note-form-content,
+.note-fullscreen-overlay .note-form-content-reader {
+  min-height: 55vh;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+/* Tags input is JS-relocated into the bottom actions row, pinned
+   left of Cancel/Update. Style it as a dashed pill so it reads as
+   metadata rather than another control. */
+.note-fullscreen-overlay .note-form-actions-group .note-form-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  padding: 8px 10px;
+  margin: 0 auto 0 0;
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--fg) 16%, transparent);
+  border-radius: 6px;
+  text-align: left;
+}
+
+/* Reorganized meta-row layout for fullscreen: color picker pinned to
+   the LEFT, type-toggle (Note/Todo/Draw) shoved to the RIGHT, with
+   the photo button next to the color picker. Tags are moved up into
+   the form header (next to the reminder bell) via JS. */
+.note-fullscreen-overlay .note-form-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+}
+.note-fullscreen-overlay .note-color-picker { order: 1; }
+.note-fullscreen-overlay .note-form-photo-btn { order: 2; }
+.note-fullscreen-overlay .note-form-type-seg {
+  order: 3;
+  margin-left: auto;  /* shove right */
+  /* The overlay enlarges the pills (padding 10px), but the base seg is only
+     28px tall with overflow:hidden — which clipped them. Grow the track so
+     the bigger touch targets fit. */
+  height: 40px;
+  border-radius: 12px;
+}
+.note-fullscreen-overlay .note-form-actions-group {
+  order: 4;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.note-fullscreen-overlay .note-form-actions-group .note-form-cancel,
+.note-fullscreen-overlay .note-form-actions-group .note-form-save {
+  flex: 0 0 auto;
+}
+
+.notes-mobile-grabber { display: none; }
+/* Notes panel: mounted like a window, docked to the right on desktop. */
+.notes-pane-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  pointer-events: none;
+  animation: notes-backdrop-fade-in 180ms ease both;
+}
+.notes-pane-backdrop .notes-pane {
+  pointer-events: auto;
+}
+.notes-pane-backdrop:has(.notes-pane.modal-right-docked),
+.notes-pane-backdrop:has(.notes-pane.modal-left-docked) {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  pointer-events: none;
+}
+.notes-pane-backdrop:has(.notes-pane.modal-right-docked) .notes-pane,
+.notes-pane-backdrop:has(.notes-pane.modal-left-docked) .notes-pane {
+  pointer-events: auto;
+}
+.notes-pane-backdrop:has(.notes-pane.notes-window-fullscreen) {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+@keyframes notes-backdrop-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.notes-pane {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  width: min(880px, 92vw);
+  height: min(80vh, 820px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  box-sizing: border-box;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: -0.015em;
+  /* Smooth open: scale up + fade in from the centre. */
+  animation: notes-pane-enter 200ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  transform-origin: center center;
+  will-change: transform, opacity;
+}
+.notes-pane.modal-right-docked {
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  box-shadow: -4px 0 14px rgba(0, 0, 0, 0.18);
+  transition: none !important;
+}
+.notes-pane.modal-left-docked {
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  box-shadow: 4px 0 14px rgba(0, 0, 0, 0.18);
+  transition: none !important;
+}
+@keyframes notes-pane-enter {
+  from { transform: scale(0.96); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+.notes-pane.notes-pane-leaving {
+  animation: notes-pane-leave 160ms cubic-bezier(0.4, 0, 1, 1) both;
+  pointer-events: none;
+}
+@keyframes notes-pane-leave {
+  from { transform: scale(1);    opacity: 1; }
+  to   { transform: scale(0.96); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .notes-pane,
+  .notes-pane.notes-pane-leaving { animation: none; }
+}
+.notes-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: space-between;
+  padding: 0 0 6px;
+  margin: 10px 10px 0;
+  border-bottom: 1px solid var(--border);
+  background: inherit;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  min-height: 30px;
+  overflow: hidden;
+}
+
+/* Archive mode — sepia tint over the panel + a header strip so it's clearly
+   a different view. Active reminders sort + glow rules don't apply here. */
+.notes-pane-archive {
+  background: color-mix(in srgb, #b48a4a 6%, var(--bg));
+}
+.notes-pane-archive .notes-pane-header {
+  background: color-mix(in srgb, #b48a4a 12%, var(--bg));
+  border-bottom-color: color-mix(in srgb, #b48a4a 35%, var(--border));
+}
+.notes-pane-archive .notes-pane-body {
+  background: color-mix(in srgb, #b48a4a 4%, var(--bg));
+}
+/* Smooth the archive↔active swap so the colour tint eases in/out instead
+   of snapping. Covers the pane, its header, and its body. */
+.notes-pane,
+.notes-pane .notes-pane-header,
+.notes-pane .notes-pane-body {
+  transition: background 0.28s ease, border-color 0.28s ease;
+}
+.notes-pane-archive .notes-pane-title::after {
+  content: 'Archive';
+  margin-left: 8px;
+  padding: 2px 8px 2px 22px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #b48a4a;
+  background-color: color-mix(in srgb, #b48a4a 18%, transparent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b48a4a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2' y='3' width='20' height='5' rx='1'/%3E%3Cpath d='M4 8v11a2 2 0 002 2h12a2 2 0 002-2V8'/%3E%3Cpath d='M10 12h4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 6px center;
+  background-size: 11px 11px;
+  border: 1px solid color-mix(in srgb, #b48a4a 45%, transparent);
+  border-radius: 10px;
+  vertical-align: middle;
+}
+/* Hide the "Add a to-do…" quick-add bar in archive view — you can't add
+   new items from the archive. */
+.notes-pane-archive .notes-quick-add { display: none !important; }
+.notes-pane-archive .note-card {
+  background: color-mix(in srgb, #b48a4a 8%, var(--panel));
+  border-color: color-mix(in srgb, #b48a4a 25%, var(--border));
+}
+.notes-pane-header .doc-action-icon-btn {
+  flex-shrink: 0;
+}
+.notes-pane-header .notes-pane-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 1;
+}
+.notes-pane-footer {
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+}
+.notes-new-btn {
+  background: none;
+  border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  border-radius: 6px;
+  padding: 6px 0;
+  flex: 1;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: border-color 0.15s, color 0.15s;
+}
+.notes-new-btn:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.notes-pane-title {
+  /* Match the other tool headers (.modal-header h4). */
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  color: var(--red);
+  white-space: nowrap;
+  height: 24px;
+  line-height: 22px;
+  padding: 0 6px;
+  margin: 6px 0 0 0;
+  display: inline-block;
+  vertical-align: middle;
+  /* Optical nudge — sits 1px above its row baseline on desktop, more on mobile
+     where the surrounding controls are taller. Overridden in the mobile
+     media block below. */
+  position: relative;
+  top: -1px;
+  box-sizing: border-box;
+}
+@media (max-width: 768px) {
+  .notes-pane-title { top: -4px; }
+  .notes-pane-title svg {
+    position: relative;
+    top: -2px;
+  }
+  /* Mobile header is tight — keep Archive / Toggle View icon-only. */
+  .notes-header-btn-label { display: none; }
+  .notes-header-text-btn { width: 32px !important; padding: 0 !important; }
+}
+.notes-header-btn-label {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+.notes-header-text-btn {
+  width: auto !important;
+  padding: 0 8px !important;
+}
+.notes-pane-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  scrollbar-width: thin;
+}
+
+.note-card.note-card-sliding-out {
+  transform: translateX(120%);
+  opacity: 0;
+  transition: transform 0.32s ease-in, opacity 0.32s ease-in;
+  pointer-events: none;
+}
+
+/* ⋯ corner menu button (replaced the copy corner button) */
+.note-card-corner-menu {
+  background: none;
+  border: none;
+  color: var(--fg);
+  cursor: pointer;
+  padding: 2px;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  display: inline-flex;
+}
+.note-card-corner-menu:hover { opacity: 0.9; }
+/* Dropdown spawned by the ⋯ menu */
+.note-corner-menu-dropdown {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  padding: 4px;
+  min-width: 168px;
+  font-size: 12px;
+  animation: ncm-pop 0.12s ease-out both;
+}
+@keyframes ncm-pop { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+.note-corner-menu-dropdown .ncm-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.note-corner-menu-dropdown .ncm-item:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+/* "Agent" tag on a note that has a linked agent chat session */
+.note-agent-tag {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+  color: var(--accent, var(--red));
+  border-radius: 999px;
+  padding: 3px 10px 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 2px;
+  transition: background 0.12s;
+}
+.note-agent-tag:hover { background: color-mix(in srgb, var(--accent, var(--red)) 24%, transparent); }
+
+.note-card {
+  /* Same tint that .doclib-card uses so a default (uncolored) note
+     visually separates from the panel background it sits on. */
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  /* Extra right padding so the corner buttons (pin / edit / copy / done)
+     never collide with the title, and a min-height so an empty/short
+     note is still tall enough to fit that row of corner controls. */
+  padding: 10px 14px;
+  padding-right: 30px;
+  min-height: 64px;
+  cursor: default;
+  transition: background 0.15s;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* Keep drawings/images clipped to the card so they can't spill outside it —
+     but allow a small overhang (the pin bubble sits at right:-8px and would
+     otherwise be cropped). overflow-clip-margin extends the clip-box without
+     letting full images bleed past. */
+  overflow: clip;
+  overflow-clip-margin: 14px;
+  /* Don't shrink inside the flex-column list pane — otherwise cards squish to
+     fit (clipped/too short) and the container never overflows, so it won't
+     scroll. Keeping natural height makes the list overflow → scrollable. */
+  flex-shrink: 0;
+}
+.note-card:hover:not([class*="note-color-"]) {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+.note-card { position: relative; }
+.note-card-image { max-width: 100%; }
+
+/* Mobile: bigger, more legible note cards + a sticky quick-add bar so you can
+   add a to-do without scrolling back up; and keep media inside the card. */
+@media (max-width: 768px) {
+  .note-card { padding: 14px 16px; padding-right: 34px; min-height: 84px; font-size: 15px; }
+  .note-card-image { max-height: 260px; max-width: 100%; object-fit: cover; }
+  /* Sticky create-todo bar — pin it to the top of the scrolling list pane.
+     Safe now that the cards no longer shrink (the list actually overflows). */
+  .notes-quick-add {
+    position: sticky;
+    top: -8px;
+    z-index: 12;
+    flex-shrink: 0;
+    margin-top: 0;
+    box-shadow: 0 -8px 0 8px var(--panel), 0 8px 0 0 var(--panel);
+  }
+}
+.note-card-pinned {
+  border-top: 2px solid color-mix(in srgb, var(--fg) 30%, transparent);
+}
+.note-card.note-card-reminder-fired {
+  animation: note-reminder-pulse 1.2s ease-in-out 2;
+}
+@keyframes note-reminder-pulse {
+  0%, 100% {
+    box-shadow:
+      inset 0 2px 0 0 color-mix(in srgb, var(--fg) 14%, transparent),
+      0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 0%, transparent);
+  }
+  50% {
+    box-shadow:
+      inset 0 2px 0 0 color-mix(in srgb, var(--fg) 14%, transparent),
+      0 0 0 5px color-mix(in srgb, var(--accent, var(--red)) 26%, transparent),
+      0 0 18px color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+  }
+}
+/* Sticky outside glow — applied to the exact note whose reminder fired.
+   It stays until the user interacts with that card. */
+.note-card.note-card-reminder-fired-sticky {
+  position: relative;
+  outline: 1px solid color-mix(in srgb, var(--accent, var(--red)) 36%, transparent);
+  outline-offset: 2px;
+  animation: note-reminder-glow 1.6s ease-in-out infinite;
+}
+@keyframes note-reminder-glow {
+  0%, 100% {
+    box-shadow:
+      inset 0 2px 0 0 color-mix(in srgb, var(--fg) 14%, transparent),
+      0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 14%, transparent),
+      0 0 14px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+  }
+  50% {
+    box-shadow:
+      inset 0 2px 0 0 color-mix(in srgb, var(--fg) 14%, transparent),
+      0 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 22%, transparent),
+      0 0 26px color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+  }
+}
+.note-card-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Hover-only buttons (Google Keep style) */
+.note-card-select,
+.note-card-pin {
+  position: absolute;
+  top: -8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg);
+  opacity: 0.7;
+  z-index: 2;
+  transition: opacity 0.15s, transform 0.15s, background 0.15s;
+}
+.note-card-select { left: -8px; }
+.note-card-pin    { right: -8px; }
+/* Pencil + checkmark glyphs both have empty space along the top of their
+   24×24 viewBox, so flex-centering leaves them sitting visually high.
+   Nudge the inner SVG down a touch to compensate. */
+.note-card-edit-corner svg,
+.note-card-done svg {
+  position: relative;
+  top: 0.5px;
+}
+.note-card-edit-corner {
+  position: absolute;
+  /* Both Edit + Done at top-right: Edit on the left (right:40px),
+     Done on the right (right:6px). */
+  top: 6px; right: 40px;
+  width: 28px; height: 28px;
+  /* Fully invisible at rest. Materializes (with a solid panel fill blocking
+     any text underneath) only when the card is hovered or the button is
+     focused. Same rule on touch — opacity stays 0 until the card is tapped
+     to expose actions. */
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer; padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg); opacity: 0;
+  touch-action: manipulation;
+  transition: opacity 0.15s, background 0.15s, border-color 0.15s;
+  z-index: 2;
+}
+.note-card:hover .note-card-edit-corner {
+  opacity: 0.85;
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+}
+.note-card-edit-corner:hover,
+.note-card-edit-corner:focus-visible {
+  opacity: 1 !important;
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel)) !important;
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border)) !important;
+}
+@media (hover: none) {
+  .note-card-edit-corner {
+    opacity: 0.7;
+    background: var(--panel);
+    border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+  }
+}
+/* Copy corner — bottom-right counterpart to the edit/done corner buttons.
+   Round, subtle, hover-reveal on desktop and always faintly visible on
+   touch so mobile users can tap it without needing hover. */
+.note-card-copy-corner {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  top: auto;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg);
+  opacity: 0;
+  touch-action: manipulation;
+  transition: opacity 0.15s, background 0.15s, border-color 0.15s;
+  z-index: 2;
+}
+.note-card:hover .note-card-copy-corner {
+  opacity: 0.7;
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+}
+.note-card-copy-corner:hover,
+.note-card-copy-corner:focus-visible {
+  opacity: 1 !important;
+  background: color-mix(in srgb, var(--accent, var(--red)) 18%, var(--panel)) !important;
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border)) !important;
+}
+@media (hover: none) {
+  .note-card-copy-corner {
+    opacity: 0.6;
+    background: var(--panel);
+    border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+  }
+}
+/* Pin button on mobile — only reveal once the user has long-pressed to
+   enter rearrange (drag) mode. Outside drag mode the card stays clean. */
+body.notes-mobile-mode.notes-drag-mode .note-card-pin {
+  display: flex !important;
+  opacity: 0.7;
+}
+body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
+  opacity: 1;
+}
+/* Unarchive corner reuses the pencil's spot in archive view. */
+.note-card-unarchive-corner:hover,
+.note-card-unarchive-corner:focus-visible {
+  background: color-mix(in srgb, var(--accent) 22%, transparent) !important;
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border)) !important;
+  color: var(--accent);
+}
+
+/* "Done" pill in the bottom-right of every active note card. Visible-only on
+   hover (and always on touch) so it's clearly readable but doesn't clutter
+   the grid at rest. Distinct from the edit pencil so it's obvious what it
+   does — green checkmark + label, not just an icon. */
+/* Matches .note-card-edit-corner footprint (22×22 circle), just anchored
+   to the bottom-right corner instead of top-right. */
+.note-card-done {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--green, #98c379);
+  opacity: 0;
+  touch-action: manipulation;
+  transition: opacity 0.15s, background 0.15s, border-color 0.15s;
+  z-index: 2;
+}
+.note-card:hover .note-card-done {
+  opacity: 0.85;
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+}
+.note-card-done:hover,
+.note-card-done:focus-visible {
+  opacity: 1 !important;
+  background: color-mix(in srgb, var(--green, #98c379) 22%, var(--panel)) !important;
+  border-color: color-mix(in srgb, var(--green, #98c379) 50%, var(--border)) !important;
+}
+@media (hover: none) {
+  .note-card-done {
+    opacity: 0.7;
+    background: var(--panel);
+    border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+  }
+}
+/* Edit + Done are now side-by-side at top-right by default — title-only
+   fallback no longer needed. */
+.note-card-selectmode .note-card-done { display: none !important; }
+
+/* Copy corner — bottom-right of the card. Same opaque-fill pattern as
+   trash/unarchive so the underlying text/image never bleeds through. */
+.note-card-corner-copy {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg);
+  visibility: hidden;
+  touch-action: manipulation;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  z-index: 2;
+}
+.note-card-corner-copy svg { position: relative; top: 1px; opacity: 0.85; transition: opacity 0.15s; }
+.note-card:hover .note-card-corner-copy { visibility: visible; }
+.note-card-corner-copy:hover,
+.note-card-corner-copy:focus-visible {
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  color: var(--accent);
+}
+.note-card-corner-copy:hover svg { opacity: 1; }
+@media (hover: none) {
+  .note-card-corner-copy { visibility: visible; }
+  .note-card-corner-copy svg { opacity: 0.7; }
+}
+/* Copy stays on every active card regardless of body shape — Edit + Done
+   live at the top-right pair, so the bottom-right copy slot is always
+   free. Hidden only in select mode. */
+.note-card-selectmode .note-card-corner-copy { display: none !important; }
+

@@ -1,0 +1,160 @@
+    /* ── Appearance visibility toggles ── */
+    .vis-toggles {
+      display: flex;
+      flex-direction: column;
+    }
+    .vis-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      padding: 5px 6px;
+      border-radius: 4px;
+      transition: background 0.12s;
+    }
+    .vis-row:hover {
+      background: color-mix(in srgb, var(--fg) 5%, transparent);
+    }
+    .vis-row input[type="checkbox"] {
+      display: none;
+    }
+    .vis-icon {
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      color: color-mix(in srgb, var(--fg) 40%, transparent);
+    }
+    .vis-icon-text {
+      font-size: 10px;
+      font-weight: 700;
+      font-family: inherit;
+      letter-spacing: -0.5px;
+    }
+    .vis-label {
+      flex: 1;
+      font-size: 12px;
+      color: var(--fg);
+      user-select: none;
+    }
+    .vis-switch {
+      position: relative;
+      width: 30px;
+      height: 16px;
+      background: color-mix(in srgb, var(--fg) 15%, transparent);
+      border-radius: 8px;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+    .vis-switch::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 12px;
+      height: 12px;
+      background: var(--panel);
+      border-radius: 50%;
+      transition: transform 0.2s;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+    }
+    .vis-row input:checked + .vis-switch {
+      background: var(--red);
+    }
+    .vis-row input:checked + .vis-switch::after {
+      transform: translateX(14px);
+    }
+    .vis-row input:checked ~ .vis-icon,
+    .vis-row:has(input:checked) .vis-icon {
+      color: var(--fg);
+    }
+    /* Compare model selector — match the calendar modal's clean header
+       (no border underline). */
+    #compare-model-overlay .modal-header h4 {
+      pointer-events: none;
+    }
+    /* Compare model selector: keep manually-resized/tiny windows contained.
+       Picker dropdowns are appended to document.body, so the card itself can
+       clip and scroll without cropping the dropdown list. */
+    #compare-model-overlay .modal-content {
+      display: flex;
+      flex-direction: column;
+      max-height: min(720px, calc(100dvh - 48px));
+      overflow: hidden;
+      min-height: 180px;
+    }
+    #compare-model-overlay .modal-body {
+      overflow: auto;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    .vis-hint {
+      font-size: 10px;
+      color: color-mix(in srgb, var(--fg) 30%, transparent);
+      font-weight: 400;
+      margin-left: 2px;
+    }
+    /* Settings toggle — admin-only lock indicator */
+    .ui-vis-lock {
+      display: none;
+    }
+    /* (legacy toolbar-toggle styles removed — now using .vis-* classes) */
+
+    /* Demo highlight pulse */
+    .odysseus-highlight {
+      outline: 2px solid var(--accent, var(--red)) !important;
+      outline-offset: 1px;
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+      animation: ody-pulse 1.5s ease-in-out infinite;
+      z-index: 100;
+      position: relative;
+    }
+    @keyframes ody-pulse {
+      0%, 100% { outline-color: var(--accent, var(--red)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent); }
+      50%       { outline-color: color-mix(in srgb, var(--accent, var(--red)) 40%, transparent); box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 8%, transparent); }
+    }
+    /* Floating breathing halo. Rendered as a body-level div positioned over
+       the target, so we don't fight the target's own outline / box-shadow /
+       overflow chain. JS keeps it in sync with the target's bounding rect. */
+    .tour-halo {
+      position: fixed;
+      pointer-events: none;
+      border: 3px solid var(--accent, var(--red));
+      border-radius: 10px;
+      z-index: 10000;
+      animation: ody-breathe 1.4s ease-in-out infinite;
+      opacity: 0;
+      transform: scale(0.94);
+      transition: opacity 0.35s ease-out, transform 0.35s ease-out;
+    }
+    .tour-halo.tour-fade-in {
+      opacity: 1;
+      transform: scale(1);
+    }
+    @keyframes ody-breathe {
+      0%, 100% {
+        box-shadow: 0 0 0 3px  color-mix(in srgb, var(--accent, var(--red)) 55%, transparent),
+                    0 0 22px 4px color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
+        border-color: var(--accent, var(--red));
+      }
+      50% {
+        box-shadow: 0 0 0 6px  color-mix(in srgb, var(--accent, var(--red)) 30%, transparent),
+                    0 0 40px 14px color-mix(in srgb, var(--accent, var(--red)) 70%, transparent);
+        border-color: color-mix(in srgb, var(--accent, var(--red)) 80%, transparent);
+      }
+    }
+    /* While the tour is active, lift overflow:hidden on common clipping
+       ancestors so the halo around a highlighted child isn't cropped. */
+    body.tour-active .sidebar,
+    body.tour-active .sidebar-inner,
+    body.tour-active .chat-input-bar,
+    body.tour-active .chat-input-top,
+    body.tour-active .chat-input-wrap,
+    body.tour-active .chat-input-right,
+    body.tour-active .mode-toggle,
+    body.tour-active .model-picker-wrap {
+      overflow: visible !important;
+    }
+

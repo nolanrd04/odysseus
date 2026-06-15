@@ -1,0 +1,63 @@
+/* ── Generate Visual Report button (deep research) ── */
+.view-report-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 8px 16px;
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.88em;
+  font-weight: 500;
+  transition: background 0.15s ease;
+  cursor: pointer;
+}
+.view-report-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+}
+.view-report-btn svg {
+  flex-shrink: 0;
+}
+.report-btn-wrap {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.view-report-btn.chat-about-btn {
+  border-color: color-mix(in srgb, var(--fg) 22%, transparent);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+.view-report-btn.chat-about-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+.view-report-btn:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.report-spinner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.88em;
+  color: var(--fg);
+  opacity: 0.7;
+}
+.report-spinner-text {
+  font-weight: 500;
+}
+.report-spinner-dots::after {
+  content: '';
+  animation: report-dots 1.4s steps(4, end) infinite;
+}
+@keyframes report-dots {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+  100% { content: ''; }
+}
+
