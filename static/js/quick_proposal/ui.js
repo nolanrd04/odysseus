@@ -100,6 +100,14 @@ const STYLES = `
     color: color-mix(in srgb, var(--fg) 55%, transparent);
 }
 .qp-file-chosen { font-size: 13px; color: var(--accent, #0af); margin-top: 6px; font-weight: 500; }
+.qp-run-name-input {
+    width: 100%; max-width: 480px; box-sizing: border-box;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border);
+    border-radius: 6px; color: var(--fg); padding: 8px 10px;
+    font-size: 13px; font-family: inherit;
+}
+.qp-run-name-input:focus { outline: none; border-color: var(--accent, #0af); }
 .qp-notes {
     width: 100%; max-width: 480px; box-sizing: border-box;
     background: color-mix(in srgb, var(--fg) 5%, var(--bg));
@@ -336,6 +344,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                     <div class="qp-file-chosen" id="qp-file-chosen" style="display:none"></div>
                 </div>
                 <input type="file" id="qp-file-input" accept=".pdf,.jpg,.jpeg,.png" style="display:none">
+                <input type="text" class="qp-run-name-input" id="qp-run-name" placeholder="Run name (optional)…">
                 <textarea class="qp-notes" id="qp-notes" placeholder="Optional notes for this job…"></textarea>
                 <div class="qp-model-row">
                     <label class="qp-model-label" for="qp-model-select">Classifying Model</label>
@@ -585,6 +594,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
     const contentArea  = overlay.querySelector('#qp-content');
     const sidebarPages = overlay.querySelector('#qp-sidebar-pages');
     const mainOutput   = overlay.querySelector('#qp-main-output');
+    const runName      = overlay.querySelector('#qp-run-name')?.value.trim() || '';
     const notes        = overlay.querySelector('#qp-notes').value;
     const selectedJobs = [...overlay.querySelectorAll('#qp-jobs-grid input[type=checkbox]:checked')].map(cb => cb.value);
     const uncheckedCbs = [...overlay.querySelectorAll('#qp-jobs-grid input[type=checkbox]:not(:checked)')];
@@ -633,7 +643,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         try {
             const fd = new FormData();
             fd.append('files', file);
-            const res = await fetch('/api/upload', { method: 'POST', body: fd });
+            const res = await fetch('/api/upload/qp', { method: 'POST', body: fd });
             if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
             uploadId = (await res.json()).files[0].id;
             filename = file.name;
@@ -651,7 +661,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         const res = await fetch('/api/quick_proposal/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ upload_id: uploadId, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId }),
+            body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId }),
         });
         if (!res.ok) throw new Error(`Run failed: ${res.status}`);
         runId = (await res.json()).run_id;
@@ -1825,7 +1835,8 @@ export function buildRunsPanel({ onClose, onSelectRun, onOpenRun }) {
                 row.className = 'qp-run-row';
                 row.innerHTML = `
                     <div class="qp-run-info">
-                        <div class="qp-run-filename">${_escHtml(run.filename || run.upload_id)}</div>
+                        <div class="qp-run-filename">${_escHtml(run.run_name || run.filename || run.upload_id)}</div>
+                        ${run.run_name && run.filename ? `<div class="qp-run-pdf-name">${_escHtml(run.filename)}</div>` : ''}
                         <div class="qp-run-meta">${_escHtml(date)} · <span class="${statusClass}">${_escHtml(run.status || 'unknown')}</span></div>
                         ${run.notes ? `<div class="qp-run-notes">${_escHtml(run.notes)}</div>` : ''}
                     </div>

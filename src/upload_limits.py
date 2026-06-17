@@ -7,6 +7,9 @@ from fastapi import HTTPException, UploadFile
 DEFAULT_CHAT_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
 CHAT_UPLOAD_MAX_BYTES_ENV = "ODYSSEUS_CHAT_UPLOAD_MAX_BYTES"
 
+DEFAULT_QP_UPLOAD_MAX_BYTES = 200 * 1024 * 1024
+QP_UPLOAD_MAX_BYTES_ENV = "ODYSSEUS_QP_UPLOAD_MAX_BYTES"
+
 
 def format_byte_limit(limit: int) -> str:
     if limit % (1024 * 1024) == 0:
@@ -31,6 +34,10 @@ def read_byte_limit_env(name: str, default: int) -> int:
 
 def get_chat_upload_max_bytes() -> int:
     return read_byte_limit_env(CHAT_UPLOAD_MAX_BYTES_ENV, DEFAULT_CHAT_UPLOAD_MAX_BYTES)
+
+
+def get_qp_upload_max_bytes() -> int:
+    return read_byte_limit_env(QP_UPLOAD_MAX_BYTES_ENV, DEFAULT_QP_UPLOAD_MAX_BYTES)
 
 
 # Per-route upload byte-limits, single-sourced here (issue #3364). Each is

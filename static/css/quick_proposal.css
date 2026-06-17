@@ -57,6 +57,11 @@
     font-size: 13px; font-weight: 500;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.qp-run-pdf-name {
+    font-size: 11px; margin-top: 1px;
+    color: color-mix(in srgb, var(--fg) 45%, transparent);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .qp-run-meta {
     font-size: 11px; margin-top: 2px;
     color: color-mix(in srgb, var(--fg) 50%, transparent);

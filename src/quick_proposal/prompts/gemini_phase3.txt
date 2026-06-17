@@ -24,6 +24,12 @@ crop_page(page_idx, x1, y1, x2, y2, dpi=200)
     Use when information lies outside a Phase 1 bbox or you need to pan to an adjacent area.
     No bbox_id needed — specify the page number and coordinates directly.
     Coordinates are percentages (0–100): x1=left, y1=top, x2=right, y2=bottom.
+    Do not call the crop tool at 100% zoom unless you want the full picture again. 
+    0, 0, 100, 100 will just be the full image.
+    (3.33, 12.30, 45.60, 55.43) is an example of a far more focused image.
+    Another highly valuable use case is to move existing bounding boxes. For example, if you
+    enhanhance an image with bounding box 25, 50, 45, 50 but the text you need goes off to the right,
+    you could just crop to 10, 50, 30, 50 to move the image right.
 
 enhance_subregion(parent_bbox_id, x1, y1, x2, y2, dpi=300)
   → Zooms into a sub-area of an existing Phase 1 bbox. Supply coordinates relative to
@@ -37,6 +43,21 @@ index_write(key, value, source_bbox_id, confidence)
     source_bbox_id: the bbox_id of the region you read this from (e.g. "p4_r2").
     confidence: "high", "medium", or "low".
     Always record the source so the manager can verify.
+
+list_images()
+  → Returns a JSON array of all images already available in this session.
+    Includes Phase 1 page thumbnails (p0_thumbnail, p1_thumbnail, …) loaded at startup,
+    plus every image rendered so far via enhance_region, crop_page, or enhance_subregion.
+    Each entry: {"image_id": "...", "desc": "..."}.
+    Call this at the start of a session to see which pages are immediately available,
+    or any time you want to know what has already been rendered.
+
+get_image(image_id)
+  → Retrieves a previously rendered image by its image_id without re-rendering.
+    Every tool response that returns an image includes [image_id: ...] in its text —
+    use that ID here to get the same image again instantly.
+    Faster than re-calling crop_page or enhance_region for a view you already requested.
+    Use get_image instead of crop_page when revisiting a page you already viewed.
 
 ---
 
@@ -132,7 +153,9 @@ Work through the plan in this order — highest-yield sheets first:
 
 CONFIDENCE ENFORCEMENT: Before calling index_write with confidence="low" or confidence="medium",
 you MUST call enhance_region (or crop_page) on the source region first to visually confirm the value.
-A low/medium-confidence index_write without a prior visual inspection is not allowed.
+A low/medium-confidence index_write without a prior visual inspection is not allowed. Furthermore, if a value is
+obscured by the enhancement or a confidence score is low for an item, consider moving the boundiv box with 
+the crop tool to get a refocused view of the area.
 If enhance_region does not resolve the ambiguity, write the value with confidence="low" and flag it
 in your summary for manager review — do not guess.
 
@@ -163,9 +186,9 @@ road_LF — Write as a JSON array. NEVER return null if stationing or dimension 
 
   Example value:
   [
-    {"road_name": "Wilhelm Way", "length": 340.45, "road_type": "new_construction",
+    {"road_name": "Road 1", "length": 340.45, "road_type": "new_construction",
      "source": "station_label", "pages": ["5_r0"], "additional_comments": "STA 10+00 to STA 13+40.45"},
-    {"road_name": "Midway Ave", "length": 791.32, "road_type": "improvement_to_existing",
+    {"road_name": "Road 2", "length": 791.32, "road_type": "improvement_to_existing",
      "source": "station_label", "pages": ["6_r6"],
      "additional_comments": "STA 18+50 is the project boundary on existing road — not a sheet break"}
   ]
@@ -209,7 +232,7 @@ pathway_paving_present — Write true if ANY road in the plan set has a paved mu
   Write false if no such path exists.
 
 pathway_paving_roads — Write as a JSON array of road names where a paved multi-use trail
-  exists. Example: ["McGuire Rd"]. Write [] if pathway_paving_present is false or null.
+  exists. Example: ["Road 1"]. Write [] if pathway_paving_present is false or null.
   For each road listed here, ensure the sidewalk_sides entry for that road excludes the
   trail side (write "none" or note the exclusion in additional_comments).
 
@@ -231,7 +254,7 @@ water_main_LF — Same approach as sewer_main_LF but for water main. Read actual
 
 existing_road_widening_present — Write as a JSON array of road names where the scope includes
   widening or pavement addition to an already-built road (e.g. adding a turn lane, widening a
-  collector, pave widening for frontage). Example: ["McGuire Rd", "Midway Ave"].
+  collector, pave widening for frontage). Example: ["Road 1", "Road 2"].
   Write [] if no widening scope exists. This triggers separate paving widening line items.
 
 proposed_ped_ramp_count — Count of ADA pedestrian curb ramps explicitly shown or called out on
@@ -277,7 +300,12 @@ When done, call index_write("extraction_complete", true, null, "high").
 
 After each enhance_region call, briefly state what you observed before writing to the index.
 Example: "I can see the stationing label 'STA: 10+00 TO STA: 18+79.62' on the road title. That
-gives 879.62 LF for Raghorn Drive. Writing to road_LF_segments."
+gives 879.62 LF for Raghorn Drive. Writing to road_LF_segments." Questions or comments of importance
+can be written to the index with "questions": [] or "comments": []. For example:
+[
+  {"questions": ["What fields are most important?"],
+  "comments": ["The field X has low confidence because the actual value was obstructed by drawing lines."]}
+]
 
 After all extraction is complete, output a brief summary:
 - Fields extracted with high confidence

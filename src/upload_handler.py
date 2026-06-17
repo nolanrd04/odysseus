@@ -565,7 +565,7 @@ class UploadHandler:
             logger.error(f"Failed to get upload stats: {e}")
             return {"error": str(e)}
     
-    def save_upload(self, u: UploadFile, client_ip: str, owner: str = None) -> dict:
+    def save_upload(self, u: UploadFile, client_ip: str, owner: str = None, max_size: int | None = None) -> dict:
         """Save uploaded file with enhanced security and organization."""
         # Rate limiting
         now = time.time()
@@ -599,10 +599,11 @@ class UploadHandler:
         if file_size == 0:
             raise HTTPException(400, "File is empty")
             
-        if file_size > self.max_upload_size:
+        effective_max = max_size if max_size is not None else self.max_upload_size
+        if file_size > effective_max:
             raise HTTPException(
                 status_code=400,
-                detail=f"File size exceeds {format_byte_limit(self.max_upload_size)} limit"
+                detail=f"File size exceeds {format_byte_limit(effective_max)} limit"
             )
         
         # Get original filename and sanitize it

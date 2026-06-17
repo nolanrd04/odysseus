@@ -101,6 +101,51 @@ def setup_upload_routes(upload_handler):
             
         return {"files": out}
     
+    @router.post("/qp")
+    async def api_upload_qp(request: Request, files: List[UploadFile] = File(...)):
+        """Upload endpoint for Quick Proposal — higher size limit than chat uploads."""
+        from src.upload_limits import get_qp_upload_max_bytes
+        if not files:
+            raise HTTPException(400, "No files uploaded")
+
+        client_ip = request.client.host if request.client else "unknown"
+        qp_max = get_qp_upload_max_bytes()
+        out = []
+
+        recent_uploads = count_recent_uploads(
+            upload_handler.upload_rate_log.get(client_ip, []), time.time()
+        )
+        if recent_uploads >= upload_handler.max_concurrent_uploads:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Maximum concurrent uploads ({upload_handler.max_concurrent_uploads}) exceeded"
+            )
+
+        for u in files:
+            try:
+                meta = upload_handler.save_upload(u, client_ip, owner=get_current_user(request), max_size=qp_max)
+                out.append({
+                    "id": meta["id"],
+                    "name": meta["name"],
+                    "mime": meta["mime"],
+                    "size": meta["size"],
+                    "hash": meta["hash"],
+                    "uploaded_at": meta["uploaded_at"],
+                    "width": meta.get("width"),
+                    "height": meta.get("height"),
+                    "is_duplicate": meta.get("is_duplicate", False)
+                })
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to process QP upload {u.filename}: {str(e)}")
+                continue
+
+        if not out:
+            raise HTTPException(500, "All file uploads failed")
+
+        return {"files": out}
+
     @router.post("/cleanup")
     async def manual_cleanup(request: Request):
         """Manually trigger cleanup of old uploads."""

@@ -148,6 +148,7 @@ class ClassificationsUpdate(BaseModel):
 class RunRequest(BaseModel):
     upload_id: str
     job_type: str = ""
+    run_name: str = ""
     notes: str = ""
     selected_jobs: List[str] = []
     gemini_model: str = ""
@@ -575,6 +576,9 @@ async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str
                 bbox    = region.get("bbox", [0, 0, 100, 100])
                 if len(bbox) < 4:
                     bbox = bbox + [0] * (4 - len(bbox))
+                # Gemini's native format is 0-1000; normalize when it bleeds through
+                if max(bbox) > 100:
+                    bbox = [v / 10.0 for v in bbox]
                 record  = BboxRecord(
                     id=bbox_id, page_idx=page.idx,
                     x1=bbox[0], y1=bbox[1], x2=bbox[2], y2=bbox[3],
@@ -694,6 +698,28 @@ _GEMINI_PHASE3_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_images",
+            "description": "List all images already available in this session — includes Phase 1 page thumbnails (p0_thumbnail, p1_thumbnail, …) and every image rendered so far via enhance_region, crop_page, or enhance_subregion. Returns a JSON array of {image_id, desc}. Call this to find an image_id before calling get_image, or to orient on what pages are already loaded.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_image",
+            "description": "Retrieve a previously rendered image by image_id without re-rendering. Every tool response that returns an image includes [image_id: ...] in its text — use that ID here. Faster than re-calling crop_page or enhance_region for a view you already requested.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_id": {"type": "string", "description": "The image_id shown in a previous tool response as [image_id: ...], or from list_images()"},
+                },
+                "required": ["image_id"],
+            },
+        },
+    },
 ]
 
 
@@ -710,37 +736,44 @@ def _render_pdf_crop(source_path: str, page_idx: int, x1: float, y1: float, x2: 
 
 
 async def _execute_gemini_tool(
-    name: str, args: dict, index, queue: asyncio.Queue
+    name: str, args: dict, index, queue: asyncio.Queue, image_store: dict
 ) -> list:
     """Execute a Gemini Phase 3 tool. Returns a list of OpenAI content blocks."""
     if name == "enhance_region":
-        bbox_id = args.get("bbox_id", "")
-        dpi     = int(args.get("dpi", 200))
-        rec     = index.bboxes.get(bbox_id)
+        bbox_id  = args.get("bbox_id", "")
+        dpi      = int(args.get("dpi", 200))
+        rec      = index.bboxes.get(bbox_id)
         if not rec:
             return [{"type": "text", "text": f"Error: bbox_id '{bbox_id}' not found in index."}]
+        image_id = bbox_id
         try:
-            if index.source_is_pdf:
-                jpeg_bytes = await asyncio.to_thread(
-                    _render_pdf_crop, index.source_path,
-                    rec.page_idx, rec.x1, rec.y1, rec.x2, rec.y2, dpi,
-                )
+            if image_id in image_store:
+                jpeg_bytes  = image_store[image_id]["bytes"]
+                cached_note = " (from cache)"
             else:
-                from PIL import Image as PilImage
-                img  = await asyncio.to_thread(PilImage.open, index.pages[rec.page_idx].image_path)
-                w, h = img.size
-                x1   = max(0, int(rec.x1 / 100 * w))
-                y1   = max(0, int(rec.y1 / 100 * h))
-                x2   = min(w, int(rec.x2 / 100 * w))
-                y2   = min(h, int(rec.y2 / 100 * h))
-                if x2 <= x1 or y2 <= y1:
-                    return [{"type": "text", "text": f"Error: invalid bbox coords ({x1},{y1},{x2},{y2})"}]
-                buf = io.BytesIO()
-                img.crop((x1, y1, x2, y2)).save(buf, "JPEG", quality=90)
-                jpeg_bytes = buf.getvalue()
+                if index.source_is_pdf:
+                    jpeg_bytes = await asyncio.to_thread(
+                        _render_pdf_crop, index.source_path,
+                        rec.page_idx, rec.x1, rec.y1, rec.x2, rec.y2, dpi,
+                    )
+                else:
+                    from PIL import Image as PilImage
+                    img  = await asyncio.to_thread(PilImage.open, index.pages[rec.page_idx].image_path)
+                    w, h = img.size
+                    x1   = max(0, int(rec.x1 / 100 * w))
+                    y1   = max(0, int(rec.y1 / 100 * h))
+                    x2   = min(w, int(rec.x2 / 100 * w))
+                    y2   = min(h, int(rec.y2 / 100 * h))
+                    if x2 <= x1 or y2 <= y1:
+                        return [{"type": "text", "text": f"Error: invalid bbox coords ({x1},{y1},{x2},{y2})"}]
+                    buf = io.BytesIO()
+                    img.crop((x1, y1, x2, y2)).save(buf, "JPEG", quality=90)
+                    jpeg_bytes = buf.getvalue()
+                image_store[image_id] = {"bytes": jpeg_bytes, "desc": f"Region {bbox_id} at {dpi} DPI"}
+                cached_note = ""
             b64 = base64.b64encode(jpeg_bytes).decode()
             return [
-                {"type": "text", "text": f"Region {bbox_id} at {dpi} DPI:"},
+                {"type": "text", "text": f"Region {bbox_id} at {dpi} DPI{cached_note} [image_id: {image_id}]:"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ]
         except Exception as e:
@@ -759,28 +792,42 @@ async def _execute_gemini_tool(
         dpi      = int(args.get("dpi", 200))
         if page_idx >= len(index.pages):
             return [{"type": "text", "text": f"Error: page_idx {page_idx} out of range ({len(index.pages)} pages)"}]
+        # Stable image_id: full-page crops get a clean name; partial crops encode coords
+        if x1 == 0 and y1 == 0 and x2 == 100 and y2 == 100:
+            image_id = f"p{page_idx}_full"
+        else:
+            image_id = f"p{page_idx}_{x1:.0f}_{y1:.0f}_{x2:.0f}_{y2:.0f}"
         try:
-            if index.source_is_pdf:
-                jpeg_bytes = await asyncio.to_thread(
-                    _render_pdf_crop, index.source_path,
-                    page_idx, x1, y1, x2, y2, dpi,
-                )
+            if image_id in image_store:
+                jpeg_bytes  = image_store[image_id]["bytes"]
+                cached_note = " (from cache)"
             else:
-                from PIL import Image as PilImage
-                img  = await asyncio.to_thread(PilImage.open, index.pages[page_idx].image_path)
-                w, h = img.size
-                px1  = max(0, int(x1 / 100 * w))
-                py1  = max(0, int(y1 / 100 * h))
-                px2  = min(w, int(x2 / 100 * w))
-                py2  = min(h, int(y2 / 100 * h))
-                if px2 <= px1 or py2 <= py1:
-                    return [{"type": "text", "text": "Error: invalid crop coords"}]
-                buf = io.BytesIO()
-                img.crop((px1, py1, px2, py2)).save(buf, "JPEG", quality=90)
-                jpeg_bytes = buf.getvalue()
+                if index.source_is_pdf:
+                    jpeg_bytes = await asyncio.to_thread(
+                        _render_pdf_crop, index.source_path,
+                        page_idx, x1, y1, x2, y2, dpi,
+                    )
+                else:
+                    from PIL import Image as PilImage
+                    img  = await asyncio.to_thread(PilImage.open, index.pages[page_idx].image_path)
+                    w, h = img.size
+                    px1  = max(0, int(x1 / 100 * w))
+                    py1  = max(0, int(y1 / 100 * h))
+                    px2  = min(w, int(x2 / 100 * w))
+                    py2  = min(h, int(y2 / 100 * h))
+                    if px2 <= px1 or py2 <= py1:
+                        return [{"type": "text", "text": "Error: invalid crop coords"}]
+                    buf = io.BytesIO()
+                    img.crop((px1, py1, px2, py2)).save(buf, "JPEG", quality=90)
+                    jpeg_bytes = buf.getvalue()
+                image_store[image_id] = {
+                    "bytes": jpeg_bytes,
+                    "desc":  f"Page {page_idx} crop [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]% at {dpi} DPI",
+                }
+                cached_note = ""
             b64 = base64.b64encode(jpeg_bytes).decode()
             return [
-                {"type": "text", "text": f"Page {page_idx} crop [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]% at {dpi} DPI:"},
+                {"type": "text", "text": f"Page {page_idx} crop [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]% at {dpi} DPI{cached_note} [image_id: {image_id}]:"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ]
         except Exception as e:
@@ -797,6 +844,7 @@ async def _execute_gemini_tool(
         x2_rel = float(args.get("x2", 100))
         y2_rel = float(args.get("y2", 100))
         dpi    = int(args.get("dpi", 300))
+        image_id = f"{parent_id}_sub_{x1_rel:.0f}_{y1_rel:.0f}_{x2_rel:.0f}_{y2_rel:.0f}"
         # Map child coords (0-100% relative to parent) → page-level coords (0-100%)
         pw = parent.x2 - parent.x1
         ph = parent.y2 - parent.y1
@@ -805,32 +853,57 @@ async def _execute_gemini_tool(
         x2_page = parent.x1 + x2_rel / 100 * pw
         y2_page = parent.y1 + y2_rel / 100 * ph
         try:
-            if index.source_is_pdf:
-                jpeg_bytes = await asyncio.to_thread(
-                    _render_pdf_crop, index.source_path,
-                    parent.page_idx, x1_page, y1_page, x2_page, y2_page, dpi,
-                )
+            if image_id in image_store:
+                jpeg_bytes  = image_store[image_id]["bytes"]
+                cached_note = " (from cache)"
             else:
-                from PIL import Image as PilImage
-                img  = await asyncio.to_thread(PilImage.open, index.pages[parent.page_idx].image_path)
-                w, h = img.size
-                px1  = max(0, int(x1_page / 100 * w))
-                py1  = max(0, int(y1_page / 100 * h))
-                px2  = min(w, int(x2_page / 100 * w))
-                py2  = min(h, int(y2_page / 100 * h))
-                if px2 <= px1 or py2 <= py1:
-                    return [{"type": "text", "text": "Error: invalid subregion coords"}]
-                buf = io.BytesIO()
-                img.crop((px1, py1, px2, py2)).save(buf, "JPEG", quality=90)
-                jpeg_bytes = buf.getvalue()
+                if index.source_is_pdf:
+                    jpeg_bytes = await asyncio.to_thread(
+                        _render_pdf_crop, index.source_path,
+                        parent.page_idx, x1_page, y1_page, x2_page, y2_page, dpi,
+                    )
+                else:
+                    from PIL import Image as PilImage
+                    img  = await asyncio.to_thread(PilImage.open, index.pages[parent.page_idx].image_path)
+                    w, h = img.size
+                    px1  = max(0, int(x1_page / 100 * w))
+                    py1  = max(0, int(y1_page / 100 * h))
+                    px2  = min(w, int(x2_page / 100 * w))
+                    py2  = min(h, int(y2_page / 100 * h))
+                    if px2 <= px1 or py2 <= py1:
+                        return [{"type": "text", "text": "Error: invalid subregion coords"}]
+                    buf = io.BytesIO()
+                    img.crop((px1, py1, px2, py2)).save(buf, "JPEG", quality=90)
+                    jpeg_bytes = buf.getvalue()
+                image_store[image_id] = {
+                    "bytes": jpeg_bytes,
+                    "desc":  f"Sub-region of {parent_id} [{x1_rel:.0f},{y1_rel:.0f},{x2_rel:.0f},{y2_rel:.0f}]% at {dpi} DPI",
+                }
+                cached_note = ""
             b64 = base64.b64encode(jpeg_bytes).decode()
             return [
-                {"type": "text", "text": f"Sub-region of {parent_id} [{x1_rel:.0f},{y1_rel:.0f},{x2_rel:.0f},{y2_rel:.0f}]% → page [{x1_page:.1f},{y1_page:.1f},{x2_page:.1f},{y2_page:.1f}]% at {dpi} DPI:"},
+                {"type": "text", "text": f"Sub-region of {parent_id} [{x1_rel:.0f},{y1_rel:.0f},{x2_rel:.0f},{y2_rel:.0f}]% → page [{x1_page:.1f},{y1_page:.1f},{x2_page:.1f},{y2_page:.1f}]% at {dpi} DPI{cached_note} [image_id: {image_id}]:"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ]
         except Exception as e:
             logger.warning(f"[quick_proposal] enhance_subregion error: {e}", exc_info=True)
             return [{"type": "text", "text": f"Error rendering subregion: {e}"}]
+
+    elif name == "list_images":
+        entries = [{"image_id": k, "desc": v["desc"]} for k, v in image_store.items()]
+        return [{"type": "text", "text": json.dumps(entries)}]
+
+    elif name == "get_image":
+        image_id = args.get("image_id", "")
+        if image_id not in image_store:
+            available = list(image_store.keys())
+            return [{"type": "text", "text": f"No image found with id '{image_id}'. Available ids: {available}"}]
+        entry = image_store[image_id]
+        b64   = base64.b64encode(entry["bytes"]).decode()
+        return [
+            {"type": "text", "text": f"Retrieved: {entry['desc']} [image_id: {image_id}]:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]
 
     elif name == "index_write":
         key           = args.get("key", "")
@@ -918,6 +991,7 @@ async def _run_gemini_with_tools(
     fallback_models_info: list | None = None,
 ) -> str:
     """Append user_message to Gemini history, call Gemini, handle tool loops, return final text."""
+    image_store = gemini_state.setdefault("image_store", {})
     gemini_state["messages"].append({"role": "user", "content": user_message})
 
     for _ in range(200):
@@ -999,7 +1073,7 @@ async def _run_gemini_with_tools(
                 tc_args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
             except json.JSONDecodeError:
                 tc_args = {}
-            result_blocks = await _execute_gemini_tool(tool_name, tc_args, index, queue)
+            result_blocks = await _execute_gemini_tool(tool_name, tc_args, index, queue, image_store)
             # Emit tool result so the UI can update the running node to done.
             result_text = "\n".join(b["text"] for b in result_blocks if b.get("type") == "text") or "(no output)"
             result_image = next((b["image_url"]["url"] for b in result_blocks if b.get("type") == "image_url"), None)
@@ -1016,9 +1090,15 @@ async def _run_gemini_with_tools(
             # here and carry images forward as a user message instead.
             text_parts = [b["text"] for b in result_blocks if b.get("type") == "text"]
             if tool_name == "crop_page":
-                bbox_id = f"p{tc_args.get('page_idx', '?')}_crop"
+                _pi = tc_args.get("page_idx", "?")
+                _cx1, _cy1, _cx2, _cy2 = (tc_args.get(k, d) for k, d in [("x1",0),("y1",0),("x2",100),("y2",100)])
+                bbox_id = f"p{_pi}_full" if (_cx1==0 and _cy1==0 and _cx2==100 and _cy2==100) else f"p{_pi}_{_cx1:.0f}_{_cy1:.0f}_{_cx2:.0f}_{_cy2:.0f}"
             elif tool_name == "enhance_subregion":
-                bbox_id = f"{tc_args.get('parent_bbox_id', '?')}_sub"
+                _par = tc_args.get("parent_bbox_id", "?")
+                _sx1, _sy1, _sx2, _sy2 = (tc_args.get(k, d) for k, d in [("x1",0),("y1",0),("x2",100),("y2",100)])
+                bbox_id = f"{_par}_sub_{_sx1:.0f}_{_sy1:.0f}_{_sx2:.0f}_{_sy2:.0f}"
+            elif tool_name == "get_image":
+                bbox_id = tc_args.get("image_id", "retrieved")
             else:
                 bbox_id = tc_args.get("bbox_id", "")
             pending_images.extend((bbox_id, b) for b in result_blocks if b.get("type") == "image_url")
@@ -1204,13 +1284,26 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
         else None
     )
 
+    # Pre-populate image store with Phase 1 page thumbnails so Gemini can access
+    # them via list_images()/get_image() without re-rendering.
+    image_store: dict = {}
+    for page in index.pages:
+        try:
+            image_store[f"p{page.idx}_thumbnail"] = {
+                "bytes": Path(page.image_path).read_bytes(),
+                "desc":  f"Page {page.idx} thumbnail (Phase 1, 224 DPI)",
+            }
+        except Exception:
+            pass
+
     gemini_state: dict = {
-        "messages":   [],
-        "url":        gemini_url,
-        "headers":    gemini_headers,
-        "model":      gemini_model,
-        "cache_name": gemini_cache_name,
-        "log_path":   str(Path(RUNS_DIR) / index.run_id / "phase3_log.jsonl"),
+        "messages":    [],
+        "url":         gemini_url,
+        "headers":     gemini_headers,
+        "model":       gemini_model,
+        "cache_name":  gemini_cache_name,
+        "log_path":    str(Path(RUNS_DIR) / index.run_id / "phase3_log.jsonl"),
+        "image_store": image_store,
     }
 
     if not gemini_cache_name:
@@ -1516,18 +1609,24 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
 
 async def render_pdf_pages(pdf_path: str, run_id: str, queue: asyncio.Queue) -> list:
     """Render all PDF pages to JPEG at 224 DPI using pdf2image. Emits page_ready per page."""
-    from pdf2image import convert_from_path
+    from pdf2image import convert_from_path, pdfinfo_from_path
     from src.quick_proposal.index import PageRecord
 
     pages_dir = os.path.join(RUNS_DIR, run_id, "pages")
     os.makedirs(pages_dir, exist_ok=True)
 
-    # Run blocking conversion in a thread so the event loop stays responsive.
-    images = await asyncio.to_thread(convert_from_path, pdf_path, dpi=224)
-    logger.info(f"[quick_proposal] run={run_id} pages={len(images)} dpi=224")
+    # Get page count without loading all pages into memory — large plan sets
+    # (80+ MB PDFs) will OOM the process if convert_from_path loads everything at once.
+    info = await asyncio.to_thread(pdfinfo_from_path, pdf_path)
+    n_pages = info["Pages"]
+    logger.info(f"[quick_proposal] run={run_id} pages={n_pages} dpi=224")
 
     pages = []
-    for i, img in enumerate(images):
+    for i in range(n_pages):
+        [img] = await asyncio.to_thread(
+            convert_from_path, pdf_path, dpi=224,
+            first_page=i + 1, last_page=i + 1,
+        )
         img_path = os.path.join(pages_dir, f"page_{i:04d}.jpg")
         img.save(img_path, "JPEG", quality=85)
         pages.append(PageRecord(
@@ -1683,15 +1782,21 @@ async def run_pipeline(
         await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=gemini_retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path)
         _success = True
 
-    except Exception as e:
-        logger.error(f"[quick_proposal] pipeline error run={run_id}: {e}", exc_info=True)
-        await _emit(queue, "error", message=str(e), phase="unknown")
-        _save_run_meta(run_id, status="error")
+    except BaseException as e:
+        is_cancel = isinstance(e, asyncio.CancelledError)
+        logger.error(f"[quick_proposal] pipeline {'cancelled' if is_cancel else 'error'} run={run_id}: {e}", exc_info=not is_cancel)
+        try:
+            await _emit(queue, "error", message="Run was cancelled." if is_cancel else str(e), phase="unknown")
+        except Exception:
+            pass
+        _save_run_meta(run_id, status="cancelled" if is_cancel else "error")
+        if is_cancel:
+            raise
     finally:
         if _success:
             _save_run_meta(run_id, status="complete")
             _save_run_results(run_id, index)
-        await queue.put(None)
+        queue.put_nowait(None)
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -1709,6 +1814,7 @@ def setup_quick_proposal_routes():
             id=run_id,
             upload_id=req.upload_id,
             filename=req.filename or req.upload_id,
+            run_name=req.run_name,
             notes=req.notes,
             timestamp=int(time.time()),
             status="running",
