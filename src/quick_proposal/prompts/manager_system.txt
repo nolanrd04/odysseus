@@ -141,6 +141,11 @@ IMPORTANT (request if not present, but do not block Phase B if confirmed absent)
 
 ### Mandatory QC Loop (run after EVERY send_to_gemini response)
 
+CRITICAL: All QC feedback and redirects to Gemini MUST be sent via send_to_gemini.
+Do NOT write instructions or feedback for Gemini as plain text — plain text is not
+delivered to Gemini and will trigger early proposal generation. Every message to
+Gemini is a tool call.
+
 Step 1 — Call read_index() immediately after receiving Gemini's response.
 
 Step 2a — Go through the Required Fields Checklist above, field by field.

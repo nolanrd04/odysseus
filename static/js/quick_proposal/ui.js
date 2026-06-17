@@ -1417,6 +1417,55 @@ function appendExtractionMessage(mainOutput, data) {
                 </div>`;
         }
 
+    } else if (data.role === 'claude_thinking_start') {
+        // First thinking token arrived — create a live block that delta events fill in.
+        const id = 'qp-think-' + data.thinking_id;
+        const wrap = document.createElement('div');
+        wrap.className = 'qp-exmsg qp-exmsg-thinking';
+        wrap.innerHTML = `<div class="thinking-section">
+            <div class="thinking-header" data-thinking-id="${id}">
+                <div class="thinking-header-left"><span data-label="Manager thinking">Manager thinking</span></div>
+                <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
+            </div>
+            <div class="thinking-content" id="${id}"><pre class="thinking-content-inner" id="${id}-live" style="white-space:pre-wrap;margin:0;font-family:inherit;font-size:inherit"></pre></div>
+        </div>`;
+        container.appendChild(wrap);
+
+    } else if (data.role === 'claude_thinking_delta') {
+        const liveEl = document.getElementById('qp-think-' + data.thinking_id + '-live');
+        if (liveEl) {
+            liveEl.textContent += data.text || '';
+            container.scrollTop = container.scrollHeight;
+        }
+
+    } else if (data.role === 'claude_thinking') {
+        // Fallback: inline <think> tag thinking, emitted as a single complete event.
+        const id = 'qp-thinking-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+        const wrap = document.createElement('div');
+        wrap.className = 'qp-exmsg qp-exmsg-thinking';
+        wrap.innerHTML = `<div class="thinking-section">
+            <div class="thinking-header" data-thinking-id="${id}">
+                <div class="thinking-header-left"><span data-label="Manager thinking">Manager thinking</span></div>
+                <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
+            </div>
+            <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${markdownModule.mdToHtml(data.text || '')}</div></div>
+        </div>`;
+        container.appendChild(wrap);
+
+    } else if (data.role === 'gemini_thinking') {
+        // Gemini's reasoning text that precedes tool calls — collapsed by default.
+        const id = 'qp-gthink-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+        const wrap = document.createElement('div');
+        wrap.className = 'qp-exmsg qp-exmsg-gemini-thinking';
+        wrap.innerHTML = `<div class="thinking-section qp-instr-section">
+            <div class="thinking-header" data-thinking-id="${id}">
+                <div class="thinking-header-left"><span data-label="Gemini reasoning">Gemini reasoning</span></div>
+                <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
+            </div>
+            <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${markdownModule.mdToHtml(data.text || '')}</div></div>
+        </div>`;
+        container.appendChild(wrap);
+
     } else if (data.role === 'claude') {
         const label = data.model || 'Manager';
         const wrap = document.createElement('div');

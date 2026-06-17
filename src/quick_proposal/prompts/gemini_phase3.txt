@@ -26,6 +26,7 @@ crop_page(page_idx, x1, y1, x2, y2, dpi=200)
     Coordinates are percentages (0–100): x1=left, y1=top, x2=right, y2=bottom.
     Do not call the crop tool at 100% zoom unless you want the full picture again. 
     0, 0, 100, 100 will just be the full image.
+    Instead of generating the same image again, use get_image() to get an existing image.
     (3.33, 12.30, 45.60, 55.43) is an example of a far more focused image.
     Another highly valuable use case is to move existing bounding boxes. For example, if you
     enhanhance an image with bounding box 25, 50, 45, 50 but the text you need goes off to the right,

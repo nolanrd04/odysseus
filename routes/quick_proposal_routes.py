@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -1051,11 +1052,18 @@ async def _run_gemini_with_tools(
             })
 
         if text_out and text_out.strip():
-            await _emit(queue, "extraction_message", role="gemini", text=text_out)
+            # Intermediate text that precedes tool calls is Gemini's reasoning —
+            # show it collapsed. Text in a final (no tool_calls) turn is the summary.
+            gemini_role = "gemini_thinking" if tool_calls else "gemini"
+            await _emit(queue, "extraction_message", role=gemini_role, text=text_out)
             if log_path := gemini_state.get("log_path"):
-                _log_phase3_event(log_path, {"type": "extraction_message", "role": "gemini", "text": text_out})
+                _log_phase3_event(log_path, {"type": "extraction_message", "role": gemini_role, "text": text_out})
 
         if not tool_calls:
+            if not (text_out and text_out.strip()):
+                await _emit(queue, "extraction_message", role="gemini", text="*(no summary)*")
+                if log_path := gemini_state.get("log_path"):
+                    _log_phase3_event(log_path, {"type": "extraction_message", "role": "gemini", "text": "*(no summary)*"})
             return text_out
 
         for tc in tool_calls:
@@ -1221,12 +1229,134 @@ def _kp_lookup(knowledge_pack: dict, query: str) -> str:
     return json.dumps({"query": q, "matches": {k: _build_result(k) for k in matches}})
 
 
-def _call_manager_sync(url: str, headers: dict, payload: dict) -> dict:
-    """Synchronous OpenAI-compatible completions call (for asyncio.to_thread)."""
-    with httpx.Client(timeout=300.0) as client:
-        r = client.post(url, headers={**headers, "content-type": "application/json"}, json=payload)
-        r.raise_for_status()
-        return r.json()
+_THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+
+async def _stream_manager_call(
+    url: str,
+    headers: dict,
+    payload: dict,
+    queue: asyncio.Queue,
+    mgr_model_id: str,
+    log_path: str,
+) -> dict:
+    """Stream an OpenAI-compat manager call, emitting thinking as a QP SSE event.
+
+    Returns a dict with the same {choices, usage} shape as a non-streaming response
+    so the caller loop requires no restructuring.
+
+    Using read=None means no per-chunk timeout — as long as thinking tokens keep
+    arriving the connection stays alive, which is the whole point.
+    """
+    stream_payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+    thinking_id  = uuid.uuid4().hex[:8]
+    thinking_buf = ""
+    thinking_streaming = False   # True once we've sent the start event
+    content_buf = ""
+    tool_calls_map: dict[int, dict] = {}
+    usage: dict = {}
+    finish_reason: str | None = None
+
+    req_headers = {**headers, "content-type": "application/json"}
+    timeout = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, headers=req_headers, json=stream_payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                try:
+                    data = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
+
+                if data.get("usage"):
+                    usage = data["usage"]
+
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                delta = choice.get("delta") or {}
+
+                # Thinking tokens — Ollama/vLLM emit these as a separate field.
+                # Stream them live: send a start event on the first chunk, then
+                # delta events for each subsequent chunk so the UI fills in real-time.
+                reasoning = (
+                    delta.get("reasoning_content")
+                    or delta.get("reasoning")
+                    or delta.get("thinking")
+                    or ""
+                )
+                if reasoning:
+                    if not thinking_streaming:
+                        thinking_streaming = True
+                        await _emit(queue, "extraction_message",
+                                    role="claude_thinking_start",
+                                    thinking_id=thinking_id,
+                                    model=mgr_model_id)
+                    await _emit(queue, "extraction_message",
+                                role="claude_thinking_delta",
+                                thinking_id=thinking_id,
+                                text=reasoning,
+                                model=mgr_model_id)
+                    thinking_buf += reasoning
+
+                # Content tokens — may contain <think> tags for models that
+                # embed thinking inline rather than in a separate field.
+                content = delta.get("content") or ""
+                if content:
+                    content_buf += content
+
+                # Tool call argument chunks — accumulate by index.
+                for tc_delta in (delta.get("tool_calls") or []):
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tool_calls_map:
+                        tool_calls_map[idx] = {
+                            "id": "", "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    if tc_delta.get("id"):
+                        tool_calls_map[idx]["id"] = tc_delta["id"]
+                    fn = tc_delta.get("function") or {}
+                    if fn.get("name"):
+                        tool_calls_map[idx]["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        tool_calls_map[idx]["function"]["arguments"] += fn["arguments"]
+
+    # Inline <think> fallback — models that embed thinking in content rather than
+    # a separate field. Emit as a single claude_thinking event (not streamed).
+    inline_thinks = _THINK_TAG_RE.findall(content_buf)
+    if inline_thinks and not thinking_buf.strip():
+        thinking_buf = "\n\n".join(inline_thinks)
+        await _emit(queue, "extraction_message",
+                    role="claude_thinking", text=thinking_buf.strip(), model=mgr_model_id)
+    clean_content = _THINK_TAG_RE.sub("", content_buf).strip()
+
+    # Log the full accumulated thinking (both streaming and inline cases).
+    if thinking_buf.strip() and log_path:
+        _log_phase3_event(log_path, {
+            "type": "extraction_message", "role": "claude_thinking",
+            "text": thinking_buf.strip(), "model": mgr_model_id,
+        })
+
+    tool_calls_list = (
+        [tool_calls_map[i] for i in sorted(tool_calls_map)] if tool_calls_map else None
+    )
+
+    return {
+        "choices": [{
+            "finish_reason": finish_reason,
+            "message": {
+                "content": clean_content or None,
+                "tool_calls": tool_calls_list,
+            },
+        }],
+        "usage": usage,
+    }
 
 
 async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "") -> None:
@@ -1478,6 +1608,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
 
     phase_b_complete = False
     phase_b_nudges   = 0
+    log_path         = gemini_state.get("log_path", "")
 
     try:
         for _ in range(60):
@@ -1488,9 +1619,9 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                 "messages":   oai_messages,
                 "tools":      all_tools,
             }
-            resp = await asyncio.to_thread(_call_manager_sync, mgr_url, mgr_headers or {}, payload)
-
-            log_path = gemini_state.get("log_path", "")
+            resp = await _stream_manager_call(
+                mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path
+            )
 
             if "error" in resp:
                 err_msg = resp.get("error", {}).get("message", str(resp))
@@ -1534,15 +1665,23 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                 continue
 
             if not tool_calls:
-                # Text-only stop with no tool calls. Nudge the model to generate
-                # Phase B (if not done) and call end_generation to close the loop.
+                # Text-only stop with no tool calls.
                 if phase_b_nudges < 2:
                     phase_b_nudges += 1
-                    mgr_messages.append({"role": "user", "content": (
-                        "Generate the complete Phase B proposal if not already done, "
-                        "then call end_generation(grand_total) with the final Grand Total "
-                        "to complete the pipeline."
-                    )})
+                    extraction_done = bool(index.extracted_values.get("extraction_complete"))
+                    if not extraction_done:
+                        mgr_messages.append({"role": "user", "content": (
+                            "Gemini has not yet called extraction_complete. "
+                            "Use send_to_gemini to send your QC feedback or redirect to Gemini — "
+                            "do not write instructions for Gemini as plain text. "
+                            "All communication with Gemini must go through the send_to_gemini tool."
+                        )})
+                    else:
+                        mgr_messages.append({"role": "user", "content": (
+                            "Generate the complete Phase B proposal if not already done, "
+                            "then call end_generation(grand_total) with the final Grand Total "
+                            "to complete the pipeline."
+                        )})
                     continue
                 break
 
@@ -1978,11 +2117,17 @@ def setup_quick_proposal_routes():
         result = []
         for c in jobs:
             job_name = c.get("job_name", "")
-            # Normalize: lowercase, spaces → underscores, then check if any holdout dir contains it.
+            # Normalize: lowercase, spaces/hyphens → underscores.
             slug = job_name.lower().replace(" ", "_").replace("-", "_")
             holdout_kp = None
             for d in holdout_dirs:
-                if slug in d.name:
+                # Strip the job-number prefix ("holdout_26013-2_") to get the short
+                # name ("solara"), then match bidirectionally: short name in slug OR
+                # slug in full dir name. This handles truncated dir names (e.g.
+                # "boyds" matching "boyds_landing") and PH suffixes (e.g. "solara"
+                # matching "solara_ph1") without requiring exact slug equality.
+                dir_short = d.name.split("_", 2)[-1]  # everything after "holdout_NNNNN-N_"
+                if dir_short in slug or slug in d.name:
                     candidate = d / "knowledge_pack.json"
                     if candidate.is_file():
                         holdout_kp = str(candidate)
