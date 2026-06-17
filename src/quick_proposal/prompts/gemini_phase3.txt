@@ -19,10 +19,18 @@ index_read()
   → Returns ALL currently extracted values as JSON. Call this at the start of each new area
     of extraction to see what has already been written — avoid overwriting high-confidence values.
 
-move_bbox(bbox_id, x1, y1, x2, y2, dpi=300)
-  → Re-renders a page crop at adjusted coordinates without mutating the stored bbox.
-    Use when the Phase 1 bbox is misaligned or too narrow — supply corrected [x1,y1,x2,y2]
-    as percentages (0-100) to get a fresh high-DPI view of the right area.
+crop_page(page_idx, x1, y1, x2, y2, dpi=200)
+  → Renders a free-form crop of any page area directly from the source PDF at high DPI.
+    Use when information lies outside a Phase 1 bbox or you need to pan to an adjacent area.
+    No bbox_id needed — specify the page number and coordinates directly.
+    Coordinates are percentages (0–100): x1=left, y1=top, x2=right, y2=bottom.
+
+enhance_subregion(parent_bbox_id, x1, y1, x2, y2, dpi=300)
+  → Zooms into a sub-area of an existing Phase 1 bbox. Supply coordinates relative to
+    the parent region (0–100% within that region). The backend maps to page space and
+    renders from the source PDF at high DPI. Use this to iteratively narrow in on a
+    specific callout, dimension label, or note within an already-enhanced image — no
+    coordinate math required on your part.
 
 index_write(key, value, source_bbox_id, confidence)
   → Writes an extracted value to the index.
@@ -37,54 +45,130 @@ index_write(key, value, source_bbox_id, confidence)
 Work through the plan in this order — highest-yield sheets first:
 
 1. TYPICAL SECTION pages (importance=high)
-   Extract: ROW_width_ft, curb_to_curb_ft, curb_type, pavement_spec, sidewalk_sides,
+   Extract: ROW_width_ft (array of objects with 'roads' list and 'width'), curb_to_curb_ft, curb_type, pavement_spec,
+            sidewalk_sides (per-road array — see schema below),
             stripping_depth_in, ballast_is_separate_pay_item
+   Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and 
+            which note the callouts correspond to. These are particularly helpful for getting EA items but can be used
+            to get other items as well.
 
 2. PLAN VIEW pages with stationing (importance=high)
-   Extract: road_LF_hint, road_LF_segments (per road), road_layout, road_connection_count,
-            construction_limits (begin/end station), lot_count (if lots are numbered on the plan)
+   Extract: road_LF (per-road array — see schema below), road_layout, road_connection_count,
+            construction_limits (begin/end station), lot_count (if lots are numbered on the plan),
+            existing_road_widening_present (list of road names where widening is in scope)
+  Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and 
+            which note the callouts correspond to. These are particularly helpful for getting EA items but can be used
+            to get other items as well.
 
 3. UTILITY PLAN pages (importance=high)
-   Extract: proposed_fire_hydrant_count, proposed_manhole_count,
-            sewer_main_road_coverage_pct, water_main_road_coverage_pct,
+   Extract: proposed_fire_hydrant_count, proposed_manhole_count, proposed_ped_ramp_count,
+            sewer_main_LF (actual total LF of sewer main from plan labels/stationing),
+            water_main_LF (actual total LF of water main from plan labels/stationing),
             large_diameter_water_main_present, large_diameter_sewer_main_present,
             storm_drainage_basin_count, storm_inlet_type, irrigation_service_present
+   Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and 
+            which note the callouts correspond to. These are particularly helpful for getting EA items but can be used
+            to get other items as well.
 
 4. COVER / PLAT pages
    Extract: lot_count (prefer the lot table on cover), job_name, location, engineering_firm,
             road dimensions (plat dimension callouts for road LF if no plan/profile sheets)
+   Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and 
+            which note the callouts correspond to. These are particularly helpful for getting EA items but can be used
+            to get other items as well.
 
 5. PROFILE pages (importance=medium)
    Extract: earthwork_balance, earthwork_import_export_CY, earthwork_notes
+   Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and 
+            which note the callouts correspond to. These are particularly helpful for getting EA items but can be used
+            to get other items as well.
 
 6. GRADING pages (importance=medium)
    Extract: lot_grading_in_scope, earthwork details
+  Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and 
+            which note the callouts correspond to. These are particularly helpful for getting EA items but can be used
+            to get other items as well.
 
 7. ANY page with scope flags
    Extract: demo_scope_present, existing_road_widening_present, strip_haul_off_required,
-            pedestrian_pathway_present
+            pedestrian_pathway_present, pathway_paving_present, pathway_paving_roads
+   Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and
+            which note the callouts correspond to. These are particularly helpful for getting EA items but can be used
+            to get other items as well.
+
+8. SCOPE ITEMS (when the manager's opening message includes a list of work types to find)
+   For each work type in the list, search the plan sheets for callouts, legends, notes,
+   bid schedules, or quantity tables that reference it. Check plan views, typical sections,
+   utility plans, and the cover sheet.
+
+   For each work type found:
+   - Record quantity (numeric), unit (EA/LF/SF/LS/TON)
+   - Record the measurement spec exactly as written on the plans (e.g. "3/6\"", "6\"")
+     Do NOT assume a spec — only write what you can read. Write null if spec is not visible.
+   - If the same work type appears at multiple specs (e.g. 4" and 6" sewer services),
+     write one entry per spec.
+   - If not found after checking all relevant sheets, write a null-quantity entry so the
+     manager knows you looked.
+
+   Write all findings to index key "scope_items" as a single JSON array:
+   [
+     {"work_type": "SCUPPERS", "quantity": 6, "unit": "EA", "spec": null,
+      "pages": ["p5_r2"], "confidence": "high"},
+     {"work_type": "PAVING", "quantity": 415, "unit": "LF", "spec": "3/6\"",
+      "pages": ["p3_r1", "p4_r0"], "confidence": "high"},
+     {"work_type": "SIDEWALKS", "quantity": 830, "unit": "SF", "spec": "4\"",
+      "pages": ["p4_r4"], "confidence": "medium"},
+     {"work_type": "SIDEWALKS", "quantity": 210, "unit": "SF", "spec": "6\"",
+      "pages": ["p4_r4"], "confidence": "medium"},
+     {"work_type": "TRAFFIC CONTROL", "quantity": null, "unit": "LS", "spec": null,
+      "pages": [], "confidence": "low"}
+   ]
 
 ---
 
 ## Extraction Rules
 
-ALWAYS use enhance_region before writing a value. Do not estimate from description text alone.
+-- ALWAYS use enhance_region or crop_page before writing a value. Do not estimate from description text alone.
 
 CONFIDENCE ENFORCEMENT: Before calling index_write with confidence="low" or confidence="medium",
-you MUST call enhance_region (or move_bbox) on the source region first to visually confirm the value.
-A low/medium-confidence index_write without a prior enhance_region for that bbox is not allowed.
+you MUST call enhance_region (or crop_page) on the source region first to visually confirm the value.
+A low/medium-confidence index_write without a prior visual inspection is not allowed.
 If enhance_region does not resolve the ambiguity, write the value with confidence="low" and flag it
 in your summary for manager review — do not guess.
 
-road_LF_hint — NEVER return null if stationing or dimension callouts are visible anywhere.
-  Source priority (per road):
+road_LF — Write as a JSON array. NEVER return null if stationing or dimension callouts are visible.
+  For each road in the plan set, write one object with these keys:
+    road_name       — name of the road (e.g. "Wilhelm Way")
+    length          — centerline LF as a number (end_sta − start_sta, or explicit callout)
+    road_type       — one of:
+                      "new_construction"       — new road built from scratch
+                      "improvement_to_existing"— existing road being widened or improved on both sides
+                      "fronting_existing"       — project only fronts ONE side of an existing road
+    source          — how you got the length: "station_label", "explicit_callout", "summed_segments", "plat_dimension"
+    pages           — list of bbox_ids you read (e.g. ["4_r0", "4_r3"])
+    additional_comments — any notes (non-zero start station explanation, assumptions, etc.)
+
+  FRONTING RULE: Always report the FULL stationing length (end_sta − start_sta) regardless of
+  road_type. Do NOT halve or adjust any length — tag the road "fronting_existing" and Claude
+  handles the quantity adjustment in Phase B. Non-zero start stations (e.g. STA 18+50) on an
+  existing road are project boundary markers — do NOT flag these as evidence of a missing prior sheet.
+
+  Source priority for length (per road):
   1. Road name + stationing range label (end_sta − start_sta = LF)
   2. Explicit LF callout ("L=979.62'", "LENGTH=1214 LF")
   3. BEGIN/END CONSTRUCTION station markers (subtract)
   4. Station tick marks along centerline (first and last labeled)
   5. Profile view x-axis (proposed/solid portion only)
   6. Plat dimension callouts (sum all tangent segments + curve arc lengths)
-  Record each road as a separate entry in road_LF_segments, then sum to road_LF_hint.
+
+  Example value:
+  [
+    {"road_name": "Wilhelm Way", "length": 340.45, "road_type": "new_construction",
+     "source": "station_label", "pages": ["5_r0"], "additional_comments": "STA 10+00 to STA 13+40.45"},
+    {"road_name": "Midway Ave", "length": 791.32, "road_type": "improvement_to_existing",
+     "source": "station_label", "pages": ["6_r6"],
+     "additional_comments": "STA 18+50 is the project boundary on existing road — not a sheet break"}
+  ]
 
 lot_count — count ONLY individually numbered buildable lots INSIDE the project boundary.
   Prefer the lot table on the cover sheet. Exclude tracts, easements, ROW, and adjacent parcels.
@@ -94,16 +178,66 @@ curb_type:
   "standard" — vertical curb & gutter on all roads
   "mixed"    — rolled on local streets AND C&G on collector or at major intersections
 
-sidewalk_sides — read ONLY from the typical section cross-section drawing:
-  "one_side" | "both_sides" | "none" | null (if typical section not readable)
+sidewalk_sides — Write as a JSON array, one entry per road. Read from each road's typical section.
+  Each object has:
+    road_name          — name of the road
+    sides              — "both_sides", "one_side", or "none"
+    sheet_references   — list of bbox_ids you read (e.g. ["4_r4"])
+    confidence         — "high", "medium", or "low"
+    additional_comments— any notes (e.g. "sidewalk runs ~85% of road length", "fronting only one side")
+
+  MULTI-USE TRAIL WARNING: If a road has a paved multi-use trail (asphalt MUP, shared-use
+  path, greenway) instead of a concrete sidewalk, that trail is NOT a sidewalk. Do NOT count
+  it as sides = "one_side". Instead write sides = "none" for that road (or exclude the trail
+  side) and set pathway_paving_present = true (see below). This prevents 6" concrete sidewalk
+  being estimated where asphalt trail paving should appear.
+
+  Example:
+  [
+    {"road_name": "Road 1", "sides": "both_sides", "sheet_references": ["4_r4"],
+     "confidence": "high", "additional_comments": "none"},
+    {"road_name": "Road 2", "sides": "none", "sheet_references": ["7_r2"],
+     "confidence": "high", "additional_comments": "Paved multi-use trail on south side — not concrete sidewalk; see pathway_paving_roads"}
+  ]
+
+  If a road has no readable typical section, write null for that road's entry with confidence "low".
+
+pathway_paving_present — Write true if ANY road in the plan set has a paved multi-use trail,
+  shared-use path, asphalt MUP, or greenway path (as opposed to a concrete sidewalk).
+  Look for: typical section labels "ASPHALT PATH", "PAVED MUP", "MULTI-USE PATH",
+  "SHARED USE PATH", or a cross-section profile showing asphalt (not concrete) on a wide path.
+  Write false if no such path exists.
+
+pathway_paving_roads — Write as a JSON array of road names where a paved multi-use trail
+  exists. Example: ["McGuire Rd"]. Write [] if pathway_paving_present is false or null.
+  For each road listed here, ensure the sidewalk_sides entry for that road excludes the
+  trail side (write "none" or note the exclusion in additional_comments).
 
 stripping_depth_in — the numeric depth in inches (e.g. 6, 8, 12). Do NOT guess.
 
 ballast_is_separate_pay_item — true ONLY if ballast appears as a separate bid item with its own
   quantity (not bundled into the paving spec as "/6" or "/4").
 
-sewer_main_road_coverage_pct — estimate what % of the total road corridor has a sewer main.
-  Full cul-de-sac with sewer end-to-end = 100. Half the network = 50. No public sewer = 0.
+sewer_main_LF — Read the ACTUAL total length of sewer main from the utility plan. Do NOT estimate
+  a percentage — measure or read the pipe LF directly:
+  1. Sum station ranges along each sewer main run from the plan view labels
+  2. Or read explicit LF callouts on the utility plan
+  3. If labels are unclear, count the roads that have sewer and sum their construction LF
+     (only the portion with pipe, not the full road length if pipe stops short)
+  Write as a number (e.g. 802). If no public sewer is present, write 0.
+
+water_main_LF — Same approach as sewer_main_LF but for water main. Read actual pipe LF from
+  the utility plan labels or station ranges. Write as a number. If no public water main, write 0.
+
+existing_road_widening_present — Write as a JSON array of road names where the scope includes
+  widening or pavement addition to an already-built road (e.g. adding a turn lane, widening a
+  collector, pave widening for frontage). Example: ["McGuire Rd", "Midway Ave"].
+  Write [] if no widening scope exists. This triggers separate paving widening line items.
+
+proposed_ped_ramp_count — Count of ADA pedestrian curb ramps explicitly shown or called out on
+  the plan sheets. Look for: ramp symbols at intersection corners, notes like "ADA RAMP", "PED
+  RAMP", "TRUNCATED DOME", or a ramp detail/quantity table. Write the total as a number (e.g. 4).
+  Write null if no ramps are called out — do NOT infer a count.
 
 earthwork_balance:
   "import_needed"    — proposed grade consistently ABOVE existing (fill required)
@@ -129,9 +263,10 @@ lot_grading_in_scope — true ONLY if a dedicated grading sheet shows contours i
 
 You are done when:
 - All high-importance pages have been visited
-- road_LF_hint, lot_count, curb_type, ROW_width_ft, sidewalk_sides are filled (or confirmed
-  unreadable after checking all relevant pages)
-- utility_plan coverage fields are filled (or confirmed absent — no utility sheets)
+- road_LF (array), lot_count, curb_type, ROW_width_ft, sidewalk_sides (array) are filled
+  (or confirmed unreadable after checking all relevant pages)
+- sewer_main_LF and water_main_LF are filled (or confirmed absent — no utility sheets)
+- proposed_ped_ramp_count is filled or confirmed null (no explicit ramp callouts found)
 - Any visible scope flags have been checked
 
 When done, call index_write("extraction_complete", true, null, "high").

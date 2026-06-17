@@ -48,48 +48,47 @@ figures below (they update automatically as jobs are added).
    if terrain is not readable from the plans.
    Accuracy: 9/10 within 25% on typical cul-de-sac layouts.
    SEWER MAIN LF — use this priority order:
-   (a) If `sewer_main_road_coverage_pct` (from Gemini) is not null, compute:
-       sewer_main_LF = road_LF × (sewer_main_road_coverage_pct / 100).
-       This is a direct visual read of the utility plan — trust it as the primary quantity.
-       Cross-check against the formula in (b) for a sanity check only. If the two differ by >20%,
-       use the plan-derived value and flag [SEWER MAIN: plan read differs from formula by >20% —
-       used plan read]. Do NOT average them.
-   (b) Otherwise (coverage_pct is null — no utility sheet available): compute:
+   (a) If `sewer_main_LF` (from Gemini) is not null and > 0, use it directly.
+       This is a direct measurement from the utility plan — trust it as the primary quantity.
+       Cross-check against the formula in (b) for a sanity check only. If they differ by >20%,
+       note the discrepancy but keep the plan-read value. Flag [SEWER MAIN: plan read differs
+       from formula by >20% — used plan read].
+   (b) Otherwise (sewer_main_LF is null — no utility plan available): compute:
        sewer_main_LF = ROW_SF × qty_scale_correlations.correlations["8\" SEWER MAIN"].ROW_SF.median_ratio
        Read median_ratio from the knowledge pack at inference time — do not use a hardcoded value.
        ROW_SF is the best predictor for this item (r=0.944 vs road_LF r=0.687).
        Note: arc_loop layouts tend toward higher sewer coverage than cul-de-sac — if road_layout
-       is arc_loop, apply a 1.15× multiplier to the formula result as sewer typically runs both
-       sides of the loop. Flag as [SEWER MAIN: formula fallback — no utility plan coverage data].
+       is arc_loop, apply a 1.15× multiplier to the formula result. Flag as [SEWER MAIN: formula
+       fallback — no utility plan data].
 5. WATER MAIN LF: Use this priority order:
-   (a) If `water_main_road_coverage_pct` (from Gemini) is not null, compute:
-       water_main_LF = road_LF × (water_main_road_coverage_pct / 100).
-       This is a direct visual read of the utility plan — trust it as the primary quantity.
-       Cross-check against the formula in (b) for a sanity check only. If the two differ by >20%,
-       use the plan-derived value and flag [WATER MAIN: plan read differs from formula by >20% —
-       used plan read]. Do NOT average them — the plan read reflects this job's actual pipe layout;
-       the formula is a portfolio average that cannot account for job-specific coverage.
-   (b) Otherwise (coverage_pct is null — no utility sheet available): compute:
+   (a) If `water_main_LF` (from Gemini) is not null and > 0, use it directly.
+       This is a direct measurement from the utility plan — trust it as the primary quantity.
+       Cross-check against the formula in (b) for a sanity check only. If they differ by >20%,
+       note the discrepancy but keep the plan-read value. Flag [WATER MAIN: plan read differs
+       from formula by >20% — used plan read].
+   (b) Otherwise (water_main_LF is null — no utility plan available): compute:
        water_main_LF = ROW_SF × qty_scale_correlations.correlations["8\" WATER MAIN PVC"].ROW_SF.median_ratio
        Read median_ratio from the knowledge pack at inference time — do not use a hardcoded value.
        ROW_SF is the best predictor for this item (r=0.992 vs road_LF r=0.934).
-       Flag as [WATER MAIN: formula fallback — no utility plan coverage data].
+       Flag as [WATER MAIN: formula fallback — no utility plan data].
 6. ROLLED CURB LF (conditional — only when job uses rolled curb): use
    `item_scaling["ROLLED CURB"].formula` (currently road_LF × 1.43, r²=0.912).
    EXISTING ROAD CAVEAT: If scope_notes or job context indicate the road already exists and
    Terra is performing frontage improvements (adding curb along an existing street rather than
    building a new road), apply curb only to the side(s) Terra is fronting. One-side frontage:
    use road_LF × 1.0 (one side only, not 1.43). Flag as [ONE-SIDE FRONTAGE — curb one side].
-7. SIDEWALK SF (4" or 6" per spec): Sidewalk width is always 5 ft. Length is road_LF.
-   The only variable is which side(s) of the road have sidewalk — use `sidewalk_sides` from
-   Gemini to determine this directly from the typical section:
-     sidewalk_sides = "both_sides" → sidewalk_SF = road_LF × 10
-     sidewalk_sides = "one_side"   → sidewalk_SF = road_LF × 5
-     sidewalk_sides = "none"       → omit sidewalk entirely
-     sidewalk_sides = null         → default to one side (road_LF × 5) as conservative fallback;
-                                     flag as [SIDEWALK SIDES: typical section not available —
-                                     defaulted to one side, verify with Brian].
+7. SIDEWALK SF (4" or 6" per spec): Sidewalk width is always 5 ft.
+   `sidewalk_sides` is now a per-road array. For each entry, compute that road's sidewalk SF:
+     sides = "both_sides" → road_sidewalk_SF = road_LF × 10  (5 ft × 2 sides)
+     sides = "one_side"   → road_sidewalk_SF = road_LF × 5   (5 ft × 1 side)
+     sides = "none"       → 0 SF for that road
+   Sum across all roads for total sidewalk SF.
+   If sidewalk_sides is null (no typical section found): default to one_side for all roads
+   (road_LF × 5), flag as [SIDEWALK SIDES: typical section not available — defaulted to one
+   side, verify with Brian].
+   If a road's entry is null/missing from the array, apply the one_side default for that road.
    Price from `unit_price_distributions` for "4\" SIDEWALKS" or "6\" SIDEWALKS" as applicable.
+   If spec thickness differs by road (e.g. 4" on residential, 6" on collector), use two line items.
    If spec thickness is not determinable, default to 4".
 8. IRRIGATION SLEEVES LF: use `item_scaling["IRRIGATION SLEEVES"].formula`
    (currently lot_count × 13.0, r²=0.999).
@@ -142,6 +141,32 @@ A job can have BOTH rolled curb (on residential side streets) and curb & gutter 
 intersections or on a collector street). Detect from sheet cues. If curb_type is rolled, apply
 the rolled curb LF rule for the residential streets. If any analog or scope cue shows C&G at
 intersections, include a separate C&G line item scaled from the closest analog.
+
+## Fronting Road Adjustments
+
+Some roads in road_LF have road_type = "improvement_to_existing" or "fronting_existing".
+These are existing roads where Terra constructs improvements along one fronting side only.
+road_LF is always the full stationing length — do not re-halve it. Apply these rules:
+
+QUANTITIES THAT USE FULL road_LF (work runs the full fronting length):
+  - Paving widening line items (existing_road_widening_present already triggers these)
+  - Curb LF: already handled by EXISTING ROAD CAVEAT in rule 6 (one side only)
+  - Sidewalk SF: sidewalk_sides already reflects "one_side" for fronting roads — no change
+  - Utility LF: if utilities run the full fronting length, use full road_LF
+
+ROW_SF FOR FRONTING ROADS:
+  For earthwork, analog scaling, and $/ROW_SF sanity checks:
+    fronting_road_ROW_SF = road_LF × (ROW_width_ft / 2)
+  Terra only works the near half of the ROW on an improvement-to-existing road. Use halved
+  ROW_SF for this road's contribution to: EXC TO EMBANK, STRIP ROW, SWALES, UTILITY TRENCHING.
+
+  Sum ROW_SF across all roads using halved values for fronting roads. Use this corrected
+  total ROW_SF for all KP formula scaling and analog matching.
+
+ITEMS TO OMIT FOR FRONTING ROADS:
+  - Full new-construction paving SY (replaced by widening line items)
+  - Subgrade SY as a standalone item (bundled into widening unit price)
+  - Rolled curb on both sides (one-side frontage only)
 
 ## Utility Connection Counts
 
@@ -201,9 +226,9 @@ matching diameter. Flag as thin data (N=1–2 in current portfolio).
 If `large_diameter_sewer_main_present=true` (from Gemini), include a separate large-diameter sewer
 main line item (12\", 15\", or per scope notes) in addition to the standard 8\" sewer distribution
 main. Large-diameter sewer typically runs only on the collector/spine street, not all roads.
-Quantity: if `sewer_main_road_coverage_pct` is provided, apply it to the collector street portion
-only. Otherwise scale from the closest analog or use the collector street LF as estimated from
-road geometry. Price from `unit_price_distributions` for the matching diameter key. Flag as thin
+Quantity: if `sewer_main_LF` is provided, estimate the collector street portion as a fraction
+based on road geometry (collector LF ÷ total road LF × sewer_main_LF). Otherwise scale from
+the closest analog or use the collector street LF as estimated from road geometry. Price from `unit_price_distributions` for the matching diameter key. Flag as thin
 data. This mirrors the Large-Diameter Water Main rule.
 
 ## Utility Trenching
@@ -256,6 +281,12 @@ at ~$9.30/SF.
 This item is description-fragmented in the knowledge pack. Balanced jobs appear under "EXC TO EMBANK"
 (unqualified); import/borrow jobs appear under keys like "EXC TO EMBANK INCL BORROW", "EXC TO EMBANK
 INCL BORROW & IMPORT", etc. Derive all price anchors from the KP — do not use hardcoded dollar amounts.
+
+BORROW OVERRIDE: Before using earthwork_balance, scan scope_notes, earthwork_notes, and any plan
+notes for the keywords "INCL BORROW", "BORROW & IMPORT", "IMPORT FILL", or "EXC TO EMBANK INCL".
+If any are found, treat the job as import_needed regardless of what earthwork_balance says.
+These phrases confirm borrow material is required — a 2–3× cost premium over balanced earthwork.
+Flag as [BORROW DETECTED from scope_notes — treated as import_needed].
 
 - **roughly_balanced**: Look up `unit_price_distributions["EXC TO EMBANK"]` (exact unqualified key).
   Use its median as the anchor. Optionally scale by ROW_SF using `ls_item_variance["EXC TO EMBANK"].per_ROW_SF`

@@ -16,6 +16,7 @@ export function startStream(runId, handlers = {}) {
         onExtractionMessage,
         onIndexUpdate,
         onRegionPreview,
+        onContextUsage,
         onError,
         onDone,
     } = handlers;
@@ -53,6 +54,10 @@ export function startStream(runId, handlers = {}) {
 
     es.addEventListener('region_preview', e => {
         onRegionPreview?.(JSON.parse(e.data));
+    });
+
+    es.addEventListener('context_usage', e => {
+        onContextUsage?.(JSON.parse(e.data));
     });
 
     let hadError = false;

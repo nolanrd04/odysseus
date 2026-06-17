@@ -181,6 +181,11 @@ def _stream_delta_event(text: str, *, thinking: bool = False) -> str:
     payload = {"delta": text}
     if thinking:
         payload["thinking"] = True
+
+    # Wrap the delta in HTML details/summary if it's a thinking token.
+    # Note: The frontend is responsible for emitting the opening <details> tag
+    # on the first chunk and the closing </details> tag when thinking ends.
+    # This allows long chains to be collapsed in the UI, preventing buffer overflow.
     return f"data: {json.dumps(payload)}\n\n"
 
 def _model_activity_key(url: str, model: str) -> str:

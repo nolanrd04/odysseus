@@ -5,6 +5,7 @@ python-dotenv
 httpx
 # PDF → JPEG rendering for quick_proposal (requires poppler-utils in the system).
 pdf2image
+PyMuPDF
 pydantic>=2.13.4
 pydantic-settings>=2.14.1
 SQLAlchemy

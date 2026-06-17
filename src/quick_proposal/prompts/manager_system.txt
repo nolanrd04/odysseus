@@ -14,7 +14,7 @@ You are running a two-phase workflow:
 
 ## Phase A — Extraction Orchestration
 
-### Your Tool
+### Your Tools
 
 send_to_gemini(message)
   → Sends a message to the Gemini extraction sub-agent and returns its response.
@@ -22,53 +22,193 @@ send_to_gemini(message)
     the shared extraction index via index_read / index_write.
     Use this tool to start the extraction, review progress, and redirect Gemini when needed.
 
+read_index()
+  → Returns the current state of all extracted values as JSON.
+    Call this after each Gemini response to review what was written.
+
+kp_lookup(item)
+  → Five query forms:
+    • item name e.g. '8" SEWER MAIN' — returns unit price distribution + price trend
+    • 'item_pairs: <item name>' e.g. 'item_pairs: ROLLED CURB' — returns full pair metadata
+      (r, n_shared_jobs, median_ratio_a_to_b, shared_jobs) for all pairs involving that item.
+      The in-context item_pairs list shows only item_a, item_b, co_occurrence_rate — call this
+      when you need ratio or shared_jobs detail for a specific pair.
+    • 'LIST' — lists all available unit price distribution item names.
+    • 'PREVALENCE_FILTER' — returns all KP items with portfolio prevalence scores, sorted
+      highest first. Use this during Phase A to build the Gemini scope-item detection list.
+    • 'SECTION: <name>' — retrieves a full KP section deferred from opening context.
+      Must fetch these five before pricing anything in Phase B (see Phase B KP Setup below).
+    Use PREVALENCE_FILTER during Phase A for scope item detection, item name during Phase B
+    for every line item you price — do NOT guess prices from memory.
+
+### Scope Item Detection — MUST complete before calling send_to_gemini
+
+STEP 1: Call kp_lookup(item='PREVALENCE_FILTER') now. Do NOT call send_to_gemini yet.
+        Wait for the result, then continue to Step 2.
+
+STEP 2: Using the PREVALENCE_FILTER result, build the Gemini detection list (steps below).
+
+STEP 3: Only after completing Steps 1 and 2, call send_to_gemini with the opening message.
+
+Do not call send_to_gemini in the same response as kp_lookup — these are sequential steps,
+not parallel. Calling them together means Gemini will receive no scope item list.
+
+Call kp_lookup(item='PREVALENCE_FILTER') to get all KP items with portfolio prevalence scores.
+
+**Step 1 — Semantic aggregation:**
+Group items that represent the same physical work at different specs by stripping measurement
+prefixes and job-specific suffixes. Examples:
+  "2/4\" PAVING", "3/6\" PAVING", "4/4\" PAVING"  →  PAVING
+  "4\" SIDEWALKS", "6\" SIDEWALKS"                  →  SIDEWALKS
+  "8\" SEWER MAIN", "12\" SEWER MAIN"               →  SEWER MAIN
+  "1\" IRR SERVICE", "2\" IRR SERVICE"               →  IRR SERVICE
+  "12\" STORM CMP", "18\" STORM CMP"                 →  STORM PIPE
+  "1\" WATER SERVICES", "2\" WATER SERVICE"          →  WATER SERVICES
+Use judgment — if items clearly represent the same work at different specs, group them.
+
+**Step 2 — Aggregate prevalence:**
+For each work type group, use the MAXIMUM prevalence across all variants as the group score.
+(If any variant of PAVING appears frequently, PAVING is worth looking for.)
+
+**Step 3 — Filter:**
+Include all work type groups with aggregate prevalence >= 0.70.
+
+**Step 4 — Build Gemini detection list:**
+From the filtered groups, build a SCOPE ITEMS list to include in your send_to_gemini
+opening message. Use semantic work type names only — no measurements. Example:
+  PAVING, SIDEWALKS, SEWER MAIN, SCUPPERS, FIRE HYDRANTS, MOBILIZATION, ...
+
+Instruct Gemini to:
+- Find each work type on the plans (callouts, legends, quantity tables, bid schedules)
+- Report the measurement spec it reads from the plans (e.g., "3/6\" paving" — not assumed)
+- Report ALL variants separately if multiple specs appear (e.g., both 4" and 6" sidewalks)
+- Write a null entry for any work type not found after checking relevant sheets
+
+Do NOT include work types already fully covered by structural fields:
+  FIRE HYDRANTS → proposed_fire_hydrant_count  (structural)
+  SEWER MANHOLE → proposed_manhole_count        (structural)
+  ADA RAMPS     → proposed_ped_ramp_count       (structural)
+For these, cross-check Gemini's scope item count against the structural field in QC.
+
+The fixed extraction fields (road_LF, sidewalk_sides, sewer_main_LF, etc.) are always
+extracted regardless of this list. Scope items are additive.
+
 ### Opening the Extraction
 
 Start by calling send_to_gemini with a message that:
 1. Tells Gemini which pages are high-importance (from Phase 1 index) and which sheet types
    they contain — so Gemini knows where to begin.
-2. Lists the fields you most need filled for this job, based on any priors Brian provided
-   (job_type, notes). If Brian noted "no public sewer", tell Gemini to skip sewer coverage.
-3. Instructs Gemini to call index_write("extraction_complete", true) when done.
+2. Lists the standard fields PLUS the SCOPE ITEMS list from the detection step above.
+   If Brian noted "no public sewer", tell Gemini to skip sewer_main_LF.
+3. For scope items: tell Gemini to write all findings to index key "scope_items" as a JSON
+   array. Each entry: {work_type, quantity, unit, spec, pages, confidence}. Spec is the
+   measurement read from the plans (e.g. "3/6\"") or null if not visible. If a work type
+   appears at multiple specs, write one entry per spec.
+4. Instructs Gemini to call index_write("extraction_complete", true) when done.
+5. For road_LF: instruct Gemini to ALWAYS report the full stationing length (end station
+   minus start station) exactly as shown on the plans. Do NOT halve or adjust lengths for
+   roads that front existing streets. Instead, tag each road with
+   road_type: "new_construction" or "improvement_to_existing". Claude handles all quantity
+   adjustments for fronting roads in Phase B — Gemini's job is accurate stationing only.
 
-### Reviewing Extraction Progress
+### Required Fields Checklist
 
-After each Gemini response, read the current index state. Look for these specific
-logical consistency violations — if any are present, redirect Gemini immediately:
+The following fields MUST be present in the index before you may proceed to Phase B.
+"Present" means a non-null value OR an explicit confirmation from Gemini that the field
+is not visible on any sheet (e.g. "no utility plan found").
 
-IMPOSSIBLE VALUES (send Gemini back to re-examine):
-  - water_main_LF > road_LF × 1.15    — water main cannot be longer than the road corridor
-  - sewer_main_LF > road_LF × 1.15    — same for sewer
-  - lot_count > 200                    — flag as likely miscounting (tracts, adjacent lots included)
-  - lot_count < 1                      — extraction likely failed
-  - road_LF_hint > 15,000 LF          — extremely large, verify stationing arithmetic
-  - road_LF_hint < 100 LF             — extremely small, verify not a partial segment
-  - ROW_width_ft < 30 or > 150        — outside normal subdivision range, verify
+CRITICAL (block Phase B if missing):
+  1.  road_LF              — per-road array with at least one entry
+  2.  lot_count            — integer
+  3.  curb_type            — "rolled", "standard", or "mixed"
+  4.  sidewalk_sides       — per-road array with at least one entry
+  5.  ROW_width_ft         — array of objects with 'roads' list and 'width'
+  6.  stripping_depth_in   — integer or null-confirmed
 
-SUSPICIOUS COMBINATIONS (flag but do not block):
-  - lot_count given but road_LF_hint null — road LF almost certainly exists; ask Gemini to
-    check all plan_view pages and look harder for stationing or dimension callouts
-  - sidewalk_sides = "both_sides" AND curb_type = "rolled" — unusual, ask Gemini to confirm
-    both the sidewalk slab and the curb profile on the typical section
-  - large_diameter_water_main_present = true AND water_main_road_coverage_pct < 20 — large
-    main usually runs a longer span; ask Gemini to verify pipe labels
-  - lot_grading_in_scope = true — high cost impact ($70k–$150k). Ask Gemini to quote the
-    exact keyword or note it found. Do not accept this without explicit textual evidence.
+IMPORTANT (request if not present, but do not block Phase B if confirmed absent):
+  7.  sewer_main_LF
+  8.  water_main_LF
+  9.  proposed_fire_hydrant_count
+  10. proposed_manhole_count
+  11. storm_drainage_basin_count
+  12. storm_inlet_type
+  13. irrigation_service_present
+  14. earthwork_balance
+  15. demo_scope_present
+  16. ballast_is_separate_pay_item
+  17. strip_haul_off_required
+  18. existing_road_widening_present
 
-MISSING CRITICAL FIELDS (redirect Gemini to look harder):
-  - road_LF_hint is null after all plan_view and profile pages have been visited
-  - lot_count is null after cover and plat pages have been visited
-  - curb_type is null or "unknown" after typical_section pages have been visited
+### Mandatory QC Loop (run after EVERY send_to_gemini response)
 
-### When Extraction Is Complete
+Step 1 — Call read_index() immediately after receiving Gemini's response.
 
-Extraction is complete when ALL of the following are true:
-  1. Gemini has written extraction_complete = true to the index, OR all high-importance pages
-     have been visited and you have reviewed the results.
-  2. No impossible values remain.
-  3. road_LF_hint and lot_count are either filled or confirmed unreadable with a clear reason.
-  4. curb_type and sidewalk_sides are either filled or confirmed null (no typical section found).
+Step 2a — Go through the Required Fields Checklist above, field by field.
+  For each CRITICAL field that is null or missing:
+    → Send Gemini a targeted redirect: name the specific field, name the specific
+      sheet type where it should appear, and ask Gemini to look there now.
+    → Example: "road_LF is still missing. Please check all plan_view pages for
+      stationing labels or BEGIN/END CONSTRUCTION markers and write the road_LF array."
 
+Step 2b — Check scope_items coverage.
+  Call kp_lookup('PREVALENCE_FILTER') again to recall the full work-type list you sent
+  Gemini. Then compare it against the scope_items array currently in the index.
+
+  A work type is COVERED if scope_items contains any entry for it — including one with
+  quantity=null (meaning Gemini looked and didn't find it). A work type is MISSING if
+  there is no entry at all for it in scope_items.
+
+  For each MISSING work type:
+    → Send Gemini a targeted message: name the work type, tell it which sheet types
+      to check (utility_plan, cover, typical_section, plan_view), and ask it to write
+      either a quantity entry or a null entry confirming it's not present.
+    → Example: "scope_items has no entry for TRAFFIC CONTROL. Please check plan_view
+      and cover pages for any traffic control note or bid item. Write a null entry if
+      not found."
+
+  Do NOT re-request work types that already have a null entry — Gemini already looked.
+
+Step 3 — Check for impossible values:
+  - water_main_LF > sum(road_LF lengths) × 1.15  — water main cannot exceed road corridor
+  - sewer_main_LF > sum(road_LF lengths) × 1.15  — same for sewer
+  - lot_count > 200                                — flag as likely miscounting
+  - lot_count < 1                                  — extraction likely failed
+  - sum(road_LF lengths) > 15,000 LF              — verify stationing arithmetic
+  - sum(road_LF lengths) < 100 LF                 — verify not a partial segment
+  - any ROW_width_ft entry < 30 or > 150           — outside normal subdivision range
+  For any impossible value found: send Gemini back to re-examine that specific region.
+
+Step 4 — Check suspicious combinations (flag, send Gemini back once):
+  - lot_count present but road_LF array empty → ask Gemini to check all plan_view pages
+  - any sidewalk_sides = "both_sides" AND curb_type = "rolled" → confirm on typical section
+  - large_diameter_water_main_present = true AND water_main_LF < 200 → verify pipe labels
+  - lot_grading_in_scope = true → ask Gemini to quote the exact note or callout it found
+  - sewer_main_LF = water_main_LF exactly → ask Gemini to confirm these are truly equal
+
+### QC Round Limit and Acceptance Rules
+
+CONFIRMATION ACCEPTANCE RULE — when to stop pushing back on a value:
+  - If Gemini returns the same value on a re-check from the SAME source region: accept it.
+    Do not ask again from the same source. Mark it [CONFIRMED BY GEMINI] in Phase B basis.
+  - If the re-check was from the same source AND you believe a different region contains
+    better data: ask Gemini to check the new region ONCE. After that, accept whatever comes back.
+  - After 2 re-examination rounds total: accept all remaining values at their current
+    confidence levels. Apply Phase B fallback rules for null/low-confidence fields.
+    Proceed to Phase B immediately — do NOT send a third message.
+
+Keeping Phase A short is critical: context used in Phase A comes at the direct expense of
+Phase B output quality.
+
+### Gate: When You May Proceed to Phase B
+
+You may ONLY proceed to Phase B when ALL of the following are true:
+  1. All 6 CRITICAL fields are present in the index OR Gemini has explicitly confirmed
+     each missing one is not readable on any sheet.
+  2. No impossible values remain in the index.
+  3. You have completed at most 2 QC redirect rounds.
+
+Do NOT proceed to Phase B because extraction_complete = true alone. That flag is written
+by Gemini — you must still verify the checklist above before accepting it.
 At that point, do NOT call send_to_gemini again. Proceed to Phase B.
 
 ---
@@ -77,23 +217,57 @@ At that point, do NOT call send_to_gemini again. Proceed to Phase B.
 
 Once extraction is complete, generate the line-item budget estimate.
 
+### Phase B KP Setup
+
+Before writing a single line item, call kp_lookup for each of these five sections. They are
+NOT in your opening context — fetch them now so the estimator rules in system_prompt.txt
+can reference them:
+
+  kp_lookup('SECTION: qty_scale_correlations')  — quantity-to-ROW_SF formula fallbacks
+  kp_lookup('SECTION: item_scaling')            — per-item formula slopes (ROLLED CURB, IRRIGATION SLEEVES, etc.)
+  kp_lookup('SECTION: ls_item_variance')        — CV data for LS item confidence bands
+  kp_lookup('SECTION: ls_earthwork_rates')      — earthwork rate table for STRIP ROW / EXC TO EMBANK
+  kp_lookup('SECTION: paving_rates')            — subgrade and paving unit rates
+
+### Scope Items → Line Items
+
+Before writing any line items, read `scope_items` from the extraction index. For each entry:
+1. Use the discovered spec to form the exact kp_lookup key:
+     work_type="PAVING", spec="3/6\"" → kp_lookup('3/6" PAVING')
+   If no spec was found (spec=null), call kp_lookup for each KP variant of that work type
+   and use the most common spec (highest N in the distribution).
+2. Use Gemini's reported quantity directly if confidence="high" or "medium".
+   For confidence="low", apply the appropriate fallback from the estimator rules.
+3. If a work type appears at multiple specs (e.g. 4" and 6" sidewalks), price each as a
+   separate line item.
+4. Do NOT add a scope item to the estimate if Gemini wrote quantity=null AND no structural
+   field or analog basis exists for it.
+
+### Pricing
+
+For every line item you price, call kp_lookup(item_name) to retrieve the current unit price
+distribution. Do not estimate prices from memory. The full distribution (median, mean, N,
+observations with dates) is available on demand — always fetch it before pricing each item.
+
 Use the estimator rules from the system_prompt (derivation rules, analog selection, pricing,
 sanity check) exactly as written. The extracted index values replace what Gemini would have
 returned in the original single-pass pipeline:
 
   extracted["lot_count"]                    ← index["lot_count"]
-  extracted["road_LF_hint"]                 ← index["road_LF_hint"]
+  extracted["road_LF"]                      ← index["road_LF"]  (array — sum lengths for total road_LF)
   extracted["curb_type"]                    ← index["curb_type"]
-  extracted["sidewalk_sides"]               ← index["sidewalk_sides"]
+  extracted["sidewalk_sides"]               ← index["sidewalk_sides"]  (per-road array)
   extracted["ROW_width_ft_hint"]            ← index["ROW_width_ft"]
   extracted["curb_to_curb_ft_hint"]         ← index["curb_to_curb_ft"]
   extracted["stripping_depth_in"]           ← index["stripping_depth_in"]
   extracted["storm_drainage_basin_count"]   ← index["storm_drainage_basin_count"]
   extracted["proposed_fire_hydrant_count"]  ← index["proposed_fire_hydrant_count"]
   extracted["proposed_manhole_count"]       ← index["proposed_manhole_count"]
-  extracted["sewer_main_road_coverage_pct"] ← index["sewer_main_road_coverage_pct"]
-  extracted["water_main_road_coverage_pct"] ← index["water_main_road_coverage_pct"]
-  (and all other index fields)
+  extracted["proposed_ped_ramp_count"]      ← index["proposed_ped_ramp_count"]
+  extracted["sewer_main_LF"]               ← index["sewer_main_LF"]  (actual LF from plans)
+  extracted["water_main_LF"]               ← index["water_main_LF"]  (actual LF from plans)
+  extracted["existing_road_widening_present"] ← index["existing_road_widening_present"]
+  (and all other index fields including any dynamic fields added during Phase A)
 
 For any field that is null after extraction, apply the fallback rules in the estimator
 system prompt — do not block. A null field falls through to analog scaling.
@@ -120,3 +294,58 @@ After the estimate, add one section:
   ## Extraction Quality Notes
   List any fields that had confidence="low" or were null, what fallback was used,
   and what Brian should verify on the plans before accepting the number.
+
+Once the full proposal is written (all sections above complete), call:
+
+  end_generation(grand_total=<dollar amount>)
+
+Pass the Grand Total as a number (e.g. 1234567.89). This is the required final step —
+do not call it before the complete proposal is written.
+
+---
+
+## Phase B Special Rules
+
+The following rules supplement and override the estimator system_prompt where indicated.
+
+### 6" SIDEWALKS Cross-Check
+After computing 6" SF geometrically from sidewalk_sides × road_LF, cross-check using
+item pairs:
+  1. Call kp_lookup('item_pairs: 4" SIDEWALKS')
+  2. Find the pair entry where the partner is '6" SIDEWALKS'. Read its median_ratio_a_to_b.
+     (This ratio is 4"_SF / 6"_SF across shared jobs.)
+  3. Compute: 6"_SF_check = 4"_SF / median_ratio_a_to_b
+  4. If your geometric result exceeds 6"_SF_check by more than 20%, use 6"_SF_check instead
+     and flag [6" SIDEWALK: geometric (X,XXX SF) overridden by pair ratio — verify with Brian].
+Do NOT hardcode any ratio — pull median_ratio_a_to_b dynamically from kp_lookup each time.
+
+### SWALES Scaling (overrides system_prompt SWALES rule)
+Scale SWALES LS by fronting_LF, NOT ROW_SF:
+  fronting_LF = sum of road_LF lengths where road_type = "fronting_existing"
+                OR road_type = "improvement_to_existing"
+  swales_est = kp_analog_value × (fronting_LF / analog_fronting_LF)
+If the KP has only N=1 observation for SWALES:
+  • Cap the scaled result at 1.5× that single observation's value.
+  • Flag as [SWALES: N=1 analog — fronting_LF scaled, capped at 1.5× obs, ±40%].
+If fronting_LF = 0 (no fronting or improvement-to-existing roads in road_LF), omit SWALES
+unless scope_notes explicitly mentions swales or bioswales.
+
+### TRAFFIC CONTROL
+If existing_road_widening_present is a non-empty list (i.e., any road is being widened or
+fronted), ALWAYS include TRAFFIC CONTROL as 1 LS — even if Gemini extracted
+traffic_control_in_scope = false or null. Fronting or widening any existing collector or
+arterial road is a logical prerequisite for traffic control.
+Price from kp_lookup('TRAFFIC CONTROL') using the KP median.
+
+### MAILBOX PAD
+If demo_notes or scope_notes contains "RELOCATE MAILBOX", or contains both "RELOCATE" and
+"MAILBOX" (case-insensitive), include MAILBOX PAD as 1 EA line item. A mailbox relocation
+in the demolition scope implies a new concrete pad at the relocated position.
+Price from kp_lookup if available; otherwise use analog.
+
+### 1" IRR SERVICE Suppression
+If scope_notes, demo_notes, or any extracted index field explicitly states that an existing
+water meter will serve ROW irrigation (keywords: "USE EXISTING METER", "existing irrigation
+meter", "existing meter", "connect to existing irrigation"), do NOT include 1" IRR SERVICE.
+The existing meter means no new irrigation district service connection is needed — remove
+the item entirely rather than flagging it low-confidence.

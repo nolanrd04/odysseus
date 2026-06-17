@@ -45,7 +45,8 @@ Wraps `EventSource` for the Phase 3 extraction stream. Accepts callbacks: `onPag
 **`extraction_message` roles:**
 | `role` | Extra fields | Rendered as |
 |--------|-------------|-------------|
-| `claude` | `text`, `model` | Manager chat bubble (with thinking section if `<think>` present) |
+| `claude_thinking` | `text`, `model` | Collapsible thinking block (`.qp-thinking-section`) — separate from output, collapsed by default |
+| `claude` | `text`, `model` | Manager chat bubble (output only — thinking is emitted separately) |
 | `claude_to_gemini` | `text` | Collapsible `→ Gemini instruction` block |
 | `tool_call` | `tool_id`, `tool`, `args` | `.agent-thread-node running` with expandable Input |
 | `tool_result` | `tool_id`, `tool`, `result` | Updates node to done with expandable Output |

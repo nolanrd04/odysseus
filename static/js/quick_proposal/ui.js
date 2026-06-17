@@ -366,6 +366,19 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                 <div class="qp-jobs-section" id="qp-jobs-section">
                     <div class="qp-model-label">Reference Jobs</div>
                     <div class="qp-jobs-grid" id="qp-jobs-grid"><span style="opacity:0.5;font-size:11px">Loading…</span></div>
+                    <div class="qp-holdout-notice" id="qp-holdout-notice" style="display:none"></div>
+                </div>
+                <div class="qp-import-section" id="qp-import-section">
+                    <label class="qp-import-toggle">
+                        <input type="checkbox" id="qp-import-toggle"> Import Classifications
+                        <span class="qp-import-hint">Skip Phase 1 — reuse bboxes from a previous run</span>
+                    </label>
+                    <div class="qp-import-picker" id="qp-import-picker" style="display:none">
+                        <select class="qp-model-select" id="qp-import-run-select">
+                            <option value="">Loading runs…</option>
+                        </select>
+                        <div class="qp-import-run-label" id="qp-import-run-label"></div>
+                    </div>
                 </div>
                 <button class="qp-run-btn" id="qp-run-btn" disabled>Start</button>
             </div>
@@ -433,14 +446,62 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                 jobsGrid.innerHTML = '<span style="opacity:0.5;font-size:11px">No reference jobs found</span>';
                 return;
             }
+            const holdoutNotice = overlay.querySelector('#qp-holdout-notice');
+            const updateHoldoutNotice = () => {
+                const unchecked = [...jobsGrid.querySelectorAll('input[type=checkbox]:not(:checked)')];
+                const withHoldout = unchecked.filter(cb => cb.dataset.holdoutPath);
+                if (unchecked.length === 1 && withHoldout.length === 1) {
+                    holdoutNotice.textContent = `Holdout KP active for: ${unchecked[0].value}`;
+                    holdoutNotice.style.display = 'block';
+                } else if (unchecked.length > 0) {
+                    holdoutNotice.textContent = withHoldout.length
+                        ? `Holdout KP available for ${withHoldout.length} job(s) — uncheck exactly one to activate`
+                        : '';
+                    holdoutNotice.style.display = withHoldout.length ? 'block' : 'none';
+                } else {
+                    holdoutNotice.style.display = 'none';
+                }
+            };
             jobs.forEach(job => {
                 const chip = document.createElement('label');
                 chip.className = 'qp-job-chip';
-                chip.innerHTML = `<input type="checkbox" value="${_esc(job.id)}" checked> ${_esc(job.name)}`;
+                const holdoutAttr = job.holdout_kp_path ? ` data-holdout-path="${_esc(job.holdout_kp_path)}"` : '';
+                chip.innerHTML = `<input type="checkbox" value="${_esc(job.id)}"${holdoutAttr} checked> ${_esc(job.name)}`;
+                chip.querySelector('input').addEventListener('change', updateHoldoutNotice);
                 jobsGrid.appendChild(chip);
             });
         })
         .catch(() => { jobsGrid.innerHTML = '<span style="opacity:0.5;font-size:11px">Could not load jobs</span>'; });
+
+    // Import classifications toggle
+    const importToggle = overlay.querySelector('#qp-import-toggle');
+    const importPicker = overlay.querySelector('#qp-import-picker');
+    const importSelect = overlay.querySelector('#qp-import-run-select');
+    const importLabel  = overlay.querySelector('#qp-import-run-label');
+
+    importToggle.addEventListener('change', () => {
+        importPicker.style.display = importToggle.checked ? 'block' : 'none';
+        if (importToggle.checked && importSelect.options.length <= 1) {
+            fetch('/api/quick_proposal/runs', { credentials: 'same-origin' })
+                .then(r => r.ok ? r.json() : [])
+                .then(runs => {
+                    importSelect.innerHTML = '<option value="">— select a previous run —</option>';
+                    runs.forEach(run => {
+                        const opt = document.createElement('option');
+                        opt.value = run.id;
+                        const ts = run.timestamp ? new Date(run.timestamp * 1000).toLocaleDateString() : '';
+                        opt.textContent = `${run.filename || run.id}${ts ? '  (' + ts + ')' : ''}`;
+                        importSelect.appendChild(opt);
+                    });
+                })
+                .catch(() => { importSelect.innerHTML = '<option value="">Could not load runs</option>'; });
+        }
+    });
+
+    importSelect.addEventListener('change', () => {
+        const opt = importSelect.options[importSelect.selectedIndex];
+        importLabel.textContent = opt.value ? `Will import from: ${opt.textContent.trim()}` : '';
+    });
 
     // Pre-fill from an existing upload (Proposal Runs → Re-run flow)
     if (prefillUploadId) {
@@ -470,7 +531,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
         onFileSelected(e.dataTransfer.files[0]);
     });
 
-    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename, parseInt(retryInput.value, 10) || 3, [...fallbackModels]));
+    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename, parseInt(retryInput.value, 10) || 3, [...fallbackModels], importToggle.checked ? importSelect.value : ''));
 
     return overlay;
 }
@@ -516,7 +577,7 @@ async function loadModels(select, { preferClaude = false } = {}) {
     }
 }
 
-async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '', geminiRetryAttempts = 3, geminiFallbackModels = []) {
+async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '', geminiRetryAttempts = 3, geminiFallbackModels = [], importFromRunId = '') {
     const runBtn       = overlay.querySelector('#qp-run-btn');
     const cancelBtn    = overlay.querySelector('#qp-cancel-btn');
     const statusEl     = overlay.querySelector('#qp-status');
@@ -526,6 +587,10 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
     const mainOutput   = overlay.querySelector('#qp-main-output');
     const notes        = overlay.querySelector('#qp-notes').value;
     const selectedJobs = [...overlay.querySelectorAll('#qp-jobs-grid input[type=checkbox]:checked')].map(cb => cb.value);
+    const uncheckedCbs = [...overlay.querySelectorAll('#qp-jobs-grid input[type=checkbox]:not(:checked)')];
+    const holdoutKpPath = (uncheckedCbs.length === 1 && uncheckedCbs[0].dataset.holdoutPath)
+        ? uncheckedCbs[0].dataset.holdoutPath
+        : '';
 
     runBtn.disabled = true;
     runBtn.textContent = 'Validating…';
@@ -586,7 +651,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         const res = await fetch('/api/quick_proposal/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ upload_id: uploadId, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels }),
+            body: JSON.stringify({ upload_id: uploadId, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId }),
         });
         if (!res.ok) throw new Error(`Run failed: ${res.status}`);
         runId = (await res.json()).run_id;
@@ -644,7 +709,16 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
             addThumbnail(sidebarPages, mainOutput, data.page_idx, data.url);
         },
 
-        onIndexLoaded(_data) { /* job list is now selected before run starts */ },
+        onIndexLoaded(data) {
+            const kp = data.kp_path || '';
+            const isHoldout = kp.includes('holdout');
+            console.info(`[quick_proposal] knowledge pack loaded: ${kp}${isHoldout ? ' (HOLDOUT)' : ''}`);
+            if (isHoldout) {
+                // Patch the phase-complete message so the user sees "holdout" in status
+                const label = kp.split('/').slice(-2, -1)[0] || 'holdout';
+                setStatus(statusEl, `Knowledge base loaded — holdout KP: ${label}`);
+            }
+        },
 
         onPageClassified(data) {
             updateThumbnailClassification(sidebarPages, data);
@@ -662,6 +736,8 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         },
 
         onRegionPreview(data) { addRegionPreview(mainOutput, data); },
+
+        onContextUsage(data) { updateContextMeter(mainOutput, data); },
 
         onError(data) {
             setStatus(statusEl, `Error: ${data.message}`);
@@ -1200,6 +1276,18 @@ function renderExtractionPanel(mainOutput) {
                 Extraction Log
                 <button class="qp-export-log-btn" id="qp-export-log-btn" title="Copy log as plain text">Export log</button>
             </div>
+            <div class="qp-context-meter" id="qp-context-meter">
+                <div class="qp-context-row" id="qp-ctx-claude">
+                    <span class="qp-ctx-label">Claude</span>
+                    <div class="qp-ctx-bar-wrap"><div class="qp-ctx-bar"></div></div>
+                    <span class="qp-ctx-tokens">—</span>
+                </div>
+                <div class="qp-context-row" id="qp-ctx-gemini">
+                    <span class="qp-ctx-label">Gemini</span>
+                    <div class="qp-ctx-bar-wrap"><div class="qp-ctx-bar"></div></div>
+                    <span class="qp-ctx-tokens">—</span>
+                </div>
+            </div>
             <div class="qp-extraction-messages" id="qp-extraction-messages"></div>
         </div>
         <div class="qp-index-panel" id="qp-index-panel">
@@ -1222,6 +1310,18 @@ function renderExtractionPanel(mainOutput) {
 function _esc(str) {
     if (str == null) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function updateContextMeter(mainOutput, data) {
+    const row = mainOutput.querySelector(`#qp-ctx-${data.role}`);
+    if (!row) return;
+    const pct = Math.min(100, (data.input_tokens / data.context_window) * 100);
+    const bar = row.querySelector('.qp-ctx-bar');
+    bar.style.width = pct.toFixed(1) + '%';
+    bar.className = 'qp-ctx-bar' + (pct > 85 ? ' qp-ctx-bar-warn' : pct > 65 ? ' qp-ctx-bar-caution' : '');
+    const fmt = t => t >= 1000 ? (t / 1000).toFixed(1) + 'k' : String(t);
+    row.querySelector('.qp-ctx-tokens').textContent =
+        `${fmt(data.input_tokens)} / ${fmt(data.context_window)}`;
 }
 
 
@@ -1585,6 +1685,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
                 onExtractionMessage(data)  { appendExtractionMessage(mainOutput, data); },
                 onIndexUpdate(data)        { updateLiveIndex(mainOutput, data); },
                 onRegionPreview(data)      { addRegionPreview(mainOutput, data); },
+                onContextUsage(data)       { updateContextMeter(mainOutput, data); },
                 onDone() {
                     cancelBtn.style.display = 'none';
                     phase3Bar.style.display = 'flex';

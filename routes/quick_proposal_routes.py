@@ -155,6 +155,8 @@ class RunRequest(BaseModel):
     filename: str = ""
     gemini_retry_attempts: int = 3
     gemini_fallback_models: List[str] = []
+    holdout_kp_path: str = ""
+    import_from_run_id: str = ""
 
 
 class ValidateRequest(BaseModel):
@@ -309,6 +311,7 @@ def _compact_case(data: dict) -> dict | None:
         "total":              proposal.get("total_reconciled"),
         "lot_count":          scale.get("lot_count"),
         "road_LF":            scale.get("road_LF"),
+        "ROW_width_ft":       scale.get("ROW_width_ft"),
         "ROW_SF":             scale.get("ROW_SF"),
         "stripping_depth_in": scale.get("stripping_depth_in"),
         "road_subgrade_SY":   scale.get("road_subgrade_SY"),
@@ -345,8 +348,9 @@ def _load_case_library() -> list[dict]:
     return cases
 
 
-def _load_knowledge_pack() -> dict:
-    return json.loads(_KP_PATH.read_text(encoding="utf-8"))
+def _load_knowledge_pack(path: str | None = None) -> dict:
+    target = Path(path) if path else _KP_PATH
+    return json.loads(target.read_text(encoding="utf-8"))
 
 
 # ── Phase 2: index construction ────────────────────────────────────────────────
@@ -638,19 +642,38 @@ _GEMINI_PHASE3_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "move_bbox",
-            "description": "Re-renders a page crop at adjusted coordinates without mutating the stored bbox. Use when the Phase 1 bbox is misaligned. Coordinates are percentages (0-100).",
+            "name": "crop_page",
+            "description": "Renders a free-form crop of any page area from the source PDF at high DPI. Use when information lies outside a Phase 1 bbox or you need to pan to an adjacent area. No bbox_id needed. Coordinates are percentages (0–100): x1=left, y1=top, x2=right, y2=bottom.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "bbox_id": {"type": "string", "description": "Source bbox_id to identify which page to render from"},
-                    "x1": {"type": "number", "description": "Adjusted left edge (0-100)"},
-                    "y1": {"type": "number", "description": "Adjusted top edge (0-100)"},
-                    "x2": {"type": "number", "description": "Adjusted right edge (0-100)"},
-                    "y2": {"type": "number", "description": "Adjusted bottom edge (0-100)"},
+                    "page_idx": {"type": "integer", "description": "0-based page index"},
+                    "x1": {"type": "number", "description": "Left edge, 0–100%"},
+                    "y1": {"type": "number", "description": "Top edge, 0–100%"},
+                    "x2": {"type": "number", "description": "Right edge, 0–100%"},
+                    "y2": {"type": "number", "description": "Bottom edge, 0–100%"},
                     "dpi": {"type": "integer", "description": "Render DPI (default 200)"},
                 },
-                "required": ["bbox_id", "x1", "y1", "x2", "y2"],
+                "required": ["page_idx", "x1", "y1", "x2", "y2"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enhance_subregion",
+            "description": "Zooms into a sub-area of an existing Phase 1 bbox. Coordinates are percentages (0–100) relative to the parent region — no page-level math required. The backend maps child coordinates to page space and renders from the source PDF at high DPI. Use this to iteratively narrow in on a specific callout, label, or dimension within an already-enhanced image.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "parent_bbox_id": {"type": "string", "description": "bbox_id of the parent region (e.g. '4_r2')"},
+                    "x1": {"type": "number", "description": "Left edge relative to parent, 0–100%"},
+                    "y1": {"type": "number", "description": "Top edge relative to parent, 0–100%"},
+                    "x2": {"type": "number", "description": "Right edge relative to parent, 0–100%"},
+                    "y2": {"type": "number", "description": "Bottom edge relative to parent, 0–100%"},
+                    "dpi": {"type": "integer", "description": "Render DPI (default 300)"},
+                },
+                "required": ["parent_bbox_id", "x1", "y1", "x2", "y2"],
             },
         },
     },
@@ -674,6 +697,18 @@ _GEMINI_PHASE3_TOOLS = [
 ]
 
 
+def _render_pdf_crop(source_path: str, page_idx: int, x1: float, y1: float, x2: float, y2: float, dpi: int) -> bytes:
+    """Render a clip from a PDF page using fitz. Coords are 0–100 percentages (xmin,ymin,xmax,ymax)."""
+    import fitz
+    doc  = fitz.open(source_path)
+    page = doc[page_idx]
+    pw, ph = page.rect.width, page.rect.height
+    clip = fitz.Rect(x1 / 100 * pw, y1 / 100 * ph, x2 / 100 * pw, y2 / 100 * ph)
+    pix  = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), clip=clip)
+    doc.close()
+    return pix.tobytes("jpeg")
+
+
 async def _execute_gemini_tool(
     name: str, args: dict, index, queue: asyncio.Queue
 ) -> list:
@@ -685,34 +720,25 @@ async def _execute_gemini_tool(
         if not rec:
             return [{"type": "text", "text": f"Error: bbox_id '{bbox_id}' not found in index."}]
         try:
-            from PIL import Image as PilImage
-
             if index.source_is_pdf:
-                from pdf2image import convert_from_path
-                images = await asyncio.to_thread(
-                    convert_from_path,
-                    index.source_path,
-                    dpi=dpi,
-                    first_page=rec.page_idx + 1,
-                    last_page=rec.page_idx + 1,
+                jpeg_bytes = await asyncio.to_thread(
+                    _render_pdf_crop, index.source_path,
+                    rec.page_idx, rec.x1, rec.y1, rec.x2, rec.y2, dpi,
                 )
-                if not images:
-                    return [{"type": "text", "text": "Error: could not render page"}]
-                img = images[0]
             else:
-                img = await asyncio.to_thread(PilImage.open, index.pages[rec.page_idx].image_path)
-
-            w, h  = img.size
-            x1    = max(0, int(rec.x1 / 100 * w))
-            y1    = max(0, int(rec.y1 / 100 * h))
-            x2    = min(w, int(rec.x2 / 100 * w))
-            y2    = min(h, int(rec.y2 / 100 * h))
-            if x2 <= x1 or y2 <= y1:
-                return [{"type": "text", "text": f"Error: invalid bbox coords ({x1},{y1},{x2},{y2})"}]
-            cropped = img.crop((x1, y1, x2, y2))
-            buf     = io.BytesIO()
-            cropped.save(buf, "JPEG", quality=90)
-            b64 = base64.b64encode(buf.getvalue()).decode()
+                from PIL import Image as PilImage
+                img  = await asyncio.to_thread(PilImage.open, index.pages[rec.page_idx].image_path)
+                w, h = img.size
+                x1   = max(0, int(rec.x1 / 100 * w))
+                y1   = max(0, int(rec.y1 / 100 * h))
+                x2   = min(w, int(rec.x2 / 100 * w))
+                y2   = min(h, int(rec.y2 / 100 * h))
+                if x2 <= x1 or y2 <= y1:
+                    return [{"type": "text", "text": f"Error: invalid bbox coords ({x1},{y1},{x2},{y2})"}]
+                buf = io.BytesIO()
+                img.crop((x1, y1, x2, y2)).save(buf, "JPEG", quality=90)
+                jpeg_bytes = buf.getvalue()
+            b64 = base64.b64encode(jpeg_bytes).decode()
             return [
                 {"type": "text", "text": f"Region {bbox_id} at {dpi} DPI:"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
@@ -724,52 +750,87 @@ async def _execute_gemini_tool(
     elif name == "index_read":
         return [{"type": "text", "text": json.dumps(index.extracted_values) if index.extracted_values else "{}"}]
 
-    elif name == "move_bbox":
-        bbox_id = args.get("bbox_id", "")
-        dpi     = int(args.get("dpi", 200))
-        rec     = index.bboxes.get(bbox_id)
-        if not rec:
-            return [{"type": "text", "text": f"Error: bbox_id '{bbox_id}' not found in index."}]
+    elif name == "crop_page":
+        page_idx = int(args.get("page_idx", 0))
+        x1       = float(args.get("x1", 0))
+        y1       = float(args.get("y1", 0))
+        x2       = float(args.get("x2", 100))
+        y2       = float(args.get("y2", 100))
+        dpi      = int(args.get("dpi", 200))
+        if page_idx >= len(index.pages):
+            return [{"type": "text", "text": f"Error: page_idx {page_idx} out of range ({len(index.pages)} pages)"}]
         try:
-            from PIL import Image as PilImage
-            x1_pct = float(args.get("x1", rec.x1))
-            y1_pct = float(args.get("y1", rec.y1))
-            x2_pct = float(args.get("x2", rec.x2))
-            y2_pct = float(args.get("y2", rec.y2))
-
             if index.source_is_pdf:
-                from pdf2image import convert_from_path
-                images = await asyncio.to_thread(
-                    convert_from_path,
-                    index.source_path,
-                    dpi=dpi,
-                    first_page=rec.page_idx + 1,
-                    last_page=rec.page_idx + 1,
+                jpeg_bytes = await asyncio.to_thread(
+                    _render_pdf_crop, index.source_path,
+                    page_idx, x1, y1, x2, y2, dpi,
                 )
-                if not images:
-                    return [{"type": "text", "text": "Error: could not render page"}]
-                img = images[0]
             else:
-                img = await asyncio.to_thread(PilImage.open, index.pages[rec.page_idx].image_path)
-
-            w, h  = img.size
-            x1    = max(0, int(x1_pct / 100 * w))
-            y1    = max(0, int(y1_pct / 100 * h))
-            x2    = min(w, int(x2_pct / 100 * w))
-            y2    = min(h, int(y2_pct / 100 * h))
-            if x2 <= x1 or y2 <= y1:
-                return [{"type": "text", "text": f"Error: invalid adjusted bbox coords ({x1},{y1},{x2},{y2})"}]
-            cropped = img.crop((x1, y1, x2, y2))
-            buf     = io.BytesIO()
-            cropped.save(buf, "JPEG", quality=90)
-            b64 = base64.b64encode(buf.getvalue()).decode()
+                from PIL import Image as PilImage
+                img  = await asyncio.to_thread(PilImage.open, index.pages[page_idx].image_path)
+                w, h = img.size
+                px1  = max(0, int(x1 / 100 * w))
+                py1  = max(0, int(y1 / 100 * h))
+                px2  = min(w, int(x2 / 100 * w))
+                py2  = min(h, int(y2 / 100 * h))
+                if px2 <= px1 or py2 <= py1:
+                    return [{"type": "text", "text": "Error: invalid crop coords"}]
+                buf = io.BytesIO()
+                img.crop((px1, py1, px2, py2)).save(buf, "JPEG", quality=90)
+                jpeg_bytes = buf.getvalue()
+            b64 = base64.b64encode(jpeg_bytes).decode()
             return [
-                {"type": "text", "text": f"Adjusted view of page {rec.page_idx} at ({x1_pct:.1f},{y1_pct:.1f},{x2_pct:.1f},{y2_pct:.1f}) {dpi} DPI:"},
+                {"type": "text", "text": f"Page {page_idx} crop [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]% at {dpi} DPI:"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ]
         except Exception as e:
-            logger.warning(f"[quick_proposal] move_bbox error: {e}", exc_info=True)
-            return [{"type": "text", "text": f"Error rendering adjusted region: {e}"}]
+            logger.warning(f"[quick_proposal] crop_page error: {e}", exc_info=True)
+            return [{"type": "text", "text": f"Error rendering crop: {e}"}]
+
+    elif name == "enhance_subregion":
+        parent_id = args.get("parent_bbox_id", "")
+        parent    = index.bboxes.get(parent_id)
+        if not parent:
+            return [{"type": "text", "text": f"Error: parent_bbox_id '{parent_id}' not found in index."}]
+        x1_rel = float(args.get("x1", 0))
+        y1_rel = float(args.get("y1", 0))
+        x2_rel = float(args.get("x2", 100))
+        y2_rel = float(args.get("y2", 100))
+        dpi    = int(args.get("dpi", 300))
+        # Map child coords (0-100% relative to parent) → page-level coords (0-100%)
+        pw = parent.x2 - parent.x1
+        ph = parent.y2 - parent.y1
+        x1_page = parent.x1 + x1_rel / 100 * pw
+        y1_page = parent.y1 + y1_rel / 100 * ph
+        x2_page = parent.x1 + x2_rel / 100 * pw
+        y2_page = parent.y1 + y2_rel / 100 * ph
+        try:
+            if index.source_is_pdf:
+                jpeg_bytes = await asyncio.to_thread(
+                    _render_pdf_crop, index.source_path,
+                    parent.page_idx, x1_page, y1_page, x2_page, y2_page, dpi,
+                )
+            else:
+                from PIL import Image as PilImage
+                img  = await asyncio.to_thread(PilImage.open, index.pages[parent.page_idx].image_path)
+                w, h = img.size
+                px1  = max(0, int(x1_page / 100 * w))
+                py1  = max(0, int(y1_page / 100 * h))
+                px2  = min(w, int(x2_page / 100 * w))
+                py2  = min(h, int(y2_page / 100 * h))
+                if px2 <= px1 or py2 <= py1:
+                    return [{"type": "text", "text": "Error: invalid subregion coords"}]
+                buf = io.BytesIO()
+                img.crop((px1, py1, px2, py2)).save(buf, "JPEG", quality=90)
+                jpeg_bytes = buf.getvalue()
+            b64 = base64.b64encode(jpeg_bytes).decode()
+            return [
+                {"type": "text", "text": f"Sub-region of {parent_id} [{x1_rel:.0f},{y1_rel:.0f},{x2_rel:.0f},{y2_rel:.0f}]% → page [{x1_page:.1f},{y1_page:.1f},{x2_page:.1f},{y2_page:.1f}]% at {dpi} DPI:"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ]
+        except Exception as e:
+            logger.warning(f"[quick_proposal] enhance_subregion error: {e}", exc_info=True)
+            return [{"type": "text", "text": f"Error rendering subregion: {e}"}]
 
     elif name == "index_write":
         key           = args.get("key", "")
@@ -838,7 +899,7 @@ async def _gemini_call_with_retry(
 
             last_response = r
             if r.status_code not in _RETRYABLE_STATUS:
-                logger.error(f"[quick_proposal] Gemini non-retryable {r.status_code} model={cfg_model}: {r.text[:300]}")
+                logger.error(f"[quick_proposal] Gemini non-retryable {r.status_code} model={cfg_model}: {r.text}")
                 r.raise_for_status()
 
             logger.warning(f"[quick_proposal] Gemini {r.status_code} model={cfg_model} attempt={attempt + 1}/{n_tries}: {r.text[:200]}")
@@ -866,7 +927,8 @@ async def _run_gemini_with_tools(
             "tools":    _GEMINI_PHASE3_TOOLS,
             "max_tokens": 8192,
         }
-        if gemini_state.get("cache_name"):
+        # cached_content is a native Gemini API field; the OpenAI-compat endpoint rejects it
+        if gemini_state.get("cache_name") and "/openai/" not in gemini_state["url"]:
             payload["cached_content"] = gemini_state["cache_name"]
 
         r = await _gemini_call_with_retry(
@@ -877,6 +939,14 @@ async def _run_gemini_with_tools(
         )
 
         resp_data  = r.json()
+        g_usage = resp_data.get("usage", {})
+        if g_usage:
+            await _emit(queue, "context_usage",
+                        role="gemini",
+                        model=gemini_state.get("model", ""),
+                        input_tokens=g_usage.get("prompt_tokens", 0),
+                        output_tokens=g_usage.get("completion_tokens", 0),
+                        context_window=1048576)
         choice     = resp_data.get("choices", [{}])[0]
         msg        = choice.get("message", {})
         tool_calls = msg.get("tool_calls") or []
@@ -945,7 +1015,12 @@ async def _run_gemini_with_tools(
             # Gemini OpenAI-compat rejects image_url in tool messages; keep only text
             # here and carry images forward as a user message instead.
             text_parts = [b["text"] for b in result_blocks if b.get("type") == "text"]
-            bbox_id = tc_args.get("bbox_id", "")
+            if tool_name == "crop_page":
+                bbox_id = f"p{tc_args.get('page_idx', '?')}_crop"
+            elif tool_name == "enhance_subregion":
+                bbox_id = f"{tc_args.get('parent_bbox_id', '?')}_sub"
+            else:
+                bbox_id = tc_args.get("bbox_id", "")
             pending_images.extend((bbox_id, b) for b in result_blocks if b.get("type") == "image_url")
             gemini_state["messages"].append({
                 "role":         "tool",
@@ -969,6 +1044,91 @@ async def _run_gemini_with_tools(
     return "(extraction loop limit reached)"
 
 
+def _kp_lookup(knowledge_pack: dict, query: str) -> str:
+    """Fuzzy lookup for unit price distributions, price trends, item pair detail, or named KP sections."""
+    import difflib
+
+    distributions = knowledge_pack.get("unit_price_distributions", {})
+    price_trends  = knowledge_pack.get("price_trends", {})
+    pairs         = knowledge_pack.get("item_pairs", {}).get("pairs", [])
+
+    q = query.strip()
+
+    # Named section lookup — "SECTION: <section_name>"
+    if q.lower().startswith("section:"):
+        section_name = q.split(":", 1)[1].strip()
+        section_data = knowledge_pack.get(section_name)
+        if section_data is None:
+            available = sorted(k for k in knowledge_pack if k not in {"unit_price_distributions", "price_trends"})
+            return f"No section '{section_name}' found. Available sections: {', '.join(available)}"
+        return json.dumps(section_data)
+
+    # item_pairs detail lookup — prefix "item_pairs: <item name>"
+    if q.lower().startswith("item_pair"):
+        parts = q.split(":", 1)
+        item_name = parts[1].strip() if len(parts) > 1 else ""
+        if not item_name:
+            return json.dumps(pairs[:5])
+        item_up = item_name.upper()
+        matching = [
+            p for p in pairs
+            if item_up in p.get("item_a", "").upper() or item_up in p.get("item_b", "").upper()
+        ]
+        if not matching:
+            return f"No pairs found involving '{item_name}'."
+        return json.dumps(matching)
+
+    if q.upper() == "LIST":
+        return "Available items in the `unit_price_distributions` section:\n" + "\n".join(sorted(distributions.keys()))
+    
+    if q.upper() == "PREVALENCE_FILTER":
+        items = knowledge_pack.get("item_prevalence", {})
+        scored = sorted(
+            ((p.get("prevalence", 0), item) for item, p in items.items() if item != "_thresholds"),
+            reverse=True,
+        )
+        lines = [f"{score:.0%}  {item}" for score, item in scored]
+        return (
+            "All KP items with portfolio prevalence scores (highest first).\n"
+            "Group semantically similar items (e.g. all paving variants → PAVING) and filter "
+            "aggregated groups >= 0.70 to build your Gemini detection list.\n\n"
+            + "\n".join(lines)
+        )
+
+    def _build_result(key: str) -> dict:
+        entry = {"matched_item": key, "unit_price_distribution": distributions[key]}
+        if key in price_trends:
+            entry["price_trend"] = price_trends[key]
+        return entry
+
+    # Exact match
+    if q in distributions:
+        return json.dumps(_build_result(q))
+
+    # Case-insensitive exact
+    q_up = q.upper()
+    for key in distributions:
+        if key.upper() == q_up:
+            return json.dumps(_build_result(key))
+
+    # Fuzzy
+    all_keys = list(distributions.keys())
+    matches = difflib.get_close_matches(q, all_keys, n=3, cutoff=0.4)
+
+    # Substring fallback
+    if not matches:
+        q_low = q.lower()
+        matches = [k for k in all_keys if q_low in k.lower() or k.lower() in q_low][:3]
+
+    if not matches:
+        return f"No item found matching '{q}'. Call kp_lookup with item='LIST' to see all available items."
+
+    if len(matches) == 1:
+        return json.dumps(_build_result(matches[0]))
+
+    return json.dumps({"query": q, "matches": {k: _build_result(k) for k in matches}})
+
+
 def _call_manager_sync(url: str, headers: dict, payload: dict) -> dict:
     """Synchronous OpenAI-compatible completions call (for asyncio.to_thread)."""
     with httpx.Client(timeout=300.0) as client:
@@ -977,8 +1137,8 @@ def _call_manager_sync(url: str, headers: dict, payload: dict) -> dict:
         return r.json()
 
 
-async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None) -> None:
-    """Phase 3: Manager LLM orchestrates Gemini extraction via send_to_gemini tool (OpenAI-compatible format)."""
+async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "") -> None:
+    """Phase 3: Manager LLM orchestrates Gemini extraction via send_to_gemini tool."""
     # Resolve manager endpoint — prefer the explicitly selected model, fall back to Anthropic endpoint.
     mgr_url = mgr_headers = mgr_api_key = mgr_model_id = None
 
@@ -997,7 +1157,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                 ).first()
                 if ep:
                     base, mgr_api_key = resolve_endpoint_runtime(ep)
-                    mgr_url      = _to_openai_compat_url(build_chat_url(base))
+                    mgr_url      = build_chat_url(base)  # keep /v1/messages for Anthropic
                     mgr_headers  = build_headers(mgr_api_key, base)
                     mgr_model_id = getattr(ep, "model", None) or _CLAUDE_MODEL
             finally:
@@ -1007,8 +1167,8 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
 
         if not mgr_url:
             mgr_api_key  = os.environ.get("ANTHROPIC_API_KEY", "")
-            mgr_url      = "https://api.anthropic.com/v1/chat/completions"
-            mgr_headers  = {"Authorization": f"Bearer {mgr_api_key}", "anthropic-version": "2023-06-01"}
+            mgr_url      = "https://api.anthropic.com/v1/messages"
+            mgr_headers  = {}
             mgr_model_id = _CLAUDE_MODEL
 
     if mgr_url is None:
@@ -1036,8 +1196,13 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
             fallback_models_info.append((gemini_url, gemini_headers, fb_model))
 
     # Cache gemini_phase3.txt system prompt for reuse across all Gemini turns.
+    # cached_content is only supported on the native Gemini API, not the OpenAI-compat endpoint.
     gemini_phase3_prompt = (_PROMPTS_DIR / "gemini_phase3.txt").read_text(encoding="utf-8")
-    gemini_cache_name    = await _gemini_cache_create(gemini_phase3_prompt, gemini_api_key)
+    gemini_cache_name    = (
+        await _gemini_cache_create(gemini_phase3_prompt, gemini_api_key)
+        if "/openai/" not in gemini_url
+        else None
+    )
 
     gemini_state: dict = {
         "messages":   [],
@@ -1071,7 +1236,9 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
         },
     ])
 
-    manager_system = (_PROMPTS_DIR / "manager_system.txt").read_text(encoding="utf-8")
+    manager_system    = (_PROMPTS_DIR / "manager_system.txt").read_text(encoding="utf-8")
+    system_prompt_txt = (_PROMPTS_DIR / "system_prompt.txt").read_text(encoding="utf-8")
+    combined_system   = manager_system + "\n\n---\n\n" + system_prompt_txt
 
     send_to_gemini_tool = {
         "type": "function",
@@ -1108,22 +1275,117 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
         },
     }
 
+    end_generation_tool = {
+        "type": "function",
+        "function": {
+            "name":        "end_generation",
+            "description": (
+                "Call this tool once the Phase B proposal is fully written. "
+                "Pass the Grand Total dollar amount as a number. "
+                "This is the required final step — do not call it before the complete "
+                "line-item table, Grand Total, Confidence Band, and Sanity Check are written."
+            ),
+            "parameters": {
+                "type":       "object",
+                "properties": {
+                    "grand_total": {
+                        "type":        "number",
+                        "description": "The final Grand Total from the Phase B budget estimate as a dollar amount (e.g. 1234567.89).",
+                    },
+                },
+                "required": ["grand_total"],
+            },
+        },
+    }
+
+    kp_lookup_tool = {
+        "type": "function",
+        "function": {
+            "name":        "kp_lookup",
+            "description": (
+                "Look up knowledge pack data on demand. Four query forms: "
+                "(1) item name e.g. '8\" SEWER MAIN' — returns unit price distribution + price trend; "
+                "(2) 'item_pairs: <item name>' e.g. 'item_pairs: ROLLED CURB' — returns full pair metadata "
+                "(r, n_shared_jobs, median_ratio, shared_jobs) for all pairs involving that item; "
+                "(3) 'LIST' — lists all available unit price distribution item names; "
+                "(4) 'SECTION: <name>' — returns a full named KP section not injected into opening context. "
+                "Phase B sections to fetch before pricing: 'SECTION: qty_scale_correlations', "
+                "'SECTION: item_scaling', 'SECTION: ls_item_variance', "
+                "'SECTION: ls_earthwork_rates', 'SECTION: paving_rates'. "
+                "Use (1) and (3) during Phase A for dynamic field scanning, and (1) during Phase B for every line item you price."
+            ),
+            "parameters": {
+                "type":       "object",
+                "properties": {
+                    "item": {
+                        "type":        "string",
+                        "description": "Line item name to look up, e.g. '8\" SEWER MAIN'. Pass 'LIST' to list all items.",
+                    },
+                },
+                "required": ["item"],
+            },
+        },
+    }
+
+    # Build a context-optimised KP: strip heavy/Phase-B-only sections (available via
+    # kp_lookup SECTION queries), and compact item_pairs for Phase A co-occurrence use.
+    _HEAVY_KP_SECTIONS = {
+        "unit_price_distributions", "price_trends",   # item-name queries
+        "item_prevalence",                             # 67k — not referenced in any prompt
+        "derivation_rules",                            # 12k — duplicated as prose in system_prompt.txt
+        "qty_scale_correlations",                      # 14k — Phase B only
+        "item_scaling",                                # 5k  — Phase B only
+        "ls_item_variance",                            # 2k  — Phase B only
+        "ls_earthwork_rates",                          # 2k  — Phase B only
+        "paving_rates",                                # 3k  — Phase B only
+    }
+    kp_for_context = {k: v for k, v in (index.knowledge_pack or {}).items() if k not in _HEAVY_KP_SECTIONS}
+    if "item_pairs" in kp_for_context:
+        raw_pairs = kp_for_context["item_pairs"].get("pairs", [])
+        kp_for_context["item_pairs"] = {
+            "pairs": [
+                {"item_a": p["item_a"], "item_b": p["item_b"], "co_occurrence_rate": p["co_occurrence_rate"]}
+                for p in raw_pairs
+            ],
+            "_note": "Compact form. Call kp_lookup('item_pairs: <item name>') for full pair metadata.",
+        }
+    kp_json = json.dumps(kp_for_context) if kp_for_context else "{}"
+
+    # Anthropic native format: system is top-level; messages are content-block arrays.
+    mgr_system = combined_system
     mgr_messages = [
-        {"role": "system", "content": manager_system},
-        {"role": "user",   "content": "Here is the Phase 1 index from the plan set. Begin extraction.\n\n" + phase1_summary},
+        {"role": "user",      "content": (
+            "Here is the knowledge pack containing unit price distributions, "
+            "derivation rules, and analog job data. Use this for all pricing and "
+            "sanity checks when generating Phase B estimates.\n\n"
+            "```json\n" + kp_json + "\n```"
+        )},
+        {"role": "assistant", "content": "Understood. I have reviewed the knowledge pack and will use its unit price distributions, derivation rules, and analog jobs for all Phase B estimation."},
+        {"role": "user",      "content": "Here is the Phase 1 index from the plan set. Begin extraction.\n\n" + phase1_summary},
     ]
+
+    for i, m in enumerate(mgr_messages):
+        logger.info(f"[quick_proposal] init mgr_messages[{i}] role={m['role']} chars={len(str(m.get('content') or ''))}")
+
+    all_tools = [send_to_gemini_tool, read_index_tool, kp_lookup_tool, end_generation_tool]
 
     await _emit(queue, "phase_start", phase="phase3", label="Extracting values from plans…")
 
+    phase_b_complete = False
+    phase_b_nudges   = 0
+
     try:
         for _ in range(60):
+            oai_messages = [{"role": "system", "content": mgr_system}] + mgr_messages
             payload = {
                 "model":      mgr_model_id,
-                "max_tokens": 8192,
-                "messages":   mgr_messages,
-                "tools":      [send_to_gemini_tool, read_index_tool],
+                "max_tokens": 32000,
+                "messages":   oai_messages,
+                "tools":      all_tools,
             }
-            resp = await asyncio.to_thread(_call_manager_sync, mgr_url, mgr_headers, payload)
+            resp = await asyncio.to_thread(_call_manager_sync, mgr_url, mgr_headers or {}, payload)
+
+            log_path = gemini_state.get("log_path", "")
 
             if "error" in resp:
                 err_msg = resp.get("error", {}).get("message", str(resp))
@@ -1131,24 +1393,52 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                 await _emit(queue, "error", message=f"Manager error: {err_msg}", phase="phase3")
                 return
 
+            # ── Parse response ─────────────────────────────────────────────────
+            usage         = resp.get("usage", {})
             choice        = resp.get("choices", [{}])[0]
             finish_reason = choice.get("finish_reason")
             msg           = choice.get("message", {})
             text_content  = msg.get("content") or ""
             tool_calls    = msg.get("tool_calls") or []
 
-            log_path = gemini_state.get("log_path", "")
+            if usage:
+                await _emit(queue, "context_usage",
+                            role="claude", model=mgr_model_id,
+                            input_tokens=usage.get("prompt_tokens", 0),
+                            output_tokens=usage.get("completion_tokens", 0),
+                            context_window=200000)
+
             if text_content.strip():
                 await _emit(queue, "extraction_message", role="claude", text=text_content, model=mgr_model_id)
                 if log_path:
-                    _log_phase3_event(log_path, {"type": "extraction_message", "role": "claude", "text": text_content, "model": mgr_model_id})
+                    _log_phase3_event(log_path, {"type": "extraction_message", "role": "claude",
+                                                  "text": text_content, "model": mgr_model_id})
 
             assistant_msg: dict = {"role": "assistant", "content": text_content or None}
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
             mgr_messages.append(assistant_msg)
 
-            if finish_reason != "tool_calls":
+            logger.info(f"[quick_proposal] manager finish_reason={finish_reason} output_tokens={usage.get('completion_tokens', '?')}")
+
+            if finish_reason == "length":
+                logger.warning("[quick_proposal] manager output truncated (finish_reason=length) — sending continuation")
+                await _emit(queue, "extraction_message", role="claude",
+                            text="*(output truncated — continuing…)*", model=mgr_model_id)
+                mgr_messages.append({"role": "user", "content": "Continue exactly where you left off. Do not repeat anything already written."})
+                continue
+
+            if not tool_calls:
+                # Text-only stop with no tool calls. Nudge the model to generate
+                # Phase B (if not done) and call end_generation to close the loop.
+                if phase_b_nudges < 2:
+                    phase_b_nudges += 1
+                    mgr_messages.append({"role": "user", "content": (
+                        "Generate the complete Phase B proposal if not already done, "
+                        "then call end_generation(grand_total) with the final Grand Total "
+                        "to complete the pipeline."
+                    )})
+                    continue
                 break
 
             for tc in tool_calls:
@@ -1163,7 +1453,8 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                     msg_text = tool_input.get("message", "")
                     await _emit(queue, "extraction_message", role="claude_to_gemini", text=msg_text, model=mgr_model_id)
                     if log_path:
-                        _log_phase3_event(log_path, {"type": "extraction_message", "role": "claude_to_gemini", "text": msg_text, "model": mgr_model_id})
+                        _log_phase3_event(log_path, {"type": "extraction_message", "role": "claude_to_gemini",
+                                                      "text": msg_text, "model": mgr_model_id})
                     gemini_resp = await _run_gemini_with_tools(
                         msg_text, gemini_state, index, queue,
                         retry_attempts=retry_attempts,
@@ -1173,7 +1464,8 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                         await _emit(queue, "extraction_message", role="gemini", text=gemini_resp)
                         if log_path:
                             _log_phase3_event(log_path, {"type": "extraction_message", "role": "gemini", "text": gemini_resp})
-                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": gemini_resp or "(extraction complete)"})
+                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id,
+                                         "content": gemini_resp or "(extraction complete)"})
                 elif tool_name == "read_index":
                     index_json = json.dumps(index.extracted_values, indent=2)
                     await _emit(queue, "extraction_message",
@@ -1181,10 +1473,37 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
                     await _emit(queue, "extraction_message",
                                 role="tool_result", tool_id=tool_id, tool="read_index", model=mgr_model_id, result=index_json)
                     if log_path:
-                        _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result", "tool_id": tool_id, "tool": "read_index", "result": index_json})
+                        _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result",
+                                                      "tool_id": tool_id, "tool": "read_index", "result": index_json})
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": index_json})
+                elif tool_name == "kp_lookup":
+                    item_query    = tool_input.get("item", "").strip()
+                    lookup_result = _kp_lookup(index.knowledge_pack or {}, item_query)
+                    await _emit(queue, "extraction_message",
+                                role="tool_call", tool_id=tool_id, tool="kp_lookup",
+                                model=mgr_model_id, args=json.dumps({"item": item_query}))
+                    await _emit(queue, "extraction_message",
+                                role="tool_result", tool_id=tool_id, tool="kp_lookup",
+                                model=mgr_model_id, result=lookup_result)
+                    if log_path:
+                        _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result",
+                                                      "tool_id": tool_id, "tool": "kp_lookup", "result": lookup_result})
+                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": lookup_result})
+                elif tool_name == "end_generation":
+                    grand_total = tool_input.get("grand_total")
+                    await _emit(queue, "grand_total", amount=grand_total, model=mgr_model_id)
+                    if log_path:
+                        _log_phase3_event(log_path, {"type": "grand_total", "amount": grand_total})
+                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id,
+                                         "content": f"Pipeline complete. Grand Total recorded: ${grand_total:,.2f}"})
+                    phase_b_complete = True
+                    break
                 else:
-                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": f"Unknown tool: {tool_name}"})
+                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id,
+                                         "content": f"Unknown tool: {tool_name}"})
+
+            if phase_b_complete:
+                break
 
     finally:
         if gemini_cache_name:
@@ -1252,6 +1571,8 @@ async def run_pipeline(
     manager_model: str = "",
     gemini_retry_attempts: int = 3,
     gemini_fallback_models: list | None = None,
+    holdout_kp_path: str = "",
+    import_from_run_id: str = "",
 ) -> None:
     _success = False
     try:
@@ -1259,7 +1580,7 @@ async def run_pipeline(
         await _emit(queue, "phase_start", phase="load", label="Rendering pages…")
         source_path = _resolve_upload_path(upload_id)
 
-        from src.quick_proposal.index import ChatIndex
+        from src.quick_proposal.index import ChatIndex, PageRecord, BboxRecord
         index = ChatIndex(
             run_id=run_id,
             source_path=source_path,
@@ -1279,7 +1600,9 @@ async def run_pipeline(
         # Step 2 — load knowledge base
         await _emit(queue, "phase_start", phase="index", label="Loading knowledge base…")
         try:
-            index.knowledge_pack = _load_knowledge_pack()
+            kp_path_used = holdout_kp_path or str(_KP_PATH)
+            index.knowledge_pack = _load_knowledge_pack(holdout_kp_path or None)
+            logger.info(f"[quick_proposal] knowledge pack loaded: {kp_path_used} ({len(index.knowledge_pack)} top-level keys)")
             full_library         = _load_case_library()
             # Filter to user-selected jobs if any were specified at run start.
             if index.selected_jobs:
@@ -1287,15 +1610,68 @@ async def run_pipeline(
             else:
                 index.case_library = full_library
         except Exception as e:
+            logger.error(f"[quick_proposal] failed to load knowledge base from {holdout_kp_path or _KP_PATH}: {e}")
             raise RuntimeError(f"Failed to load knowledge base: {e}")
 
         await _emit(queue, "index_loaded",
                     jobs=[{"id": c["job_name"], "name": c["job_name"]}
-                          for c in index.case_library])
+                          for c in index.case_library],
+                    kp_path=kp_path_used)
         await _emit(queue, "phase_complete", phase="index")
 
-        # Step 3 — Phase 1 per-page Gemini classification
-        await phase1_classify_pages(index, queue, model_override=gemini_model, retry_attempts=gemini_retry_attempts, fallback_models=gemini_fallback_models)
+        # Step 3 — Phase 1 per-page Gemini classification (or import from a previous run)
+        if import_from_run_id:
+            src_results_path = Path(RUNS_DIR) / import_from_run_id / "results.json"
+            if not src_results_path.is_file():
+                raise RuntimeError(f"Import run {import_from_run_id} has no saved classifications")
+            src = json.loads(src_results_path.read_text(encoding="utf-8"))
+            pages_dir = Path(RUNS_DIR) / run_id / "pages"
+            bbox_map: dict[str, str] = {}  # old bbox_id → new bbox_id
+
+            for bdata in src.get("bboxes", {}).values():
+                old_id  = bdata["id"]
+                new_id  = f"{bdata['page_idx']}_r{old_id.split('_r')[-1]}" if "_r" in old_id else old_id
+                bbox_map[old_id] = new_id
+                index.bboxes[new_id] = BboxRecord(
+                    id=new_id,
+                    page_idx=bdata["page_idx"],
+                    x1=bdata["x1"], y1=bdata["y1"], x2=bdata["x2"], y2=bdata["y2"],
+                    parent_id=bdata.get("parent_id"),
+                    depth=bdata.get("depth", 0),
+                    description=bdata.get("description", ""),
+                    element_type=bdata.get("element_type"),
+                    element_subtype=bdata.get("element_subtype"),
+                    importance=bdata.get("importance"),
+                )
+
+            for pdata in src.get("pages", []):
+                new_bbox_ids = [bbox_map.get(b, b) for b in pdata.get("bbox_ids", [])]
+                matching = next((p for p in index.pages if p.idx == pdata["idx"]), None)
+                if matching:
+                    matching.classification = pdata.get("sheet_type", "")
+                    matching.importance     = pdata.get("importance", "")
+                    matching.description    = pdata.get("description", "")
+                    matching.bbox_ids       = new_bbox_ids
+                    regions_out = [
+                        {"id": bid, "label": index.bboxes[bid].description,
+                         "bbox": [index.bboxes[bid].x1, index.bboxes[bid].y1,
+                                  index.bboxes[bid].x2, index.bboxes[bid].y2],
+                         "extraction_hint": "", "importance": index.bboxes[bid].importance or "medium"}
+                        for bid in new_bbox_ids if bid in index.bboxes
+                    ]
+                    await _emit(queue, "page_classified",
+                                page_idx=matching.idx,
+                                sheet_type=matching.classification,
+                                importance=matching.importance,
+                                description=matching.description,
+                                regions=regions_out,
+                                imported=True)
+
+            await _emit(queue, "phase_start", phase="phase1", label="Importing classifications…", cached=False)
+            await _emit(queue, "phase_complete", phase="phase1")
+            logger.info(f"[quick_proposal] imported classifications from run {import_from_run_id}")
+        else:
+            await phase1_classify_pages(index, queue, model_override=gemini_model, retry_attempts=gemini_retry_attempts, fallback_models=gemini_fallback_models)
         _save_run_results(run_id, index)  # persist phase1 classifications + bboxes
 
         # Step 4 — Phase 2: build text index from Phase 1 results (pure Python, no LLM)
@@ -1304,7 +1680,7 @@ async def run_pipeline(
         await _emit(queue, "phase_complete", phase="phase2")
 
         # Step 5 — Phase 3: manager LLM + Gemini extraction tool loop
-        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=gemini_retry_attempts, gemini_fallback_models=gemini_fallback_models)
+        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=gemini_retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path)
         _success = True
 
     except Exception as e:
@@ -1349,6 +1725,8 @@ def setup_quick_proposal_routes():
             manager_model=req.manager_model,
             gemini_retry_attempts=req.gemini_retry_attempts,
             gemini_fallback_models=req.gemini_fallback_models or None,
+            holdout_kp_path=req.holdout_kp_path,
+            import_from_run_id=req.import_from_run_id,
         ))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
@@ -1367,6 +1745,24 @@ def setup_quick_proposal_routes():
                         pass
         runs.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
         return runs[:50]
+
+    @router.get("/runs/{run_id}/classifications")
+    async def get_classifications(run_id: str):
+        """Return the page classifications + bboxes from a completed run (for import into a new run)."""
+        results_path = Path(RUNS_DIR) / run_id / "results.json"
+        meta_path    = Path(RUNS_DIR) / run_id / "meta.json"
+        if not meta_path.is_file():
+            raise HTTPException(status_code=404, detail="Run not found")
+        if not results_path.is_file():
+            raise HTTPException(status_code=400, detail="No classifications saved for this run")
+        results = json.loads(results_path.read_text(encoding="utf-8"))
+        meta    = json.loads(meta_path.read_text(encoding="utf-8"))
+        return {
+            "run_id":   run_id,
+            "filename": meta.get("filename", run_id),
+            "pages":    results.get("pages", []),
+            "bboxes":   results.get("bboxes", {}),
+        }
 
     @router.post("/validate")
     async def validate_endpoints(req: ValidateRequest):
@@ -1442,8 +1838,30 @@ def setup_quick_proposal_routes():
     @router.get("/jobs")
     async def list_jobs():
         """Return the case library job list so the UI can show it before a run starts."""
+        holdout_base = _QP_DIR.parent.parent / "documentation" / "temp" / "knowledge_pack"
+        # Pre-scan holdout dirs once so we can match by normalized job name.
+        holdout_dirs: list[Path] = []
+        if holdout_base.is_dir():
+            holdout_dirs = [d for d in holdout_base.iterdir() if d.is_dir() and d.name.startswith("holdout_")]
         jobs = _load_case_library()
-        return [{"id": c.get("job_name", ""), "name": c.get("job_name", "")} for c in jobs]
+        result = []
+        for c in jobs:
+            job_name = c.get("job_name", "")
+            # Normalize: lowercase, spaces → underscores, then check if any holdout dir contains it.
+            slug = job_name.lower().replace(" ", "_").replace("-", "_")
+            holdout_kp = None
+            for d in holdout_dirs:
+                if slug in d.name:
+                    candidate = d / "knowledge_pack.json"
+                    if candidate.is_file():
+                        holdout_kp = str(candidate)
+                        break
+            result.append({
+                "id":              job_name,
+                "name":            job_name,
+                "holdout_kp_path": holdout_kp,
+            })
+        return result
 
     @router.get("/prompts")
     async def list_prompts():
