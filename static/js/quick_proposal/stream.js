@@ -18,6 +18,7 @@ export function startStream(runId, handlers = {}) {
         onRegionPreview,
         onContextUsage,
         onError,
+        onStreamDrop,
         onDone,
     } = handlers;
 
@@ -77,7 +78,11 @@ export function startStream(runId, handlers = {}) {
             if (!hadError) onDone?.();
             return;
         }
-        onError?.({ message: 'Stream connection lost', phase: null });
+        // Network drop while pipeline is still running — don't treat as a fatal error.
+        // Let the caller poll for status instead.
+        if (!hadError) {
+            onStreamDrop?.();
+        }
         es.close();
     };
 

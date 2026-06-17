@@ -686,6 +686,11 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         };
     }
 
+    let statusPoll = null;
+    overlay.querySelector('#qp-close-btn').addEventListener('click', () => {
+        if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
+    });
+
     startStream(runId, {
         onPhaseStart(data) {
             const label = data.cached
@@ -748,6 +753,26 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         onRegionPreview(data) { addRegionPreview(mainOutput, data); },
 
         onContextUsage(data) { updateContextMeter(mainOutput, data); },
+
+        onStreamDrop() {
+            setStatus(statusEl, 'Connection lost — pipeline still running in background…', true);
+            statusPoll = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/quick_proposal/runs/${runId}/status`, { credentials: 'same-origin' });
+                    if (!res.ok) return;
+                    const { status } = await res.json();
+                    if (status === 'complete') {
+                        clearInterval(statusPoll); statusPoll = null;
+                        setStatus(statusEl, 'Pipeline complete.');
+                        if (cancelBtn) cancelBtn.style.display = 'none';
+                    } else if (status === 'error' || status === 'cancelled') {
+                        clearInterval(statusPoll); statusPoll = null;
+                        setStatus(statusEl, `Pipeline ${status}.`);
+                        if (cancelBtn) cancelBtn.style.display = 'none';
+                    }
+                } catch { /* ignore network errors during poll */ }
+            }, 3000);
+        },
 
         onError(data) {
             setStatus(statusEl, `Error: ${data.message}`);

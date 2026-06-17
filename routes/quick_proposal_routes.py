@@ -520,6 +520,7 @@ async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str
     await _emit(queue, "phase_start", phase="phase1",
                 label="Classifying pages…",
                 cached=cache_name is not None)
+    auto_redone: set[int] = set()
 
     try:
         for page in index.pages:
@@ -565,6 +566,17 @@ async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str
                             importance="low", description="(classification failed)",
                             regions=[], error=str(last_err))
                 continue
+
+            # Auto-redo once if Gemini returned out-of-range (1000-based) coords
+            if page.idx not in auto_redone:
+                raw_bboxes = [r.get("bbox", []) for r in result.get("regions", [])]
+                if any(len(b) >= 4 and max(b) > 100 for b in raw_bboxes):
+                    auto_redone.add(page.idx)
+                    logger.info(f"[quick_proposal] phase1 page={page.idx} auto-redo: out-of-range bbox coords")
+                    try:
+                        result = await _classify_one_page(page.image_path, prompt, url, headers, model, cache_name)
+                    except Exception as e:
+                        logger.warning(f"[quick_proposal] phase1 page={page.idx} auto-redo failed: {e}")
 
             page.classification = result.get("sheet_type", "other")
             page.importance     = result.get("importance", "low")
@@ -1852,6 +1864,19 @@ def setup_quick_proposal_routes():
         runs.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
         return runs[:50]
 
+    @router.get("/runs/{run_id}/status")
+    async def get_run_status(run_id: str):
+        meta_path = Path(RUNS_DIR) / run_id / "meta.json"
+        if not meta_path.is_file():
+            raise HTTPException(status_code=404, detail="Run not found")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        return {
+            "run_id":    run_id,
+            "status":    meta.get("status", "unknown"),
+            "filename":  meta.get("filename", ""),
+            "timestamp": meta.get("timestamp", 0),
+        }
+
     @router.get("/runs/{run_id}/classifications")
     async def get_classifications(run_id: str):
         """Return the page classifications + bboxes from a completed run (for import into a new run)."""
@@ -2134,6 +2159,8 @@ def setup_quick_proposal_routes():
             bbox = region.get("bbox", [0, 0, 100, 100])
             if len(bbox) < 4:
                 bbox = bbox + [0] * (4 - len(bbox))
+            if max(bbox) > 100:
+                bbox = [v / 10.0 for v in bbox]
             regions_out.append({
                 "id": bbox_id,
                 "label":           region.get("label", ""),
@@ -2161,6 +2188,8 @@ def setup_quick_proposal_routes():
                 bbox = r.get("bbox", [0, 0, 100, 100])
                 if len(bbox) < 4:
                     bbox = bbox + [0] * (4 - len(bbox))
+                if max(bbox) > 100:
+                    bbox = [v / 10.0 for v in bbox]
                 bboxes[bid] = {
                     "id": bid, "page_idx": page_idx,
                     "x1": bbox[0], "y1": bbox[1], "x2": bbox[2], "y2": bbox[3],

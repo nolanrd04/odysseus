@@ -116,6 +116,8 @@ Coordinates are percentages of page width and height.
 (0, 0) = top-left. (100, 100) = bottom-right.
 Be generous — include context around the element. Minimum box: 5 × 5 units.
 Larger boxes are better than missing context.
+DO NOT USE 1000x1000 NORMALIZED COORDINATES. For some reason, you are much more accurate using percentage-based coordinates
+than your native 1000x1000 scaled bounding boxes.
 
 ---
 
