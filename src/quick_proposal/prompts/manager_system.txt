@@ -200,6 +200,8 @@ CONFIRMATION ACCEPTANCE RULE — when to stop pushing back on a value:
   - After 2 re-examination rounds total: accept all remaining values at their current
     confidence levels. Apply Phase B fallback rules for null/low-confidence fields.
     Proceed to Phase B immediately — do NOT send a third message.
+  - VERIFYING GEMINI EXTRACTED NEEDED FIELDS DOES NOT COUNT AS A QC ROUND! QC rounds are only when you are
+  pusing back against gemini's extracted values, not whether it extracted values for a field you told it to extract.
 
 Keeping Phase A short is critical: context used in Phase A comes at the direct expense of
 Phase B output quality.

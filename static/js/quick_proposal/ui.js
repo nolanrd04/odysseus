@@ -123,6 +123,8 @@ const STYLES = `
 }
 .qp-run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .qp-run-btn:not(:disabled):hover { opacity: 0.85; }
+.qp-resume-btn { background: #d97706; }
+.qp-resume-btn:not(:disabled):hover { opacity: 0.85; }
 .qp-content { display: flex; flex: 1; min-height: 0; }
 .qp-sidebar {
     width: 270px; flex-shrink: 0;
@@ -1692,6 +1694,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
                 <span class="qp-phase3-label">Retries</span>
                 <input type="number" class="qp-retry-input" id="qp-p3-retry-attempts" value="3" min="1" max="10">
                 <button class="qp-run-btn" id="qp-p3-run-btn" style="margin:0;padding:6px 18px;flex-shrink:0;">Run Phase 3</button>
+                <button class="qp-run-btn qp-resume-btn" id="qp-p3-resume-btn" style="display:none;margin:0;padding:6px 18px;flex-shrink:0;">Resume</button>
             </div>
             <div class="qp-status" id="qp-status" style="display:none"></div>
             <div class="qp-content" id="qp-content" style="display:flex">
@@ -1725,10 +1728,55 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
     const managerSelect  = overlay.querySelector('#qp-p3-manager-select');
     const p3RetryInput   = overlay.querySelector('#qp-p3-retry-attempts');
     const phase3RunBtn   = overlay.querySelector('#qp-p3-run-btn');
+    const resumeBtn      = overlay.querySelector('#qp-p3-resume-btn');
     const cancelBtn     = overlay.querySelector('#qp-cancel-btn');
 
     loadModels(geminiSelect, { preferClaude: false });
     loadModels(managerSelect, { preferClaude: true });
+
+    function _startPhase3Stream(streamRunId, isResume) {
+        phase3Bar.style.display = 'none';
+        cancelBtn.style.display = '';
+        cancelBtn.disabled = false;
+        cancelBtn.onclick = () => {
+            cancelBtn.disabled = true;
+            fetch(`/api/quick_proposal/runs/${streamRunId}/cancel`, { method: 'POST', credentials: 'same-origin' })
+                .catch(() => {});
+        };
+
+        startStream(streamRunId, {
+            onPhaseStart(data) {
+                const label = data.cached
+                    ? `${data.label || data.phase} (prompt cached)`
+                    : (data.label || `Phase: ${data.phase}`);
+                setStatus(statusEl, label, true);
+                if (data.phase === 'phase3') renderExtractionPanel(mainOutput);
+            },
+            onPhaseComplete(data) {
+                if (data.phase === 'phase3') {
+                    setStatus(statusEl, 'Extraction complete.');
+                    cancelBtn.style.display = 'none';
+                }
+            },
+            onExtractionMessage(data)  { appendExtractionMessage(mainOutput, data); },
+            onIndexUpdate(data)        { updateLiveIndex(mainOutput, data); },
+            onRegionPreview(data)      { addRegionPreview(mainOutput, data); },
+            onContextUsage(data)       { updateContextMeter(mainOutput, data); },
+            onDone() {
+                cancelBtn.style.display = 'none';
+                phase3Bar.style.display = 'flex';
+                phase3RunBtn.disabled = false;
+                if (resumeBtn) resumeBtn.style.display = 'none';
+            },
+            onError(data) {
+                setStatus(statusEl, `Error: ${data.message}`);
+                cancelBtn.style.display = 'none';
+                phase3Bar.style.display = 'flex';
+                phase3RunBtn.disabled = false;
+                if (resumeBtn) resumeBtn.disabled = false;
+            },
+        });
+    }
 
     phase3RunBtn.addEventListener('click', async () => {
         phase3RunBtn.disabled = true;
@@ -1742,50 +1790,31 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
             });
             if (!res.ok) throw new Error(`Phase 3 start failed: ${res.status}`);
             const { run_id: streamRunId } = await res.json();
-
-            phase3Bar.style.display = 'none';
-            cancelBtn.style.display = '';
-            cancelBtn.disabled = false;
-            cancelBtn.onclick = () => {
-                cancelBtn.disabled = true;
-                fetch(`/api/quick_proposal/runs/${streamRunId}/cancel`, { method: 'POST', credentials: 'same-origin' })
-                    .catch(() => {});
-            };
-
-            startStream(streamRunId, {
-                onPhaseStart(data) {
-                    const label = data.cached
-                        ? `${data.label || data.phase} (prompt cached)`
-                        : (data.label || `Phase: ${data.phase}`);
-                    setStatus(statusEl, label, true);
-                    if (data.phase === 'phase3') renderExtractionPanel(mainOutput);
-                },
-                onPhaseComplete(data) {
-                    if (data.phase === 'phase3') {
-                        setStatus(statusEl, 'Extraction complete.');
-                        cancelBtn.style.display = 'none';
-                    }
-                },
-                onExtractionMessage(data)  { appendExtractionMessage(mainOutput, data); },
-                onIndexUpdate(data)        { updateLiveIndex(mainOutput, data); },
-                onRegionPreview(data)      { addRegionPreview(mainOutput, data); },
-                onContextUsage(data)       { updateContextMeter(mainOutput, data); },
-                onDone() {
-                    cancelBtn.style.display = 'none';
-                    phase3Bar.style.display = 'flex';
-                    phase3RunBtn.disabled = false;
-                },
-                onError(data) {
-                    setStatus(statusEl, `Error: ${data.message}`);
-                    cancelBtn.style.display = 'none';
-                    phase3Bar.style.display = 'flex';
-                    phase3RunBtn.disabled = false;
-                },
-            });
+            _startPhase3Stream(streamRunId, false);
         } catch (err) {
             setStatus(statusEl, `Error: ${err.message}`);
             phase3Bar.style.display = 'flex';
             phase3RunBtn.disabled = false;
+        }
+    });
+
+    resumeBtn?.addEventListener('click', async () => {
+        resumeBtn.disabled = true;
+        setStatus(statusEl, 'Resuming extraction…', true);
+        try {
+            const res = await fetch(`/api/quick_proposal/runs/${runId}/phase3`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], resume: true }),
+                credentials: 'same-origin',
+            });
+            if (!res.ok) throw new Error(`Resume failed: ${res.status}`);
+            const { run_id: streamRunId } = await res.json();
+            _startPhase3Stream(streamRunId, true);
+        } catch (err) {
+            setStatus(statusEl, `Error: ${err.message}`);
+            phase3Bar.style.display = 'flex';
+            resumeBtn.disabled = false;
         }
     });
 
@@ -1796,6 +1825,11 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
 
         overlay.querySelector('.qp-view-rerun-btn').addEventListener('click', () =>
             onRerun?.(run.upload_id, run.filename || run.upload_id), { once: true });
+
+        if (resumeBtn && (run.status === 'error' || run.status === 'cancelled') &&
+                Object.keys(run.extracted_values || {}).length > 0) {
+            resumeBtn.style.display = '';
+        }
 
         const pages   = run.pages  || [];
         const bboxMap = run.bboxes || {};

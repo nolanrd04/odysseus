@@ -136,6 +136,8 @@ class Phase3OnlyRequest(BaseModel):
     gemini_model: str = ""
     gemini_retry_attempts: int = 3
     gemini_fallback_models: List[str] = []
+    holdout_kp_path: str = ""
+    resume: bool = False
 
 
 class ReclassifyPageRequest(BaseModel):
@@ -226,14 +228,14 @@ def _save_extracted_values(run_id: str, extracted_values: dict) -> None:
         logger.warning(f"[quick_proposal] extracted_values save failed run={run_id}: {e}")
 
 
-async def _run_phase3_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None) -> None:
+async def _run_phase3_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False) -> None:
     """Re-run phase2 index build + phase3 extraction loop using saved page classifications."""
     try:
         await _emit(queue, "phase_start", phase="phase2", label="Building extraction index…")
         index.extracted_data["phase1_summary"] = _build_phase1_summary(index)
         await _emit(queue, "phase_complete", phase="phase2")
 
-        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models)
+        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume)
         _save_run_results(run_id, index)
         _save_run_meta(run_id, status="complete")
     except Exception as e:
@@ -1359,7 +1361,7 @@ async def _stream_manager_call(
     }
 
 
-async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "") -> None:
+async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False) -> None:
     """Phase 3: Manager LLM orchestrates Gemini extraction via send_to_gemini tool."""
     # Resolve manager endpoint — prefer the explicitly selected model, fall back to Anthropic endpoint.
     mgr_url = mgr_headers = mgr_api_key = mgr_model_id = None
@@ -1416,6 +1418,11 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
             fallback_models_info.append((found[0], found[1], fb_model))
         else:
             fallback_models_info.append((gemini_url, gemini_headers, fb_model))
+
+    kp_label = holdout_kp_path if holdout_kp_path else str(_KP_PATH)
+    kp_key_count = len(index.knowledge_pack) if index.knowledge_pack else 0
+    logger.info(f"[quick_proposal] phase3 starting — KP: {kp_label} ({kp_key_count} top-level keys)")
+    await _emit(queue, "manager_thinking", text=f"[Phase 3] Knowledge pack: {kp_label} ({kp_key_count} keys)")
 
     # Cache gemini_phase3.txt system prompt for reuse across all Gemini turns.
     # cached_content is only supported on the native Gemini API, not the OpenAI-compat endpoint.
@@ -1598,6 +1605,20 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
         {"role": "assistant", "content": "Understood. I have reviewed the knowledge pack and will use its unit price distributions, derivation rules, and analog jobs for all Phase B estimation."},
         {"role": "user",      "content": "Here is the Phase 1 index from the plan set. Begin extraction.\n\n" + phase1_summary},
     ]
+
+    if resume and index.extracted_values:
+        already_done = json.dumps(index.extracted_values, indent=2)
+        # Append to the last user message — inserting a new user message here would
+        # create two consecutive user turns, which Anthropic's API rejects.
+        mgr_messages[-1]["content"] += (
+            "\n\nRESUME: This run was interrupted and is being resumed. "
+            "The following values were already extracted before the interruption:\n\n"
+            f"```json\n{already_done}\n```\n\n"
+            "Call read_index() to confirm the current index state, then continue "
+            "extraction from where it left off. Skip any fields that are already present."
+        )
+        await _emit(queue, "manager_thinking",
+                    text=f"[Resume] Restoring {len(index.extracted_values)} previously extracted values — picking up where we left off.")
 
     for i, m in enumerate(mgr_messages):
         logger.info(f"[quick_proposal] init mgr_messages[{i}] role={m['role']} chars={len(str(m.get('content') or ''))}")
@@ -2193,7 +2214,7 @@ def setup_quick_proposal_routes():
             job_notes=meta.get("notes", ""),
             selected_jobs=[],
         )
-        index.knowledge_pack = _load_knowledge_pack()
+        index.knowledge_pack = _load_knowledge_pack(req.holdout_kp_path or None)
         index.case_library   = _load_case_library()
 
         pages_dir = Path(RUNS_DIR) / run_id / "pages"
@@ -2226,11 +2247,16 @@ def setup_quick_proposal_routes():
             for p in results.get("pages", [])
         ]
 
+        if req.resume:
+            existing_ev = results.get("extracted_values") or {}
+            if existing_ev:
+                index.extracted_values = existing_ev
+
         queue: asyncio.Queue = asyncio.Queue()
         _active_runs[run_id] = queue
         _save_run_meta(run_id, status="running")
 
-        task = asyncio.create_task(_run_phase3_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None))
+        task = asyncio.create_task(_run_phase3_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None, holdout_kp_path=req.holdout_kp_path, resume=req.resume))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
 

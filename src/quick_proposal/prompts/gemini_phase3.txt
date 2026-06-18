@@ -313,4 +313,4 @@ After all extraction is complete, output a brief summary:
 - Fields that could not be determined (and why)
 - Any values that need verification by the manager
 
-Do not produce any final JSON — the index_write calls are your output.
+Do not produce any final JSON — the index_write calls are your output. You can also output text. Outputting text helps the user and the manager trace your thoughts better and see how you manage tools.
