@@ -281,6 +281,13 @@ const STYLES = `
     font-family: inherit;
 }
 .qp-retry-input:focus { outline: none; border-color: var(--accent, #0af); }
+.qp-holdout-input {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 6px 8px; font-size: 12px;
+    font-family: monospace; min-width: 0;
+}
+.qp-holdout-input:focus { outline: none; border-color: var(--accent, #0af); }
 .qp-fallback-section {
     width: 100%; max-width: 480px;
     display: flex; flex-direction: column; gap: 6px;
@@ -1693,6 +1700,8 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
                 </select>
                 <span class="qp-phase3-label">Retries</span>
                 <input type="number" class="qp-retry-input" id="qp-p3-retry-attempts" value="3" min="1" max="10">
+                <span class="qp-phase3-label" title="Leave blank to use the full knowledge pack">Holdout KP</span>
+                <input type="text" class="qp-holdout-input" id="qp-p3-holdout-kp" placeholder="(none — full KP)" style="flex:1;min-width:0;">
                 <button class="qp-run-btn" id="qp-p3-run-btn" style="margin:0;padding:6px 18px;flex-shrink:0;">Run Phase 3</button>
                 <button class="qp-run-btn qp-resume-btn" id="qp-p3-resume-btn" style="display:none;margin:0;padding:6px 18px;flex-shrink:0;">Resume</button>
             </div>
@@ -1729,6 +1738,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
     const p3RetryInput   = overlay.querySelector('#qp-p3-retry-attempts');
     const phase3RunBtn   = overlay.querySelector('#qp-p3-run-btn');
     const resumeBtn      = overlay.querySelector('#qp-p3-resume-btn');
+    const holdoutInput   = overlay.querySelector('#qp-p3-holdout-kp');
     const cancelBtn     = overlay.querySelector('#qp-cancel-btn');
 
     loadModels(geminiSelect, { preferClaude: false });
@@ -1785,7 +1795,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
             const res = await fetch(`/api/quick_proposal/runs/${runId}/phase3`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [] }),
+                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], holdout_kp_path: holdoutInput?.value.trim() || '' }),
                 credentials: 'same-origin',
             });
             if (!res.ok) throw new Error(`Phase 3 start failed: ${res.status}`);
@@ -1805,7 +1815,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
             const res = await fetch(`/api/quick_proposal/runs/${runId}/phase3`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], resume: true }),
+                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], holdout_kp_path: holdoutInput?.value.trim() || '', resume: true }),
                 credentials: 'same-origin',
             });
             if (!res.ok) throw new Error(`Resume failed: ${res.status}`);
@@ -1825,6 +1835,10 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
 
         overlay.querySelector('.qp-view-rerun-btn').addEventListener('click', () =>
             onRerun?.(run.upload_id, run.filename || run.upload_id), { once: true });
+
+        if (holdoutInput && run.holdout_kp_path) {
+            holdoutInput.value = run.holdout_kp_path;
+        }
 
         if (resumeBtn && (run.status === 'error' || run.status === 'cancelled') &&
                 Object.keys(run.extracted_values || {}).length > 0) {

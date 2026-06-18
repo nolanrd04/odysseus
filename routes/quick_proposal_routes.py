@@ -1990,6 +1990,7 @@ def setup_quick_proposal_routes():
             notes=req.notes,
             timestamp=int(time.time()),
             status="running",
+            holdout_kp_path=req.holdout_kp_path or "",
         )
 
         queue: asyncio.Queue = asyncio.Queue()
@@ -2214,8 +2215,11 @@ def setup_quick_proposal_routes():
             job_notes=meta.get("notes", ""),
             selected_jobs=[],
         )
-        index.knowledge_pack = _load_knowledge_pack(req.holdout_kp_path or None)
+        # Resolve holdout KP: request wins; fall back to what was saved at run start.
+        resolved_holdout = req.holdout_kp_path or meta.get("holdout_kp_path", "") or ""
+        index.knowledge_pack = _load_knowledge_pack(resolved_holdout or None)
         index.case_library   = _load_case_library()
+        _save_run_meta(run_id, holdout_kp_path=resolved_holdout)
 
         pages_dir = Path(RUNS_DIR) / run_id / "pages"
 
