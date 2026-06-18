@@ -323,9 +323,10 @@
 .qp-ctx-bar.qp-ctx-bar-caution { background: #f59e0b; }
 .qp-ctx-bar.qp-ctx-bar-warn    { background: #ef4444; }
 .qp-ctx-tokens {
-    width: 90px;
+    min-width: 90px;
     text-align: right;
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
     flex-shrink: 0;
 }
 

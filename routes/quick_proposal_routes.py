@@ -138,6 +138,7 @@ class Phase3OnlyRequest(BaseModel):
     gemini_fallback_models: List[str] = []
     holdout_kp_path: str = ""
     resume: bool = False
+    completeness_only: bool = False
 
 
 class ReclassifyPageRequest(BaseModel):
@@ -234,14 +235,18 @@ def _save_extracted_values(run_id: str, extracted_values: dict) -> None:
         logger.warning(f"[quick_proposal] extracted_values save failed run={run_id}: {e}")
 
 
-async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False) -> None:
+async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False, completeness_only: bool = False) -> None:
     """Re-run phase2 index build + phase3 extraction loop using saved page classifications."""
     try:
         await _emit(queue, "phase_start", phase="phase4", label="Building extraction index…")
         index.extracted_data["phase1_summary"] = _build_phase1_summary(index)
         await _emit(queue, "phase_complete", phase="phase4")
 
-        await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume)
+        if completeness_only or "plan_completeness" not in index.extracted_values:
+            await phase3_completeness_score(index, queue, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models)
+
+        if not completeness_only:
+            await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume)
         _save_run_results(run_id, index)
         _save_run_meta(run_id, status="complete")
     except Exception as e:
@@ -2453,7 +2458,7 @@ def setup_quick_proposal_routes():
         _active_runs[run_id] = queue
         _save_run_meta(run_id, status="running")
 
-        task = asyncio.create_task(_run_phase5_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None, holdout_kp_path=req.holdout_kp_path, resume=req.resume))
+        task = asyncio.create_task(_run_phase5_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None, holdout_kp_path=req.holdout_kp_path, resume=req.resume, completeness_only=req.completeness_only))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
 
