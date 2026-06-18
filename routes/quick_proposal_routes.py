@@ -1036,6 +1036,7 @@ async def _run_gemini_with_tools(
     retry_attempts: int = 3,
     fallback_models_info: list | None = None,
     tools: list | None = None,
+    stop_keys: set | None = None,
 ) -> str:
     """Append user_message to Gemini history, call Gemini, handle tool loops, return final text."""
     image_store = gemini_state.setdefault("image_store", {})
@@ -1163,6 +1164,12 @@ async def _run_gemini_with_tools(
                 "tool_call_id": tc_id,
                 "content":      "\n".join(text_parts) if text_parts else "(no output)",
             })
+        # Exit early if a terminal key has been written to the index (e.g. completeness_complete).
+        if stop_keys and any(
+            index.extracted_values.get(k, {}).get("value") for k in stop_keys
+        ):
+            return text_out
+
         if pending_images:
             for bid, img_block in pending_images:
                 await _emit(queue, "region_preview", bbox_id=bid,
@@ -1176,7 +1183,7 @@ async def _run_gemini_with_tools(
                 "content": [b for _, b in pending_images] + [{"type": "text", "text": "Above are the requested region images. Continue your extraction."}],
             })
 
-    logger.warning("[quick_proposal] Gemini tool loop hit 20-round limit")
+    logger.warning("[quick_proposal] Gemini tool loop hit 200-round limit")
     return "(extraction loop limit reached)"
 
 
@@ -1279,6 +1286,7 @@ async def phase3_completeness_score(
         retry_attempts=retry_attempts,
         fallback_models_info=fallback_models_info,
         tools=_GEMINI_COMPLETENESS_TOOLS,
+        stop_keys={"completeness_complete"},
     )
     logger.info(f"[quick_proposal] phase1.5 complete — project_type={project_type}")
     await _emit(queue, "phase_complete", phase="phase3")
