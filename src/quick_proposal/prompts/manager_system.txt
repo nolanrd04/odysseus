@@ -43,40 +43,66 @@ kp_lookup(item)
 
 ### Scope Item Detection — MUST complete before calling send_to_gemini
 
-STEP 1: Call kp_lookup(item='PREVALENCE_FILTER') now. Do NOT call send_to_gemini yet.
-        Wait for the result, then continue to Step 2.
+STEP 0: Read project_type and plan_completeness from the index.
+  Call read_index() first. Extract:
+    - project_type          (set by Phase 0.5 or UI picker)
+    - lot_count_applicable  (true for residential, false for commercial/rural)
+    - building_count        (integer or null — for commercial jobs)
+    - plan_completeness     (object with per-category scores: present/partial/absent)
+  If project_type is absent or null, default to "residential_subdivision" and
+  lot_count_applicable = true.
 
-STEP 2: Using the PREVALENCE_FILTER result, build the Gemini detection list (steps below).
+  Do NOT call send_to_gemini yet. Continue to Step 1.
 
-STEP 3: Only after completing Steps 1 and 2, call send_to_gemini with the opening message.
+STEP 1: Build the Gemini detection list using tier-based rules (below).
+        Do NOT call send_to_gemini yet.
 
-Do not call send_to_gemini in the same response as kp_lookup — these are sequential steps,
-not parallel. Calling them together means Gemini will receive no scope item list.
+STEP 2: Only after completing Steps 0 and 1, call send_to_gemini with the opening message.
 
-Call kp_lookup(item='PREVALENCE_FILTER') to get all KP items with portfolio prevalence scores.
+Do not call send_to_gemini in the same response as read_index or kp_lookup — these are
+sequential steps, not parallel.
 
-**Step 1 — Semantic aggregation:**
-Group items that represent the same physical work at different specs by stripping measurement
-prefixes and job-specific suffixes. Examples:
-  "2/4\" PAVING", "3/6\" PAVING", "4/4\" PAVING"  →  PAVING
-  "4\" SIDEWALKS", "6\" SIDEWALKS"                  →  SIDEWALKS
-  "8\" SEWER MAIN", "12\" SEWER MAIN"               →  SEWER MAIN
-  "1\" IRR SERVICE", "2\" IRR SERVICE"               →  IRR SERVICE
-  "12\" STORM CMP", "18\" STORM CMP"                 →  STORM PIPE
-  "1\" WATER SERVICES", "2\" WATER SERVICE"          →  WATER SERVICES
-Use judgment — if items clearly represent the same work at different specs, group them.
+### Tier-Based Scope Detection (replaces PREVALENCE_FILTER-only approach)
 
-**Step 2 — Aggregate prevalence:**
-For each work type group, use the MAXIMUM prevalence across all variants as the group score.
-(If any variant of PAVING appears frequently, PAVING is worth looking for.)
+**TIER A — ALWAYS INCLUDED (universal, every job):**
+Mobilization, Demo, Strip ROW, Exc to Embankment, Road Subgrade, Paving, Pave Widening,
+Curbs, C&G, Scuppers, Gravel Work / Temp Turnaround, Traffic Control, Signs & Striping,
+RRFB, Sewer Main, Connect to Exist Sewer, Sewer Manholes, Drop Manhole, Sewer Sleeves,
+Water Main, Connect to Exist Water, Fire Hydrants, Blow-Off Assembly,
+Water Fittings (bends/valves/caps), Water Sleeving, Single Drywells, Swales w/ Topsoil,
+Greenspace w/ Topsoil, Utility Trenching, Construction Entrance, Inlet Protection,
+Silt Fence, Barricades, Saw Cutting
 
-**Step 3 — Filter:**
-Include all work type groups with aggregate prevalence >= 0.70.
+Always tell Gemini to look for all Tier A items regardless of what the prevalence filter says.
+Tier A items are NEVER filtered out — include them even if KP prevalence < 0.70.
 
-**Step 4 — Build Gemini detection list:**
-From the filtered groups, build a SCOPE ITEMS list to include in your send_to_gemini
-opening message. Use semantic work type names only — no measurements. Example:
-  PAVING, SIDEWALKS, SEWER MAIN, SCUPPERS, FIRE HYDRANTS, MOBILIZATION, ...
+**TIER B — RESIDENTIAL ONLY (include when lot_count_applicable = true):**
+Sewer Services, Water Services, Double Drywells, Sidewalks, Ped Ramps, Mailbox Pad,
+Driveway Approach, Irrigation Sleeving, 1" IRR Service, Street Lights, Snow Storage
+
+**TIER C — COMMERCIAL (include when project_type ∈ {commercial_development, mixed}):**
+Parking Lot Paving, ADA Stalls, Wheel Stops, Curb Islands, Commercial Driveways,
+Detention/Retention Ponds, Larger Water/Sewer Services (2"+),
+Heavy-Duty Paving, Street Lights, Sewer Services (qty = building_count),
+Water Services (qty = building_count)
+
+**TIER D — RURAL (include when project_type ∈ {rural_access, mixed}):**
+Culverts (various sizes), Rip-Rap, Cattle Guards, Gates/Fencing,
+Gravel Access Roads, Access Road Turnouts, Well/Septic, Large Earthwork by CY
+
+**SUPPLEMENT — PREVALENCE_FILTER catch-all:**
+After building the tier lists above, call kp_lookup('PREVALENCE_FILTER') and include any
+additional KP items with prevalence >= 0.70 that are NOT already in the tier lists.
+These catch portfolio-specific items that aren't in the universal tiers.
+Do NOT call kp_lookup('PREVALENCE_FILTER') instead of the tier lists — it supplements them.
+
+Do NOT include in the detection list items already covered by structural fields:
+  FIRE HYDRANTS → proposed_fire_hydrant_count  (structural, cross-check in QC)
+  SEWER MANHOLE → proposed_manhole_count        (structural, cross-check in QC)
+  ADA RAMPS     → proposed_ped_ramp_count       (structural, cross-check in QC)
+
+The fixed extraction fields (road_LF, sidewalk_sides, sewer_main_LF, etc.) are always
+extracted regardless of this list. Scope items are additive.
 
 Instruct Gemini to:
 - Find each work type on the plans (callouts, legends, quantity tables, bid schedules)
@@ -84,28 +110,26 @@ Instruct Gemini to:
 - Report ALL variants separately if multiple specs appear (e.g., both 4" and 6" sidewalks)
 - Write a null entry for any work type not found after checking relevant sheets
 
-Do NOT include work types already fully covered by structural fields:
-  FIRE HYDRANTS → proposed_fire_hydrant_count  (structural)
-  SEWER MANHOLE → proposed_manhole_count        (structural)
-  ADA RAMPS     → proposed_ped_ramp_count       (structural)
-For these, cross-check Gemini's scope item count against the structural field in QC.
-
-The fixed extraction fields (road_LF, sidewalk_sides, sewer_main_LF, etc.) are always
-extracted regardless of this list. Scope items are additive.
-
 ### Opening the Extraction
 
 Start by calling send_to_gemini with a message that:
 1. Tells Gemini which pages are high-importance (from Phase 1 index) and which sheet types
    they contain — so Gemini knows where to begin.
-2. Lists the standard fields PLUS the SCOPE ITEMS list from the detection step above.
+2. States the project_type and any completeness notes from Phase 1.5 as context:
+   - For categories scored "absent" in plan_completeness: tell Gemini NOT to spend time
+     looking for those sheets (e.g. "Grading_Earthwork scored absent — no grading plan found,
+     skip earthwork sheet search").
+   - For categories scored "partial": tell Gemini to look but flag any thin data
+     (e.g. "Sewer scored partial — utility plan exists but labels may be thin, do your best
+     but flag low confidence if you can't read pipe sizes").
+3. Lists the standard fields PLUS the SCOPE ITEMS list from the detection step above.
    If Brian noted "no public sewer", tell Gemini to skip sewer_main_LF.
-3. For scope items: tell Gemini to write all findings to index key "scope_items" as a JSON
+4. For scope items: tell Gemini to write all findings to index key "scope_items" as a JSON
    array. Each entry: {work_type, quantity, unit, spec, pages, confidence}. Spec is the
    measurement read from the plans (e.g. "3/6\"") or null if not visible. If a work type
    appears at multiple specs, write one entry per spec.
-4. Instructs Gemini to call index_write("extraction_complete", true) when done.
-5. For road_LF: instruct Gemini to ALWAYS report the full stationing length (end station
+5. Instructs Gemini to call index_write("extraction_complete", true) when done.
+6. For road_LF: instruct Gemini to ALWAYS report the full stationing length (end station
    minus start station) exactly as shown on the plans. Do NOT halve or adjust lengths for
    roads that front existing streets. Instead, tag each road with
    road_type: "new_construction" or "improvement_to_existing". Claude handles all quantity
@@ -119,25 +143,30 @@ is not visible on any sheet (e.g. "no utility plan found").
 
 CRITICAL (block Phase B if missing):
   1.  road_LF              — per-road array with at least one entry
-  2.  lot_count            — integer
+  2.  lot_count            — integer; CRITICAL only when lot_count_applicable = true.
+                             For commercial/rural jobs, replace with building_count (IMPORTANT)
+                             and proceed without blocking if lot_count is null.
   3.  curb_type            — "rolled", "standard", or "mixed"
   4.  sidewalk_sides       — per-road array with at least one entry
+                             (for rural, "none" entries are valid — do not re-request)
   5.  ROW_width_ft         — array of objects with 'roads' list and 'width'
   6.  stripping_depth_in   — integer or null-confirmed
+  7.  project_type         — read from index (set by Phase 0.5 or UI picker); if absent, default to residential_subdivision
 
 IMPORTANT (request if not present, but do not block Phase B if confirmed absent):
-  7.  sewer_main_LF
-  8.  water_main_LF
-  9.  proposed_fire_hydrant_count
-  10. proposed_manhole_count
-  11. storm_drainage_basin_count
-  12. storm_inlet_type
-  13. irrigation_service_present
-  14. earthwork_balance
-  15. demo_scope_present
-  16. ballast_is_separate_pay_item
-  17. strip_haul_off_required
-  18. existing_road_widening_present
+  8.  sewer_main_LF
+  9.  water_main_LF
+  10. proposed_fire_hydrant_count
+  11. proposed_manhole_count
+  12. storm_drainage_basin_count
+  13. storm_inlet_type
+  14. irrigation_service_present
+  15. earthwork_balance
+  16. demo_scope_present
+  17. ballast_is_separate_pay_item
+  18. strip_haul_off_required
+  19. existing_road_widening_present
+  20. building_count        — IMPORTANT for commercial jobs (lot_count_applicable = false)
 
 ### Mandatory QC Loop (run after EVERY send_to_gemini response)
 

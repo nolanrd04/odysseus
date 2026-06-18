@@ -161,6 +161,12 @@ class RunRequest(BaseModel):
     gemini_fallback_models: List[str] = []
     holdout_kp_path: str = ""
     import_from_run_id: str = ""
+    project_type: str = ""  # "" = auto-detect via Phase 0.5; else: residential_subdivision | commercial_development | rural_access | mixed
+
+
+class AdvancePhaseRequest(BaseModel):
+    run_id: str
+    phase: str = ""
 
 
 class ValidateRequest(BaseModel):
@@ -228,14 +234,14 @@ def _save_extracted_values(run_id: str, extracted_values: dict) -> None:
         logger.warning(f"[quick_proposal] extracted_values save failed run={run_id}: {e}")
 
 
-async def _run_phase3_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False) -> None:
+async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False) -> None:
     """Re-run phase2 index build + phase3 extraction loop using saved page classifications."""
     try:
-        await _emit(queue, "phase_start", phase="phase2", label="Building extraction index…")
+        await _emit(queue, "phase_start", phase="phase4", label="Building extraction index…")
         index.extracted_data["phase1_summary"] = _build_phase1_summary(index)
-        await _emit(queue, "phase_complete", phase="phase2")
+        await _emit(queue, "phase_complete", phase="phase4")
 
-        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume)
+        await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume)
         _save_run_results(run_id, index)
         _save_run_meta(run_id, status="complete")
     except Exception as e:
@@ -485,7 +491,7 @@ async def _classify_one_page(
             raise
 
 
-async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str = "", retry_attempts: int = 3, fallback_models: list | None = None) -> None:
+async def phase2_classify_pages(index, queue: asyncio.Queue, model_override: str = "", retry_attempts: int = 3, fallback_models: list | None = None) -> None:
     """Classify each rendered page via Gemini and emit page_classified events."""
     from src.quick_proposal.index import BboxRecord
 
@@ -498,12 +504,12 @@ async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str
             url, headers, api_key, model = _get_gemini_endpoint()
             model = model_override
             if not api_key:
-                await _emit(queue, "error", message="No Gemini API key found — add a googleapis.com endpoint in Settings", phase="phase1")
+                await _emit(queue, "error", message="No Gemini API key found — add a googleapis.com endpoint in Settings", phase="phase2")
                 return
     else:
         url, headers, api_key, model = _get_gemini_endpoint()
         if not api_key:
-            await _emit(queue, "error", message="No Gemini API key found — add a googleapis.com endpoint in Settings", phase="phase1")
+            await _emit(queue, "error", message="No Gemini API key found — add a googleapis.com endpoint in Settings", phase="phase2")
             return
 
     prompt     = (_PROMPTS_DIR / "gemini_phase1.txt").read_text(encoding="utf-8")
@@ -520,7 +526,7 @@ async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str
 
     all_configs = [(url, headers, model, cache_name)] + fallback_configs
 
-    await _emit(queue, "phase_start", phase="phase1",
+    await _emit(queue, "phase_start", phase="phase2",
                 label="Classifying pages…",
                 cached=cache_name is not None)
     auto_redone: set[int] = set()
@@ -625,7 +631,7 @@ async def phase1_classify_pages(index, queue: asyncio.Queue, model_override: str
         if cache_name:
             await _gemini_cache_delete(cache_name, api_key)
 
-    await _emit(queue, "phase_complete", phase="phase1")
+    await _emit(queue, "phase_complete", phase="phase2")
 
 
 # ── Phase 3: Gemini extraction tools ───────────────────────────────────────────
@@ -738,6 +744,29 @@ _GEMINI_PHASE3_TOOLS = [
 ]
 
 
+_GEMINI_UTILITY_TOOLS = [
+    t for t in _GEMINI_PHASE3_TOOLS
+    if t["function"]["name"] in {"get_image", "list_images", "index_write"}
+]
+
+_GEMINI_COMPLETENESS_TOOLS = [
+    t for t in _GEMINI_PHASE3_TOOLS
+    if t["function"]["name"] in {"get_image", "list_images", "index_read", "index_write"}
+]
+
+# run_id → asyncio.Event set by /advance-phase to unblock a waiting pipeline gate
+_active_gates: dict[str, asyncio.Event] = {}
+
+
+async def _wait_for_gate(run_id: str, queue: asyncio.Queue, gate_phase: str, next_label: str) -> None:
+    """Emit a phase_gate event and block until /advance-phase is called for this run."""
+    event = asyncio.Event()
+    _active_gates[run_id] = event
+    await _emit(queue, "phase_gate", phase=gate_phase, next_phase_label=next_label)
+    await event.wait()
+    _active_gates.pop(run_id, None)
+
+
 def _render_pdf_crop(source_path: str, page_idx: int, x1: float, y1: float, x2: float, y2: float, dpi: int) -> bytes:
     """Render a clip from a PDF page using fitz. Coords are 0–100 percentages (xmin,ymin,xmax,ymax)."""
     import fitz
@@ -750,192 +779,189 @@ def _render_pdf_crop(source_path: str, page_idx: int, x1: float, y1: float, x2: 
     return pix.tobytes("jpeg")
 
 
+async def _render_and_cache(
+    image_id: str,
+    page_idx: int,
+    x1: float, y1: float, x2: float, y2: float,
+    dpi: int,
+    index,
+    image_store: dict,
+    desc: str,
+) -> tuple[bytes, str]:
+    """Render a page crop and cache the result. Returns (jpeg_bytes, cached_note).
+    Raises ValueError if PIL crop coords are degenerate."""
+    if image_id in image_store:
+        return image_store[image_id]["bytes"], " (from cache)"
+    if index.source_is_pdf:
+        jpeg_bytes = await asyncio.to_thread(
+            _render_pdf_crop, index.source_path, page_idx, x1, y1, x2, y2, dpi,
+        )
+    else:
+        from PIL import Image as PilImage
+        img = await asyncio.to_thread(PilImage.open, index.pages[page_idx].image_path)
+        w, h = img.size
+        px1 = max(0, int(x1 / 100 * w))
+        py1 = max(0, int(y1 / 100 * h))
+        px2 = min(w, int(x2 / 100 * w))
+        py2 = min(h, int(y2 / 100 * h))
+        if px2 <= px1 or py2 <= py1:
+            raise ValueError(f"invalid crop coords ({px1},{py1},{px2},{py2})")
+        buf = io.BytesIO()
+        img.crop((px1, py1, px2, py2)).save(buf, "JPEG", quality=90)
+        jpeg_bytes = buf.getvalue()
+    image_store[image_id] = {"bytes": jpeg_bytes, "desc": desc}
+    return jpeg_bytes, ""
+
+
+async def _tool_enhance_region(args: dict, index, image_store: dict) -> list:
+    bbox_id = args.get("bbox_id", "")
+    dpi     = int(args.get("dpi", 200))
+    rec     = index.bboxes.get(bbox_id)
+    if not rec:
+        if bbox_id in image_store:
+            jpeg_bytes = image_store[bbox_id]["bytes"]
+            b64 = base64.b64encode(jpeg_bytes).decode()
+            return [
+                {"type": "text", "text": f"Image {bbox_id} (from cache) [image_id: {bbox_id}]:"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ]
+        available = list(image_store.keys())
+        hint = f" Available image_ids: {available}" if available else ""
+        return [{"type": "text", "text": f"Error: bbox_id '{bbox_id}' not found in index or image store.{hint}"}]
+    try:
+        jpeg_bytes, cached_note = await _render_and_cache(
+            bbox_id, rec.page_idx, rec.x1, rec.y1, rec.x2, rec.y2, dpi,
+            index, image_store, f"Region {bbox_id} at {dpi} DPI",
+        )
+        b64 = base64.b64encode(jpeg_bytes).decode()
+        return [
+            {"type": "text", "text": f"Region {bbox_id} at {dpi} DPI{cached_note} [image_id: {bbox_id}]:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]
+    except Exception as e:
+        logger.warning(f"[quick_proposal] enhance_region error: {e}", exc_info=True)
+        return [{"type": "text", "text": f"Error rendering region: {e}"}]
+
+
+async def _tool_crop_page(args: dict, index, image_store: dict) -> list:
+    page_idx = int(args.get("page_idx", 0))
+    x1       = float(args.get("x1", 0))
+    y1       = float(args.get("y1", 0))
+    x2       = float(args.get("x2", 100))
+    y2       = float(args.get("y2", 100))
+    dpi      = int(args.get("dpi", 200))
+    if page_idx >= len(index.pages):
+        return [{"type": "text", "text": f"Error: page_idx {page_idx} out of range ({len(index.pages)} pages)"}]
+    if x1 == 0 and y1 == 0 and x2 == 100 and y2 == 100:
+        image_id = f"p{page_idx}_full"
+    else:
+        image_id = f"p{page_idx}_{x1:.0f}_{y1:.0f}_{x2:.0f}_{y2:.0f}"
+    desc = f"Page {page_idx} crop [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]% at {dpi} DPI"
+    try:
+        jpeg_bytes, cached_note = await _render_and_cache(
+            image_id, page_idx, x1, y1, x2, y2, dpi, index, image_store, desc,
+        )
+        b64 = base64.b64encode(jpeg_bytes).decode()
+        return [
+            {"type": "text", "text": f"{desc}{cached_note} [image_id: {image_id}]:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]
+    except Exception as e:
+        logger.warning(f"[quick_proposal] crop_page error: {e}", exc_info=True)
+        return [{"type": "text", "text": f"Error rendering crop: {e}"}]
+
+
+async def _tool_enhance_subregion(args: dict, index, image_store: dict) -> list:
+    parent_id = args.get("parent_bbox_id", "")
+    parent    = index.bboxes.get(parent_id)
+    if not parent:
+        return [{"type": "text", "text": f"Error: parent_bbox_id '{parent_id}' not found in index."}]
+    x1_rel = float(args.get("x1", 0))
+    y1_rel = float(args.get("y1", 0))
+    x2_rel = float(args.get("x2", 100))
+    y2_rel = float(args.get("y2", 100))
+    dpi    = int(args.get("dpi", 300))
+    image_id = f"{parent_id}_sub_{x1_rel:.0f}_{y1_rel:.0f}_{x2_rel:.0f}_{y2_rel:.0f}"
+    # Map child coords (0-100% relative to parent) → page-level coords (0-100%)
+    pw      = parent.x2 - parent.x1
+    ph      = parent.y2 - parent.y1
+    x1_page = parent.x1 + x1_rel / 100 * pw
+    y1_page = parent.y1 + y1_rel / 100 * ph
+    x2_page = parent.x1 + x2_rel / 100 * pw
+    y2_page = parent.y1 + y2_rel / 100 * ph
+    desc = f"Sub-region of {parent_id} [{x1_rel:.0f},{y1_rel:.0f},{x2_rel:.0f},{y2_rel:.0f}]% at {dpi} DPI"
+    try:
+        jpeg_bytes, cached_note = await _render_and_cache(
+            image_id, parent.page_idx, x1_page, y1_page, x2_page, y2_page, dpi,
+            index, image_store, desc,
+        )
+        b64 = base64.b64encode(jpeg_bytes).decode()
+        return [
+            {"type": "text", "text": f"Sub-region of {parent_id} [{x1_rel:.0f},{y1_rel:.0f},{x2_rel:.0f},{y2_rel:.0f}]% → page [{x1_page:.1f},{y1_page:.1f},{x2_page:.1f},{y2_page:.1f}]% at {dpi} DPI{cached_note} [image_id: {image_id}]:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]
+    except Exception as e:
+        logger.warning(f"[quick_proposal] enhance_subregion error: {e}", exc_info=True)
+        return [{"type": "text", "text": f"Error rendering subregion: {e}"}]
+
+
+async def _tool_index_read(args: dict, index) -> list:
+    return [{"type": "text", "text": json.dumps(index.extracted_values) if index.extracted_values else "{}"}]
+
+
+async def _tool_list_images(args: dict, image_store: dict) -> list:
+    entries = [{"image_id": k, "desc": v["desc"]} for k, v in image_store.items()]
+    return [{"type": "text", "text": json.dumps(entries)}]
+
+
+async def _tool_get_image(args: dict, image_store: dict) -> list:
+    image_id = args.get("image_id", "")
+    if image_id not in image_store:
+        available = list(image_store.keys())
+        return [{"type": "text", "text": f"No image found with id '{image_id}'. Available ids: {available}"}]
+    entry = image_store[image_id]
+    b64   = base64.b64encode(entry["bytes"]).decode()
+    return [
+        {"type": "text", "text": f"Retrieved: {entry['desc']} [image_id: {image_id}]:"},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+    ]
+
+
+async def _tool_index_write(args: dict, index, queue: asyncio.Queue) -> list:
+    key            = args.get("key", "")
+    value          = args.get("value")
+    source_bbox_id = args.get("source_bbox_id")
+    confidence     = args.get("confidence", "medium")
+    index.extracted_values[key] = {
+        "value":          value,
+        "source_bbox_id": source_bbox_id,
+        "confidence":     confidence,
+    }
+    await _emit(queue, "index_update",
+                key=key, value=value,
+                source_bbox_id=source_bbox_id, confidence=confidence)
+    _save_extracted_values(index.run_id, index.extracted_values)
+    return [{"type": "text", "text": f"Wrote {key} = {json.dumps(value)} (confidence={confidence})"}]
+
+
 async def _execute_gemini_tool(
     name: str, args: dict, index, queue: asyncio.Queue, image_store: dict
 ) -> list:
     """Execute a Gemini Phase 3 tool. Returns a list of OpenAI content blocks."""
     if name == "enhance_region":
-        bbox_id  = args.get("bbox_id", "")
-        dpi      = int(args.get("dpi", 200))
-        rec      = index.bboxes.get(bbox_id)
-        if not rec:
-            return [{"type": "text", "text": f"Error: bbox_id '{bbox_id}' not found in index."}]
-        image_id = bbox_id
-        try:
-            if image_id in image_store:
-                jpeg_bytes  = image_store[image_id]["bytes"]
-                cached_note = " (from cache)"
-            else:
-                if index.source_is_pdf:
-                    jpeg_bytes = await asyncio.to_thread(
-                        _render_pdf_crop, index.source_path,
-                        rec.page_idx, rec.x1, rec.y1, rec.x2, rec.y2, dpi,
-                    )
-                else:
-                    from PIL import Image as PilImage
-                    img  = await asyncio.to_thread(PilImage.open, index.pages[rec.page_idx].image_path)
-                    w, h = img.size
-                    x1   = max(0, int(rec.x1 / 100 * w))
-                    y1   = max(0, int(rec.y1 / 100 * h))
-                    x2   = min(w, int(rec.x2 / 100 * w))
-                    y2   = min(h, int(rec.y2 / 100 * h))
-                    if x2 <= x1 or y2 <= y1:
-                        return [{"type": "text", "text": f"Error: invalid bbox coords ({x1},{y1},{x2},{y2})"}]
-                    buf = io.BytesIO()
-                    img.crop((x1, y1, x2, y2)).save(buf, "JPEG", quality=90)
-                    jpeg_bytes = buf.getvalue()
-                image_store[image_id] = {"bytes": jpeg_bytes, "desc": f"Region {bbox_id} at {dpi} DPI"}
-                cached_note = ""
-            b64 = base64.b64encode(jpeg_bytes).decode()
-            return [
-                {"type": "text", "text": f"Region {bbox_id} at {dpi} DPI{cached_note} [image_id: {image_id}]:"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            ]
-        except Exception as e:
-            logger.warning(f"[quick_proposal] enhance_region error: {e}", exc_info=True)
-            return [{"type": "text", "text": f"Error rendering region: {e}"}]
-
-    elif name == "index_read":
-        return [{"type": "text", "text": json.dumps(index.extracted_values) if index.extracted_values else "{}"}]
-
+        return await _tool_enhance_region(args, index, image_store)
     elif name == "crop_page":
-        page_idx = int(args.get("page_idx", 0))
-        x1       = float(args.get("x1", 0))
-        y1       = float(args.get("y1", 0))
-        x2       = float(args.get("x2", 100))
-        y2       = float(args.get("y2", 100))
-        dpi      = int(args.get("dpi", 200))
-        if page_idx >= len(index.pages):
-            return [{"type": "text", "text": f"Error: page_idx {page_idx} out of range ({len(index.pages)} pages)"}]
-        # Stable image_id: full-page crops get a clean name; partial crops encode coords
-        if x1 == 0 and y1 == 0 and x2 == 100 and y2 == 100:
-            image_id = f"p{page_idx}_full"
-        else:
-            image_id = f"p{page_idx}_{x1:.0f}_{y1:.0f}_{x2:.0f}_{y2:.0f}"
-        try:
-            if image_id in image_store:
-                jpeg_bytes  = image_store[image_id]["bytes"]
-                cached_note = " (from cache)"
-            else:
-                if index.source_is_pdf:
-                    jpeg_bytes = await asyncio.to_thread(
-                        _render_pdf_crop, index.source_path,
-                        page_idx, x1, y1, x2, y2, dpi,
-                    )
-                else:
-                    from PIL import Image as PilImage
-                    img  = await asyncio.to_thread(PilImage.open, index.pages[page_idx].image_path)
-                    w, h = img.size
-                    px1  = max(0, int(x1 / 100 * w))
-                    py1  = max(0, int(y1 / 100 * h))
-                    px2  = min(w, int(x2 / 100 * w))
-                    py2  = min(h, int(y2 / 100 * h))
-                    if px2 <= px1 or py2 <= py1:
-                        return [{"type": "text", "text": "Error: invalid crop coords"}]
-                    buf = io.BytesIO()
-                    img.crop((px1, py1, px2, py2)).save(buf, "JPEG", quality=90)
-                    jpeg_bytes = buf.getvalue()
-                image_store[image_id] = {
-                    "bytes": jpeg_bytes,
-                    "desc":  f"Page {page_idx} crop [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]% at {dpi} DPI",
-                }
-                cached_note = ""
-            b64 = base64.b64encode(jpeg_bytes).decode()
-            return [
-                {"type": "text", "text": f"Page {page_idx} crop [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}]% at {dpi} DPI{cached_note} [image_id: {image_id}]:"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            ]
-        except Exception as e:
-            logger.warning(f"[quick_proposal] crop_page error: {e}", exc_info=True)
-            return [{"type": "text", "text": f"Error rendering crop: {e}"}]
-
+        return await _tool_crop_page(args, index, image_store)
     elif name == "enhance_subregion":
-        parent_id = args.get("parent_bbox_id", "")
-        parent    = index.bboxes.get(parent_id)
-        if not parent:
-            return [{"type": "text", "text": f"Error: parent_bbox_id '{parent_id}' not found in index."}]
-        x1_rel = float(args.get("x1", 0))
-        y1_rel = float(args.get("y1", 0))
-        x2_rel = float(args.get("x2", 100))
-        y2_rel = float(args.get("y2", 100))
-        dpi    = int(args.get("dpi", 300))
-        image_id = f"{parent_id}_sub_{x1_rel:.0f}_{y1_rel:.0f}_{x2_rel:.0f}_{y2_rel:.0f}"
-        # Map child coords (0-100% relative to parent) → page-level coords (0-100%)
-        pw = parent.x2 - parent.x1
-        ph = parent.y2 - parent.y1
-        x1_page = parent.x1 + x1_rel / 100 * pw
-        y1_page = parent.y1 + y1_rel / 100 * ph
-        x2_page = parent.x1 + x2_rel / 100 * pw
-        y2_page = parent.y1 + y2_rel / 100 * ph
-        try:
-            if image_id in image_store:
-                jpeg_bytes  = image_store[image_id]["bytes"]
-                cached_note = " (from cache)"
-            else:
-                if index.source_is_pdf:
-                    jpeg_bytes = await asyncio.to_thread(
-                        _render_pdf_crop, index.source_path,
-                        parent.page_idx, x1_page, y1_page, x2_page, y2_page, dpi,
-                    )
-                else:
-                    from PIL import Image as PilImage
-                    img  = await asyncio.to_thread(PilImage.open, index.pages[parent.page_idx].image_path)
-                    w, h = img.size
-                    px1  = max(0, int(x1_page / 100 * w))
-                    py1  = max(0, int(y1_page / 100 * h))
-                    px2  = min(w, int(x2_page / 100 * w))
-                    py2  = min(h, int(y2_page / 100 * h))
-                    if px2 <= px1 or py2 <= py1:
-                        return [{"type": "text", "text": "Error: invalid subregion coords"}]
-                    buf = io.BytesIO()
-                    img.crop((px1, py1, px2, py2)).save(buf, "JPEG", quality=90)
-                    jpeg_bytes = buf.getvalue()
-                image_store[image_id] = {
-                    "bytes": jpeg_bytes,
-                    "desc":  f"Sub-region of {parent_id} [{x1_rel:.0f},{y1_rel:.0f},{x2_rel:.0f},{y2_rel:.0f}]% at {dpi} DPI",
-                }
-                cached_note = ""
-            b64 = base64.b64encode(jpeg_bytes).decode()
-            return [
-                {"type": "text", "text": f"Sub-region of {parent_id} [{x1_rel:.0f},{y1_rel:.0f},{x2_rel:.0f},{y2_rel:.0f}]% → page [{x1_page:.1f},{y1_page:.1f},{x2_page:.1f},{y2_page:.1f}]% at {dpi} DPI{cached_note} [image_id: {image_id}]:"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            ]
-        except Exception as e:
-            logger.warning(f"[quick_proposal] enhance_subregion error: {e}", exc_info=True)
-            return [{"type": "text", "text": f"Error rendering subregion: {e}"}]
-
+        return await _tool_enhance_subregion(args, index, image_store)
+    elif name == "index_read":
+        return await _tool_index_read(args, index)
     elif name == "list_images":
-        entries = [{"image_id": k, "desc": v["desc"]} for k, v in image_store.items()]
-        return [{"type": "text", "text": json.dumps(entries)}]
-
+        return await _tool_list_images(args, image_store)
     elif name == "get_image":
-        image_id = args.get("image_id", "")
-        if image_id not in image_store:
-            available = list(image_store.keys())
-            return [{"type": "text", "text": f"No image found with id '{image_id}'. Available ids: {available}"}]
-        entry = image_store[image_id]
-        b64   = base64.b64encode(entry["bytes"]).decode()
-        return [
-            {"type": "text", "text": f"Retrieved: {entry['desc']} [image_id: {image_id}]:"},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-        ]
-
+        return await _tool_get_image(args, image_store)
     elif name == "index_write":
-        key           = args.get("key", "")
-        value         = args.get("value")
-        source_bbox_id = args.get("source_bbox_id")
-        confidence    = args.get("confidence", "medium")
-        index.extracted_values[key] = {
-            "value":          value,
-            "source_bbox_id": source_bbox_id,
-            "confidence":     confidence,
-        }
-        await _emit(queue, "index_update",
-                    key=key, value=value,
-                    source_bbox_id=source_bbox_id, confidence=confidence)
-        _save_extracted_values(index.run_id, index.extracted_values)
-        return [{"type": "text", "text": f"Wrote {key} = {json.dumps(value)} (confidence={confidence})"}]
-
+        return await _tool_index_write(args, index, queue)
     else:
         return [{"type": "text", "text": f"Unknown tool: {name}"}]
 
@@ -1004,16 +1030,19 @@ async def _run_gemini_with_tools(
     queue: asyncio.Queue,
     retry_attempts: int = 3,
     fallback_models_info: list | None = None,
+    tools: list | None = None,
 ) -> str:
     """Append user_message to Gemini history, call Gemini, handle tool loops, return final text."""
     image_store = gemini_state.setdefault("image_store", {})
     gemini_state["messages"].append({"role": "user", "content": user_message})
 
+    active_tools = tools if tools is not None else _GEMINI_PHASE3_TOOLS
+
     for _ in range(200):
         payload: dict = {
             "model":    gemini_state["model"],
             "messages": gemini_state["messages"],
-            "tools":    _GEMINI_PHASE3_TOOLS,
+            "tools":    active_tools,
             "max_tokens": 8192,
         }
         # cached_content is a native Gemini API field; the OpenAI-compat endpoint rejects it
@@ -1144,6 +1173,110 @@ async def _run_gemini_with_tools(
 
     logger.warning("[quick_proposal] Gemini tool loop hit 20-round limit")
     return "(extraction loop limit reached)"
+
+
+def _build_gemini_state_for_phase(
+    prompt_file: str,
+    gemini_model: str,
+    gemini_fallback_models: list | None,
+    index,
+) -> tuple[dict, list]:
+    """Resolve the Gemini endpoint and build a fresh state dict for a utility phase.
+    Returns (gemini_state, fallback_models_info)."""
+    if gemini_model:
+        found = _get_endpoint_for_model(gemini_model)
+        if found:
+            url, headers, _, _ = found
+        else:
+            url, headers, _, gemini_model = _get_gemini_endpoint()
+    else:
+        url, headers, _, gemini_model = _get_gemini_endpoint()
+
+    fallback_models_info: list = []
+    for fb_model in (gemini_fallback_models or []):
+        found = _get_endpoint_for_model(fb_model)
+        if found:
+            fallback_models_info.append((found[0], found[1], fb_model))
+        else:
+            fallback_models_info.append((url, headers, fb_model))
+
+    prompt_text = (_PROMPTS_DIR / prompt_file).read_text(encoding="utf-8")
+
+    image_store: dict = {}
+    for page in index.pages:
+        try:
+            image_store[f"p{page.idx}_thumbnail"] = {
+                "bytes": Path(page.image_path).read_bytes(),
+                "desc":  f"Page {page.idx} thumbnail",
+            }
+        except Exception:
+            pass
+
+    state: dict = {
+        "messages":    [{"role": "system", "content": prompt_text}],
+        "url":         url,
+        "headers":     headers,
+        "model":       gemini_model,
+        "cache_name":  None,
+        "image_store": image_store,
+    }
+    return state, fallback_models_info
+
+
+async def phase1_detect_job_type(
+    index,
+    queue: asyncio.Queue,
+    gemini_model: str = "",
+    retry_attempts: int = 3,
+    gemini_fallback_models: list | None = None,
+) -> None:
+    """Detect project type via Gemini. Only called when project_type not already set."""
+    await _emit(queue, "phase_start", phase="phase1", label="Job Type Detection…")
+    state, fallback_models_info = _build_gemini_state_for_phase(
+        "gemini_phase0_5.txt", gemini_model, gemini_fallback_models, index
+    )
+    await _run_gemini_with_tools(
+        "Please identify the project type for this plan set. "
+        "Start with list_images() to see available thumbnails, then examine the cover or first plan pages.",
+        state, index, queue,
+        retry_attempts=retry_attempts,
+        fallback_models_info=fallback_models_info,
+        tools=_GEMINI_UTILITY_TOOLS,
+    )
+    detected = index.extracted_values.get("project_type", {}).get("value", "unknown")
+    logger.info(f"[quick_proposal] phase0.5 complete — project_type={detected}")
+    await _emit(queue, "phase_complete", phase="phase1")
+
+
+async def phase3_completeness_score(
+    index,
+    queue: asyncio.Queue,
+    gemini_model: str = "",
+    retry_attempts: int = 3,
+    gemini_fallback_models: list | None = None,
+) -> None:
+    """Score plan completeness across categories. Always runs after Phase 1."""
+    await _emit(queue, "phase_start", phase="phase3", label="Completeness Scoring…")
+    state, fallback_models_info = _build_gemini_state_for_phase(
+        "gemini_completeness.txt", gemini_model, gemini_fallback_models, index
+    )
+    project_type   = index.extracted_values.get("project_type", {}).get("value", "residential_subdivision")
+    phase1_summary = index.extracted_data.get("phase1_summary", "(no Phase 1 summary available)")
+    initial_ctx = (
+        f"Project type: {project_type}\n\n"
+        "Phase 1 classification summary:\n\n"
+        + phase1_summary
+        + "\n\nPlease score the plan completeness for each relevant category."
+    )
+    await _run_gemini_with_tools(
+        initial_ctx,
+        state, index, queue,
+        retry_attempts=retry_attempts,
+        fallback_models_info=fallback_models_info,
+        tools=_GEMINI_COMPLETENESS_TOOLS,
+    )
+    logger.info(f"[quick_proposal] phase1.5 complete — project_type={project_type}")
+    await _emit(queue, "phase_complete", phase="phase3")
 
 
 def _kp_lookup(knowledge_pack: dict, query: str) -> str:
@@ -1361,7 +1494,7 @@ async def _stream_manager_call(
     }
 
 
-async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False) -> None:
+async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False) -> None:
     """Phase 3: Manager LLM orchestrates Gemini extraction via send_to_gemini tool."""
     # Resolve manager endpoint — prefer the explicitly selected model, fall back to Anthropic endpoint.
     mgr_url = mgr_headers = mgr_api_key = mgr_model_id = None
@@ -1398,7 +1531,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
     if mgr_url is None:
         await _emit(queue, "error",
                     message="No manager endpoint found — add an endpoint in Settings",
-                    phase="phase3")
+                    phase="phase5")
         return
 
     if gemini_model:
@@ -1451,7 +1584,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
         "headers":     gemini_headers,
         "model":       gemini_model,
         "cache_name":  gemini_cache_name,
-        "log_path":    str(Path(RUNS_DIR) / index.run_id / "phase3_log.jsonl"),
+        "log_path":    str(Path(RUNS_DIR) / index.run_id / "phase5_log.jsonl"),
         "image_store": image_store,
     }
 
@@ -1461,16 +1594,28 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
             "content": gemini_phase3_prompt,
         })
 
-    # Seed Gemini's history with the Phase 1 index as initial context.
-    phase1_summary = index.extracted_data.get("phase1_summary", "")
+    # Seed Gemini's history with Phase 1 index + project type + completeness as initial context.
+    phase1_summary   = index.extracted_data.get("phase1_summary", "")
+    project_type_val = index.extracted_values.get("project_type", {}).get("value", "")
+    plan_completeness_val = index.extracted_values.get("plan_completeness", {}).get("value")
+    completeness_notes_val = index.extracted_values.get("completeness_notes", {}).get("value", "")
+
+    ctx_parts = ["Here is the Phase 1 classification index for this plan set:\n\n" + phase1_summary]
+    if project_type_val:
+        ctx_parts.append(f"\nProject type (from Phase 0.5 / UI picker): {project_type_val}")
+    if plan_completeness_val:
+        ctx_parts.append(
+            "\nPlan completeness scores (from Phase 1.5):\n"
+            + json.dumps(plan_completeness_val, indent=2)
+        )
+    if completeness_notes_val:
+        ctx_parts.append(f"\nCompleteness notes: {completeness_notes_val}")
+    ctx_parts.append("\n\nStand by for extraction instructions.")
+
     gemini_state["messages"].extend([
         {
             "role":    "user",
-            "content": (
-                "Here is the Phase 1 classification index for this plan set:\n\n"
-                + phase1_summary
-                + "\n\nStand by for extraction instructions."
-            ),
+            "content": "\n".join(ctx_parts),
         },
         {
             "role":    "assistant",
@@ -1625,7 +1770,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
 
     all_tools = [send_to_gemini_tool, read_index_tool, kp_lookup_tool, end_generation_tool]
 
-    await _emit(queue, "phase_start", phase="phase3", label="Extracting values from plans…")
+    await _emit(queue, "phase_start", phase="phase5", label="Extracting values from plans…")
 
     phase_b_complete = False
     phase_b_nudges   = 0
@@ -1647,7 +1792,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
             if "error" in resp:
                 err_msg = resp.get("error", {}).get("message", str(resp))
                 logger.error(f"[quick_proposal] manager error in phase3: {err_msg}")
-                await _emit(queue, "error", message=f"Manager error: {err_msg}", phase="phase3")
+                await _emit(queue, "error", message=f"Manager error: {err_msg}", phase="phase5")
                 return
 
             # ── Parse response ─────────────────────────────────────────────────
@@ -1774,7 +1919,7 @@ async def phase3_claude_gemini_loop(index, queue: asyncio.Queue, manager_model: 
         if gemini_cache_name:
             await _gemini_cache_delete(gemini_cache_name, gemini_api_key)
 
-    await _emit(queue, "phase_complete", phase="phase3")
+    await _emit(queue, "phase_complete", phase="phase5")
 
 
 # ── PDF / image rendering ──────────────────────────────────────────────────────
@@ -1844,6 +1989,7 @@ async def run_pipeline(
     gemini_fallback_models: list | None = None,
     holdout_kp_path: str = "",
     import_from_run_id: str = "",
+    project_type: str = "",
 ) -> None:
     _success = False
     try:
@@ -1889,6 +2035,23 @@ async def run_pipeline(
                           for c in index.case_library],
                     kp_path=kp_path_used)
         await _emit(queue, "phase_complete", phase="index")
+
+        # Step 2.5 — Write project_type if provided by UI picker; else run Phase 0.5 detection
+        if project_type:
+            index.extracted_values["project_type"] = {
+                "value": project_type, "source_bbox_id": None, "confidence": "high",
+            }
+            await _emit(queue, "index_update", key="project_type", value=project_type,
+                        source_bbox_id=None, confidence="high")
+            _save_extracted_values(run_id, index.extracted_values)
+            logger.info(f"[quick_proposal] project_type set from UI picker: {project_type}")
+        else:
+            await phase1_detect_job_type(
+                index, queue,
+                gemini_model=gemini_model,
+                retry_attempts=gemini_retry_attempts,
+                gemini_fallback_models=gemini_fallback_models,
+            )
 
         # Step 3 — Phase 1 per-page Gemini classification (or import from a previous run)
         if import_from_run_id:
@@ -1938,20 +2101,34 @@ async def run_pipeline(
                                 regions=regions_out,
                                 imported=True)
 
-            await _emit(queue, "phase_start", phase="phase1", label="Importing classifications…", cached=False)
-            await _emit(queue, "phase_complete", phase="phase1")
+            await _emit(queue, "phase_start", phase="phase2", label="Importing classifications…", cached=False)
+            await _emit(queue, "phase_complete", phase="phase2")
             logger.info(f"[quick_proposal] imported classifications from run {import_from_run_id}")
         else:
-            await phase1_classify_pages(index, queue, model_override=gemini_model, retry_attempts=gemini_retry_attempts, fallback_models=gemini_fallback_models)
+            await phase2_classify_pages(index, queue, model_override=gemini_model, retry_attempts=gemini_retry_attempts, fallback_models=gemini_fallback_models)
         _save_run_results(run_id, index)  # persist phase1 classifications + bboxes
 
-        # Step 4 — Phase 2: build text index from Phase 1 results (pure Python, no LLM)
-        await _emit(queue, "phase_start", phase="phase2", label="Building extraction index…")
+        # Step 3.5 — Build phase1_summary (needed by Phase 1.5), then gate → Phase 1.5
         index.extracted_data["phase1_summary"] = _build_phase1_summary(index)
-        await _emit(queue, "phase_complete", phase="phase2")
+
+        await _wait_for_gate(run_id, queue, "phase2", "Completeness Scoring")
+
+        await phase3_completeness_score(
+            index, queue,
+            gemini_model=gemini_model,
+            retry_attempts=gemini_retry_attempts,
+            gemini_fallback_models=gemini_fallback_models,
+        )
+
+        # Step 4 — Phase 2: (phase1_summary already built above; just emit events)
+        await _emit(queue, "phase_start", phase="phase4", label="Building extraction index…")
+        await _emit(queue, "phase_complete", phase="phase4")
+
+        # Gate before Phase 3
+        await _wait_for_gate(run_id, queue, "phase3", "Extraction")
 
         # Step 5 — Phase 3: manager LLM + Gemini extraction tool loop
-        await phase3_claude_gemini_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=gemini_retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path)
+        await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=gemini_retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path)
         _success = True
 
     except BaseException as e:
@@ -2006,9 +2183,21 @@ def setup_quick_proposal_routes():
             gemini_fallback_models=req.gemini_fallback_models or None,
             holdout_kp_path=req.holdout_kp_path,
             import_from_run_id=req.import_from_run_id,
+            project_type=req.project_type,
         ))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
+
+    @router.post("/advance-phase")
+    async def advance_phase(req: AdvancePhaseRequest):
+        """Called by the frontend to unblock a pipeline waiting at a phase gate.
+        When auto-mode is ON, the frontend calls this immediately on phase_gate.
+        When auto-mode is OFF, the user clicks a gate button which calls this."""
+        event = _active_gates.get(req.run_id)
+        if event:
+            event.set()
+            return {"status": "ok", "run_id": req.run_id}
+        return {"status": "no_gate", "run_id": req.run_id}
 
     @router.get("/runs")
     async def list_runs():
@@ -2196,8 +2385,8 @@ def setup_quick_proposal_routes():
         results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
         return {"ok": True}
 
-    @router.post("/runs/{run_id}/phase3")
-    async def start_phase3_only(run_id: str, req: Phase3OnlyRequest):
+    @router.post("/runs/{run_id}/phase5")
+    async def start_phase5_only(run_id: str, req: Phase3OnlyRequest):
         results_path = Path(RUNS_DIR) / run_id / "results.json"
         meta_path    = Path(RUNS_DIR) / run_id / "meta.json"
         if not meta_path.is_file():
@@ -2251,16 +2440,20 @@ def setup_quick_proposal_routes():
             for p in results.get("pages", [])
         ]
 
+        saved_ev = results.get("extracted_values") or {}
         if req.resume:
-            existing_ev = results.get("extracted_values") or {}
-            if existing_ev:
-                index.extracted_values = existing_ev
+            if saved_ev:
+                index.extracted_values = saved_ev
+        else:
+            for key in ("project_type", "plan_completeness", "completeness_notes"):
+                if key in saved_ev:
+                    index.extracted_values[key] = saved_ev[key]
 
         queue: asyncio.Queue = asyncio.Queue()
         _active_runs[run_id] = queue
         _save_run_meta(run_id, status="running")
 
-        task = asyncio.create_task(_run_phase3_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None, holdout_kp_path=req.holdout_kp_path, resume=req.resume))
+        task = asyncio.create_task(_run_phase5_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None, holdout_kp_path=req.holdout_kp_path, resume=req.resume))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
 
@@ -2273,6 +2466,18 @@ def setup_quick_proposal_routes():
         if queue:
             await queue.put(None)
         _save_run_meta(run_id, status="cancelled")
+        return {"ok": True}
+
+    @router.delete("/runs/{run_id}")
+    async def delete_run(run_id: str):
+        run_dir = Path(RUNS_DIR) / run_id
+        if not run_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Run not found")
+        task = _active_tasks.pop(run_id, None)
+        if task and not task.done():
+            task.cancel()
+        _active_runs.pop(run_id, None)
+        await asyncio.to_thread(shutil.rmtree, run_dir, ignore_errors=True)
         return {"ok": True}
 
     @router.post("/runs/{run_id}/reclassify/{page_idx}")
@@ -2384,9 +2589,9 @@ def setup_quick_proposal_routes():
             "regions":    regions_out,
         }
 
-    @router.get("/runs/{run_id}/phase3_log")
+    @router.get("/runs/{run_id}/phase5_log")
     async def get_phase3_log(run_id: str):
-        log_path = Path(RUNS_DIR) / run_id / "phase3_log.jsonl"
+        log_path = Path(RUNS_DIR) / run_id / "phase5_log.jsonl"
         if not log_path.is_file():
             return []
         entries = []

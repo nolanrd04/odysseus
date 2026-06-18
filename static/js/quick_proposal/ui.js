@@ -19,7 +19,17 @@ const STYLES = `
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
 }
-.qp-title { font-size: 14px; font-weight: 600; letter-spacing: 0.3px; flex: 1; }
+.qp-title { font-size: 14px; font-weight: 600; letter-spacing: 0.3px; }
+.qp-run-meta {
+    flex: 1; display: flex; align-items: center; gap: 8px;
+    font-size: 11px; color: color-mix(in srgb, var(--fg) 55%, transparent);
+    overflow: hidden;
+}
+.qp-run-meta-item {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    background: color-mix(in srgb, var(--fg) 7%, transparent);
+    border-radius: 4px; padding: 2px 7px;
+}
 .qp-close-btn {
     background: none; border: none; cursor: pointer;
     color: color-mix(in srgb, var(--fg) 50%, transparent);
@@ -314,6 +324,32 @@ const STYLES = `
     font-size: 13px; padding: 0 2px; line-height: 1; transition: color 0.1s;
 }
 .qp-fallback-remove:hover { color: #ef4444; }
+.qp-auto-mode-row {
+    width: 100%; max-width: 480px;
+    display: flex; align-items: center;
+}
+.qp-auto-mode-label {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 12px; color: color-mix(in srgb, var(--fg) 70%, transparent);
+    cursor: pointer; user-select: none;
+}
+.qp-auto-mode-label input[type=checkbox] { cursor: pointer; }
+.qp-header-auto-mode { margin-right: 8px; }
+.qp-run-delete-btn {
+    background: none; border: 1px solid transparent; border-radius: 5px;
+    padding: 4px 8px; cursor: pointer; font-size: 12px;
+    color: color-mix(in srgb, #ef4444 70%, transparent);
+}
+.qp-run-delete-btn:hover { border-color: #ef4444; color: #ef4444; background: color-mix(in srgb, #ef4444 8%, transparent); }
+.qp-gate-btn {
+    display: block; margin: 8px auto 0;
+    padding: 7px 18px; border-radius: 7px;
+    background: var(--accent, #0af); color: #fff;
+    border: none; cursor: pointer; font-size: 13px; font-weight: 600;
+    transition: opacity 0.15s;
+}
+.qp-gate-btn:hover { opacity: 0.85; }
+.qp-gate-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 `;
 
 function injectStyles() {
@@ -338,6 +374,10 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
     overlay.innerHTML = `
         <div class="qp-header">
             <span class="qp-title">Quick Proposal</span>
+            <div class="qp-run-meta" id="qp-run-meta"></div>
+            <label class="qp-auto-mode-label qp-header-auto-mode" id="qp-header-auto-mode" style="display:none">
+                <input type="checkbox" id="qp-auto-mode-header" checked> Auto
+            </label>
             <button class="qp-cancel-btn" id="qp-cancel-btn" style="display:none">Cancel</button>
             <button class="qp-close-btn" id="qp-close-btn" title="Close">✕</button>
         </div>
@@ -386,6 +426,22 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                     <div class="qp-jobs-grid" id="qp-jobs-grid"><span style="opacity:0.5;font-size:11px">Loading…</span></div>
                     <div class="qp-holdout-notice" id="qp-holdout-notice" style="display:none"></div>
                 </div>
+                <div class="qp-model-row">
+                    <label class="qp-model-label" for="qp-project-type-select">Project Type</label>
+                    <select class="qp-model-select" id="qp-project-type-select">
+                        <option value="">Auto-detect (Gemini)</option>
+                        <option value="residential_subdivision">Residential Subdivision</option>
+                        <option value="commercial_development">Commercial Development</option>
+                        <option value="rural_access">Rural / Ranch Access</option>
+                        <option value="mixed">Mixed</option>
+                    </select>
+                </div>
+                <div class="qp-auto-mode-row">
+                    <label class="qp-auto-mode-label">
+                        <input type="checkbox" id="qp-auto-mode" checked>
+                        Auto-advance phases
+                    </label>
+                </div>
                 <div class="qp-import-section" id="qp-import-section">
                     <label class="qp-import-toggle">
                         <input type="checkbox" id="qp-import-toggle"> Import Classifications
@@ -422,10 +478,19 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
     const fileInput  = overlay.querySelector('#qp-file-input');
     const uploadZone = overlay.querySelector('#qp-upload-zone');
     const fileChosen = overlay.querySelector('#qp-file-chosen');
-    const modelSelect   = overlay.querySelector('#qp-model-select');
-    const managerSelect = overlay.querySelector('#qp-manager-model-select');
-    const runBtn        = overlay.querySelector('#qp-run-btn');
+    const modelSelect       = overlay.querySelector('#qp-model-select');
+    const managerSelect     = overlay.querySelector('#qp-manager-model-select');
+    const projectTypeSelect = overlay.querySelector('#qp-project-type-select');
+    const autoModeToggle    = overlay.querySelector('#qp-auto-mode');
+    const runBtn            = overlay.querySelector('#qp-run-btn');
     let chosenFile = null;
+
+    // Persist auto-mode preference in localStorage
+    const AUTO_MODE_KEY = 'qp_auto_mode';
+    autoModeToggle.checked = localStorage.getItem(AUTO_MODE_KEY) !== 'false';
+    autoModeToggle.addEventListener('change', () => {
+        localStorage.setItem(AUTO_MODE_KEY, autoModeToggle.checked ? 'true' : 'false');
+    });
 
     loadModels(modelSelect, { preferClaude: false });
     loadModels(managerSelect, { preferClaude: true });
@@ -549,7 +614,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
         onFileSelected(e.dataTransfer.files[0]);
     });
 
-    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename, parseInt(retryInput.value, 10) || 3, [...fallbackModels], importToggle.checked ? importSelect.value : ''));
+    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename, parseInt(retryInput.value, 10) || 3, [...fallbackModels], importToggle.checked ? importSelect.value : '', projectTypeSelect.value, autoModeToggle.checked));
 
     return overlay;
 }
@@ -595,7 +660,7 @@ async function loadModels(select, { preferClaude = false } = {}) {
     }
 }
 
-async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '', geminiRetryAttempts = 3, geminiFallbackModels = [], importFromRunId = '') {
+async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '', geminiRetryAttempts = 3, geminiFallbackModels = [], importFromRunId = '', projectType = '', autoMode = true) {
     const runBtn       = overlay.querySelector('#qp-run-btn');
     const cancelBtn    = overlay.querySelector('#qp-cancel-btn');
     const statusEl     = overlay.querySelector('#qp-status');
@@ -670,7 +735,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         const res = await fetch('/api/quick_proposal/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId }),
+            body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId, project_type: projectType }),
         });
         if (!res.ok) throw new Error(`Run failed: ${res.status}`);
         runId = (await res.json()).run_id;
@@ -685,6 +750,13 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
 
     formArea.style.display = 'none';
     contentArea.style.display = 'flex';
+
+    const headerAutoMode  = overlay.querySelector('#qp-header-auto-mode');
+    const headerAutoCheck = overlay.querySelector('#qp-auto-mode-header');
+    if (headerAutoMode) {
+        headerAutoCheck.checked = autoMode;
+        headerAutoMode.style.display = '';
+    }
 
     if (cancelBtn) {
         cancelBtn.style.display = '';
@@ -706,7 +778,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
                 ? `${data.label || data.phase} (prompt cached)`
                 : (data.label || `Phase: ${data.phase}`);
             setStatus(statusEl, label, true);
-            if (data.phase === 'phase3') {
+            if (data.phase === 'phase5') {
                 renderExtractionPanel(mainOutput);
             }
         },
@@ -715,17 +787,55 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
             const msgs = {
                 load:   'Pages rendered.',
                 index:  'Knowledge base loaded.',
-                phase1: 'Classification complete — regions annotated.',
-                phase2: 'Extraction index built.',
-                phase3: 'Extraction complete.',
+                phase1: 'Job type detected.',
+                phase2: 'Classification complete — regions annotated.',
+                phase3: 'Completeness scoring done.',
+                phase4: 'Extraction index built.',
+                phase5: 'Extraction complete.',
             };
             setStatus(statusEl, msgs[data.phase] || `${data.phase} complete.`);
             if (data.phase === 'load') {
                 const ph = mainOutput.querySelector('#qp-main-placeholder');
                 if (ph) { ph.innerHTML = 'Click a page to preview'; }
             }
-            if (data.phase === 'phase1') {
-                // sidebar is the index — nothing to do in main area
+        },
+
+        onPhaseGate(data) {
+            const nextLabel = data.next_phase_label || 'Next Phase';
+            if (overlay.querySelector('#qp-auto-mode-header')?.checked) {
+                // Auto-advance: call /advance-phase immediately
+                fetch('/api/quick_proposal/advance-phase', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ run_id: runId, phase: data.phase }),
+                    credentials: 'same-origin',
+                }).catch(err => console.warn('[quick_proposal] advance-phase error:', err));
+            } else {
+                // Manual mode: show gate button in status area
+                setStatus(statusEl, `Ready for ${nextLabel}`);
+                const gateBtn = document.createElement('button');
+                gateBtn.className = 'qp-gate-btn';
+                gateBtn.textContent = `▶ Start ${nextLabel}`;
+                gateBtn.onclick = () => {
+                    gateBtn.disabled = true;
+                    gateBtn.textContent = 'Starting…';
+                    fetch('/api/quick_proposal/advance-phase', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ run_id: runId, phase: data.phase }),
+                        credentials: 'same-origin',
+                    }).catch(err => console.warn('[quick_proposal] advance-phase error:', err));
+                };
+                const statusParent = statusEl.parentElement || mainOutput;
+                statusParent.appendChild(gateBtn);
+                // Remove gate button once the next phase starts
+                const removGateListener = (e) => {
+                    const d = JSON.parse(e.data || '{}');
+                    if (d.phase !== data.phase) {
+                        gateBtn.remove();
+                        statusParent.removeEventListener('phase_start', removGateListener);
+                    }
+                };
             }
         },
 
@@ -757,6 +867,9 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
 
         onIndexUpdate(data) {
             updateLiveIndex(mainOutput, data);
+            if (data.key === 'project_type' || data.key === 'plan_completeness') {
+                updateRunMeta(overlay);
+            }
         },
 
         onRegionPreview(data) { addRegionPreview(mainOutput, data); },
@@ -774,10 +887,12 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
                         clearInterval(statusPoll); statusPoll = null;
                         setStatus(statusEl, 'Pipeline complete.');
                         if (cancelBtn) cancelBtn.style.display = 'none';
+                        if (headerAutoMode) headerAutoMode.style.display = 'none';
                     } else if (status === 'error' || status === 'cancelled') {
                         clearInterval(statusPoll); statusPoll = null;
                         setStatus(statusEl, `Pipeline ${status}.`);
                         if (cancelBtn) cancelBtn.style.display = 'none';
+                        if (headerAutoMode) headerAutoMode.style.display = 'none';
                     }
                 } catch { /* ignore network errors during poll */ }
             }, 3000);
@@ -786,11 +901,13 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         onError(data) {
             setStatus(statusEl, `Error: ${data.message}`);
             if (cancelBtn) cancelBtn.style.display = 'none';
+            if (headerAutoMode) headerAutoMode.style.display = 'none';
         },
 
         onDone() {
             setStatus(statusEl, 'Pipeline complete.');
             if (cancelBtn) cancelBtn.style.display = 'none';
+            if (headerAutoMode) headerAutoMode.style.display = 'none';
             const pages = Object.entries(pageClassifications).map(([idx, cls]) => ({
                 idx:         parseInt(idx),
                 sheet_type:  cls.sheet_type,
@@ -1523,6 +1640,21 @@ function appendExtractionMessage(mainOutput, data) {
     container.scrollTop = container.scrollHeight;
 }
 
+function updateRunMeta(overlay) {
+    const el = overlay.querySelector('#qp-run-meta');
+    if (!el) return;
+    const indexValues = overlay.querySelector('#qp-index-values');
+    if (!indexValues) return;
+    const get = key => indexValues.querySelector(`[data-key="${CSS.escape(key)}"] .qp-index-val`)?.textContent?.trim();
+    const fmt = s => s ? s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : null;
+    const projectType   = fmt(get('project_type'));
+    const completeness  = get('plan_completeness');
+    el.innerHTML = [
+        projectType  ? `<span class="qp-run-meta-item">${_esc(projectType)}</span>`  : '',
+        completeness ? `<span class="qp-run-meta-item">Completeness: ${_esc(completeness)}</span>` : '',
+    ].join('');
+}
+
 function updateLiveIndex(mainOutput, data) {
     const container = mainOutput.querySelector('#qp-index-values');
     if (!container) return;
@@ -1689,18 +1821,18 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
             <button class="qp-close-btn" id="qp-close-btn" title="Close">✕</button>
         </div>
         <div class="qp-body" id="qp-body">
-            <div class="qp-phase3-bar" id="qp-phase3-bar">
-                <span class="qp-phase3-label">Extraction Model</span>
+            <div class="qp-phase5-bar" id="qp-phase5-bar">
+                <span class="qp-phase5-label">Extraction Model</span>
                 <select class="qp-model-select" id="qp-p3-gemini-select">
                     <option value="">Loading…</option>
                 </select>
-                <span class="qp-phase3-label">Manager Model</span>
+                <span class="qp-phase5-label">Manager Model</span>
                 <select class="qp-model-select" id="qp-p3-manager-select">
                     <option value="">Loading…</option>
                 </select>
-                <span class="qp-phase3-label">Retries</span>
+                <span class="qp-phase5-label">Retries</span>
                 <input type="number" class="qp-retry-input" id="qp-p3-retry-attempts" value="3" min="1" max="10">
-                <span class="qp-phase3-label" title="Leave blank to use the full knowledge pack">Holdout KP</span>
+                <span class="qp-phase5-label" title="Leave blank to use the full knowledge pack">Holdout KP</span>
                 <input type="text" class="qp-holdout-input" id="qp-p3-holdout-kp" placeholder="(none — full KP)" style="flex:1;min-width:0;">
                 <button class="qp-run-btn" id="qp-p3-run-btn" style="margin:0;padding:6px 18px;flex-shrink:0;">Run Phase 3</button>
                 <button class="qp-run-btn qp-resume-btn" id="qp-p3-resume-btn" style="display:none;margin:0;padding:6px 18px;flex-shrink:0;">Resume</button>
@@ -1732,11 +1864,11 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
     mainOutput._qpRunId        = runId;
     mainOutput._qpSidebarPages = sidebarPages;
     mainOutput._qpGeminiModel  = '';
-    const phase3Bar      = overlay.querySelector('#qp-phase3-bar');
+    const phase5Bar      = overlay.querySelector('#qp-phase5-bar');
     const geminiSelect   = overlay.querySelector('#qp-p3-gemini-select');
     const managerSelect  = overlay.querySelector('#qp-p3-manager-select');
     const p3RetryInput   = overlay.querySelector('#qp-p3-retry-attempts');
-    const phase3RunBtn   = overlay.querySelector('#qp-p3-run-btn');
+    const phase5RunBtn   = overlay.querySelector('#qp-p3-run-btn');
     const resumeBtn      = overlay.querySelector('#qp-p3-resume-btn');
     const holdoutInput   = overlay.querySelector('#qp-p3-holdout-kp');
     const cancelBtn     = overlay.querySelector('#qp-cancel-btn');
@@ -1744,8 +1876,8 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
     loadModels(geminiSelect, { preferClaude: false });
     loadModels(managerSelect, { preferClaude: true });
 
-    function _startPhase3Stream(streamRunId, isResume) {
-        phase3Bar.style.display = 'none';
+    function _startPhase5Stream(streamRunId, isResume) {
+        phase5Bar.style.display = 'none';
         cancelBtn.style.display = '';
         cancelBtn.disabled = false;
         cancelBtn.onclick = () => {
@@ -1760,10 +1892,10 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
                     ? `${data.label || data.phase} (prompt cached)`
                     : (data.label || `Phase: ${data.phase}`);
                 setStatus(statusEl, label, true);
-                if (data.phase === 'phase3') renderExtractionPanel(mainOutput);
+                if (data.phase === 'phase5') renderExtractionPanel(mainOutput);
             },
             onPhaseComplete(data) {
-                if (data.phase === 'phase3') {
+                if (data.phase === 'phase5') {
                     setStatus(statusEl, 'Extraction complete.');
                     cancelBtn.style.display = 'none';
                 }
@@ -1774,45 +1906,63 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
             onContextUsage(data)       { updateContextMeter(mainOutput, data); },
             onDone() {
                 cancelBtn.style.display = 'none';
-                phase3Bar.style.display = 'flex';
-                phase3RunBtn.disabled = false;
+                phase5Bar.style.display = 'flex';
+                phase5RunBtn.disabled = false;
                 if (resumeBtn) resumeBtn.style.display = 'none';
             },
             onError(data) {
                 setStatus(statusEl, `Error: ${data.message}`);
                 cancelBtn.style.display = 'none';
-                phase3Bar.style.display = 'flex';
-                phase3RunBtn.disabled = false;
+                phase5Bar.style.display = 'flex';
+                phase5RunBtn.disabled = false;
                 if (resumeBtn) resumeBtn.disabled = false;
             },
         });
     }
 
-    phase3RunBtn.addEventListener('click', async () => {
-        phase3RunBtn.disabled = true;
+    async function _restorePhase3Log(extractedValues) {
+        const hasValues = Object.keys(extractedValues).length > 0;
+        try {
+            const logRes = await fetch(`/api/quick_proposal/runs/${runId}/phase5_log`, { credentials: 'same-origin' });
+            const log = logRes.ok ? await logRes.json() : [];
+            if (log.length > 0 || hasValues) {
+                renderExtractionPanel(mainOutput);
+                for (const entry of log) {
+                    if (entry.type === 'extraction_message') appendExtractionMessage(mainOutput, entry);
+                    else if (entry.type === 'region_preview')  addRegionPreview(mainOutput, entry);
+                }
+                for (const [key, meta] of Object.entries(extractedValues)) {
+                    updateLiveIndex(mainOutput, { key, value: meta.value, confidence: meta.confidence, source_bbox_id: meta.source_bbox_id });
+                }
+            }
+        } catch (_) { /* log not available — no-op */ }
+    }
+
+    async function _handleRunPhase5() {
+        phase5RunBtn.disabled = true;
         setStatus(statusEl, 'Starting Phase 3…', true);
         try {
-            const res = await fetch(`/api/quick_proposal/runs/${runId}/phase3`, {
+            const res = await fetch(`/api/quick_proposal/runs/${runId}/phase5`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], holdout_kp_path: holdoutInput?.value.trim() || '' }),
                 credentials: 'same-origin',
             });
-            if (!res.ok) throw new Error(`Phase 3 start failed: ${res.status}`);
+            if (!res.ok) throw new Error(`Phase 5 start failed: ${res.status}`);
             const { run_id: streamRunId } = await res.json();
-            _startPhase3Stream(streamRunId, false);
+            _startPhase5Stream(streamRunId, false);
         } catch (err) {
             setStatus(statusEl, `Error: ${err.message}`);
-            phase3Bar.style.display = 'flex';
-            phase3RunBtn.disabled = false;
+            phase5Bar.style.display = 'flex';
+            phase5RunBtn.disabled = false;
         }
-    });
+    }
 
-    resumeBtn?.addEventListener('click', async () => {
+    async function _handleResumePhase5() {
         resumeBtn.disabled = true;
         setStatus(statusEl, 'Resuming extraction…', true);
         try {
-            const res = await fetch(`/api/quick_proposal/runs/${runId}/phase3`, {
+            const res = await fetch(`/api/quick_proposal/runs/${runId}/phase5`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], holdout_kp_path: holdoutInput?.value.trim() || '', resume: true }),
@@ -1820,13 +1970,16 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
             });
             if (!res.ok) throw new Error(`Resume failed: ${res.status}`);
             const { run_id: streamRunId } = await res.json();
-            _startPhase3Stream(streamRunId, true);
+            _startPhase5Stream(streamRunId, true);
         } catch (err) {
             setStatus(statusEl, `Error: ${err.message}`);
-            phase3Bar.style.display = 'flex';
+            phase5Bar.style.display = 'flex';
             resumeBtn.disabled = false;
         }
-    });
+    }
+
+    phase5RunBtn.addEventListener('click', _handleRunPhase5);
+    resumeBtn?.addEventListener('click', _handleResumePhase5);
 
     try {
         const res = await fetch(`/api/quick_proposal/runs/${runId}`, { credentials: 'same-origin' });
@@ -1896,23 +2049,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
 
         placeholder.textContent = pages.length ? 'Click a page to preview' : 'No pages saved for this run.';
 
-        // Restore phase3 extraction log and index values if they were saved.
-        const extractedValues = run.extracted_values || {};
-        const hasValues = Object.keys(extractedValues).length > 0;
-        try {
-            const logRes = await fetch(`/api/quick_proposal/runs/${runId}/phase3_log`, { credentials: 'same-origin' });
-            const log = logRes.ok ? await logRes.json() : [];
-            if (log.length > 0 || hasValues) {
-                renderExtractionPanel(mainOutput);
-                for (const entry of log) {
-                    if (entry.type === 'extraction_message') appendExtractionMessage(mainOutput, entry);
-                    else if (entry.type === 'region_preview')  addRegionPreview(mainOutput, entry);
-                }
-                for (const [key, meta] of Object.entries(extractedValues)) {
-                    updateLiveIndex(mainOutput, { key, value: meta.value, confidence: meta.confidence, source_bbox_id: meta.source_bbox_id });
-                }
-            }
-        } catch (_) { /* log not available — no-op */ }
+        await _restorePhase3Log(run.extracted_values || {});
     } catch (e) {
         placeholder.textContent = `Error loading run: ${e.message}`;
     }
@@ -1965,6 +2102,7 @@ export function buildRunsPanel({ onClose, onSelectRun, onOpenRun }) {
                     <div class="qp-run-actions">
                         ${(run.status === 'complete' || run.status === 'error' || run.status === 'cancelled' || run.status === 'running') ? '<button class="qp-run-open-btn">Open</button>' : ''}
                         <button class="qp-run-rerun-btn">Re-run</button>
+                        <button class="qp-run-delete-btn" title="Delete run">Delete</button>
                     </div>
                 `;
                 row.querySelector('.qp-run-open-btn')?.addEventListener('click', () => {
@@ -1972,6 +2110,19 @@ export function buildRunsPanel({ onClose, onSelectRun, onOpenRun }) {
                 });
                 row.querySelector('.qp-run-rerun-btn').addEventListener('click', () => {
                     onSelectRun(run.upload_id, run.filename || run.upload_id);
+                });
+                row.querySelector('.qp-run-delete-btn').addEventListener('click', () => {
+                    const label = run.run_name || run.filename || run.run_id;
+                    if (!confirm(`Delete run "${label}"? This cannot be undone.`)) return;
+                    fetch(`/api/quick_proposal/runs/${run.run_id || run.id}`, {
+                        method: 'DELETE', credentials: 'same-origin',
+                    }).then(r => {
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                        row.remove();
+                        if (!body.querySelector('.qp-run-row')) {
+                            body.innerHTML = `<div class="qp-runs-empty">No proposal runs yet.</div>`;
+                        }
+                    }).catch(e => alert(`Delete failed: ${e.message}`));
                 });
                 body.appendChild(row);
             });

@@ -11,6 +11,7 @@ export function startStream(runId, handlers = {}) {
         onPageReady,
         onPhaseStart,
         onPhaseComplete,
+        onPhaseGate,
         onIndexLoaded,
         onPageClassified,
         onExtractionMessage,
@@ -35,6 +36,10 @@ export function startStream(runId, handlers = {}) {
     es.addEventListener('phase_complete', e => {
         // Do NOT close here — more phases follow.
         onPhaseComplete?.(JSON.parse(e.data));
+    });
+
+    es.addEventListener('phase_gate', e => {
+        onPhaseGate?.(JSON.parse(e.data));
     });
 
     es.addEventListener('index_loaded', e => {

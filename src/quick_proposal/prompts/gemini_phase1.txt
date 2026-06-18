@@ -103,6 +103,15 @@ SCOPE FLAGS (on any sheet):
   - Ballast as separate line item ("12\" BALLAST", "CRUSHED AGGREGATE BASE COURSE" as bid item)
   - Haul-off language ("INCL HAUL OFF", "HAUL TO WASTE", "EXPORT TO WASTE SITE")
   - Pedestrian path distinct from sidewalk ("MULTI-USE PATH", "SHARED USE PATH", "TRAIL")
+  - RRFB / Rapid Flashing Beacon symbols — rectangular pedestrian crossing devices with flashing
+    amber lights, often near school crossings or multi-use paths; look for "RRFB", "HAWK SIGNAL",
+    or pedestrian crossing beacon symbols on plan_view or detail sheets
+  - DROP MANHOLE / 60\"+ diameter manhole callouts — larger than standard 48\" MH; look for
+    "DROP MH", "60\" MANHOLE", "72\" MANHOLE" labels on utility_plan sheets
+  - TEMP TURNAROUND / GRAVEL TURNAROUND — temporary construction access at dead-end roads;
+    look for "TEMP TURNAROUND", "TEMPORARY CUL-DE-SAC", "GRAVEL TURNAROUND" on plan_view sheets
+  - SILT FENCE — erosion control perimeter fence shown on grading or erosion/SWPPP sheets;
+    look for "SF", "SILT FENCE", or perimeter fence symbols
 
 Do NOT annotate: north arrow, scale bar, revision blocks, boilerplate legal text, blank margins.
 

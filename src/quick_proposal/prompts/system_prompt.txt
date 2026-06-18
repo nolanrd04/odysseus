@@ -10,15 +10,27 @@ Apply these formulas before falling back to analog scaling. Slopes are derived f
 and stored in `item_scaling` in the knowledge pack — prefer those values when they differ from the
 figures below (they update automatically as jobs are added).
 
-1. SEWER SERVICES (4" EA): qty = lot_count. Accuracy: 7/9 within 10%. Exception: Phase 2 jobs.
-2. WATER SERVICES (1" EA): qty = lot_count. Accuracy: 7/8 within 10%. Exception: Phase 2 jobs.
+1. SEWER SERVICES (4" EA): Conditional on lot_count_applicable.
+   - lot_count_applicable = true (residential): qty = lot_count. Accuracy: 7/9 within 10%. Exception: Phase 2 jobs.
+   - lot_count_applicable = false + building_count present (commercial): qty = building_count.
+   - lot_count_applicable = false + no building_count (rural): OMIT — no per-lot sewer connections on rural access jobs.
+2. WATER SERVICES (1" EA): Conditional on lot_count_applicable (same logic as SEWER SERVICES).
+   - lot_count_applicable = true (residential): qty = lot_count. Accuracy: 7/8 within 10%. Exception: Phase 2 jobs.
+   - lot_count_applicable = false + building_count present (commercial): qty = building_count.
+   - lot_count_applicable = false + no building_count (rural): OMIT.
 3. SINGLE DRYWELLS (EA): Use this priority order:
    (a) If `storm_drainage_basin_count` (from Gemini) is not null and > 0, use it directly as
        the drywell count — one drywell per drainage basin is the engineering pattern. This is the
        most reliable source when the drainage plan is readable.
    (b) Otherwise: qty = max(1, round(lot_count × 0.23)). Floor at 2 for small jobs.
        Check `item_scaling` for updated slope.
-   SWALE SUPPRESSION (applies to path b only): If scope_notes contains "swale", "infiltration",
+   RURAL OVERRIDE: If project_type = rural_access AND no culvert drainage mentioned in scope_notes:
+   OMIT single drywells entirely (rural jobs without culverts have no lot-based drainage pattern).
+   If project_type = rural_access AND culverts present: include 1 drywell per major drainage point
+   (use culvert count as proxy if storm_drainage_basin_count is null).
+   COMMERCIAL OVERRIDE: If project_type = commercial_development:
+   Use detention_pond_count from Gemini if present; otherwise scale from ROW_SF analog.
+   SWALE SUPPRESSION (applies to residential path b only): If scope_notes contains "swale", "infiltration",
    or "grassy swale", and `storm_drainage_basin_count` is null, override the lot_count formula
    with a ROW_SF-scaled estimate using the closest swale-drainage analog, subject to a minimum
    floor:
@@ -78,20 +90,65 @@ figures below (they update automatically as jobs are added).
    building a new road), apply curb only to the side(s) Terra is fronting. One-side frontage:
    use road_LF × 1.0 (one side only, not 1.43). Flag as [ONE-SIDE FRONTAGE — curb one side].
 7. SIDEWALK SF (4" or 6" per spec): Sidewalk width is always 5 ft.
-   `sidewalk_sides` is now a per-road array. For each entry, compute that road's sidewalk SF:
+   RURAL SKIP: If project_type = rural_access AND all sidewalk_sides entries are "none" (or
+   sidewalk_sides is null), OMIT sidewalk entirely — do not apply the one_side default for
+   rural jobs. Rural access roads have no sidewalk requirement.
+   `sidewalk_sides` is a per-road array. For each entry, compute that road's sidewalk SF:
      sides = "both_sides" → road_sidewalk_SF = road_LF × 10  (5 ft × 2 sides)
      sides = "one_side"   → road_sidewalk_SF = road_LF × 5   (5 ft × 1 side)
      sides = "none"       → 0 SF for that road
    Sum across all roads for total sidewalk SF.
-   If sidewalk_sides is null (no typical section found): default to one_side for all roads
-   (road_LF × 5), flag as [SIDEWALK SIDES: typical section not available — defaulted to one
-   side, verify with Brian].
+   If sidewalk_sides is null (no typical section found) AND project_type ≠ rural_access:
+   default to one_side for all roads (road_LF × 5), flag as [SIDEWALK SIDES: typical section
+   not available — defaulted to one side, verify with Brian].
    If a road's entry is null/missing from the array, apply the one_side default for that road.
    Price from `unit_price_distributions` for "4\" SIDEWALKS" or "6\" SIDEWALKS" as applicable.
    If spec thickness differs by road (e.g. 4" on residential, 6" on collector), use two line items.
    If spec thickness is not determinable, default to 4".
-8. IRRIGATION SLEEVES LF: use `item_scaling["IRRIGATION SLEEVES"].formula`
-   (currently lot_count × 13.0, r²=0.999).
+8. IRRIGATION SLEEVES LF: Conditional on project_type.
+   - residential (lot_count_applicable = true): use `item_scaling["IRRIGATION SLEEVES"].formula`
+     (currently lot_count × 13.0, r²=0.999).
+   - rural (project_type = rural_access): use road_LF × 0.19 (ROW crossings only, no lot service).
+   - commercial (project_type = commercial_development): analog scaling only — no formula;
+     include only if irrigation_service_present = true or scope_notes mentions irrigation sleeving.
+
+9. SILT FENCE (LF): Include on ALL jobs (Tier A). Qty = road_LF × analog scaling ratio from the
+   closest analog that includes silt fence. If no analog has silt fence data, use road_LF × 1.5
+   as a rough perimeter estimate and price at $1.50–$2.50/LF as market baseline, flagging
+   [SILT FENCE: NO KP DATA — estimated from road_LF perimeter proxy].
+
+10. TEMP TURNAROUND / GRAVEL WORK: Include if ANY of the following is true:
+    (a) Any road dead-ends without a permanent cul-de-sac (check road layout)
+    (b) scope_notes or scope_items mentions "TEMP TURNAROUND", "GRAVEL TURNAROUND",
+        "TEMPORARY CUL-DE-SAC", or "TEMP ACCESS"
+    (c) Gemini flagged TEMP TURNAROUND in scope_items
+    Price as 1 LS from the closest analog that includes it. Flag [NO KP DATA] if absent from KP.
+
+11. SAW CUTTING (LF): Include if `existing_road_widening_present` is a non-empty list (any
+    fronting or improvement-to-existing road in scope). Qty = sum of fronting/widening road_LF
+    values scaled by the closest analog's saw cutting ratio. Price from KP if available;
+    otherwise analog. Flag [SAW CUTTING: NO KP DATA] if absent.
+
+12. BARRICADES (LS): Include if demo_scope_present = true OR traffic_control_in_scope = true.
+    Price as 1 LS from the closest analog. Flag [NO KP DATA] if absent.
+
+13. WATER SLEEVING: Include if irrigation_service_present = true OR scope_notes mentions sleeving
+    OR scope_items contains a Water Sleeving entry. Qty from plans if Gemini found it; otherwise
+    analog scaling. Price from KP if available; otherwise analog.
+
+14. SEWER SLEEVES: Include if scope_notes mentions sewer sleeves OR scope_items contains a Sewer
+    Sleeves entry. Price from KP or analog.
+
+15. RRFB (Rapid Flashing Beacon, EA): Include if Gemini flagged RRFB in scope_items OR
+    scope_notes mentions "RRFB", "rapid flashing beacon", "HAWK signal", or pedestrian crossing
+    beacon. Qty from scope_items if present; else 1 EA.
+    Price: $28,000–$35,000 per EA as market estimate. Flag [NO KP DATA — verify with Brian
+    before bidding].
+
+16. DROP MANHOLE / 60"+ DIAMETER MANHOLE (EA): Include if Gemini flagged drop manhole or 60"+
+    MH in scope_items. Qty from scope_items.
+    Price: standard 48" MH KP median × 1.5 as size premium estimate. Flag [NO KP DATA —
+    estimated 1.5× premium over standard 48\" MH price, verify with Brian].
 
 ## LS Item Inference
 
