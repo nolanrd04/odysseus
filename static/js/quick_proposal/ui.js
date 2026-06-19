@@ -404,6 +404,11 @@ const STYLES = `
     color: var(--fg);
     background: color-mix(in srgb, var(--accent, #0af) 10%, transparent);
 }
+.qp-phase-step.running {
+    cursor: pointer;
+    border-color: var(--accent, #0af);
+    color: var(--fg);
+}
 .qp-phase-sep { font-size: 12px; opacity: 0.3; flex-shrink: 0; }
 .qp-run-controls {
     padding: 10px 16px; border-bottom: 1px solid var(--border);
@@ -836,16 +841,20 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
     const phaseBar = overlay.querySelector('#qp-phase-bar');
     if (phaseBar) phaseBar.style.display = '';
     const _donePhases = new Set();
+    const _reachablePhases = new Set();
+    let _runningPhase = null;
 
     // completeness phase shares the 'extraction' pane (same extraction log panel)
     const _paneFor = phaseKey => phaseKey === 'classification' ? 'classification' : 'extraction';
 
     const _setActivePhase = (phaseKey) => {
+        _reachablePhases.add(phaseKey);
         overlay.querySelectorAll('.qp-phase-step').forEach(s => {
             const k = s.dataset.phase;
-            if (k === phaseKey) { s.classList.add('active'); s.classList.remove('done'); }
-            else if (_donePhases.has(k)) { s.classList.add('done'); s.classList.remove('active'); }
-            else { s.classList.remove('active', 'done'); }
+            if (k === phaseKey) { s.classList.add('active'); s.classList.remove('done', 'running'); }
+            else if (_donePhases.has(k)) { s.classList.add('done'); s.classList.remove('active', 'running'); }
+            else if (k === _runningPhase) { s.classList.add('running'); s.classList.remove('active', 'done'); }
+            else { s.classList.remove('active', 'done', 'running'); }
         });
         const pane = _paneFor(phaseKey);
         overlay.querySelectorAll('.qp-phase-pane').forEach(p => {
@@ -855,7 +864,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
 
     phaseBar?.addEventListener('click', e => {
         const step = e.target.closest('.qp-phase-step');
-        if (step && (_donePhases.has(step.dataset.phase) || step.classList.contains('active'))) {
+        if (step && (_donePhases.has(step.dataset.phase) || _reachablePhases.has(step.dataset.phase))) {
             _setActivePhase(step.dataset.phase);
         }
     });
@@ -897,14 +906,16 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
                 : (data.label || `Phase: ${data.phase}`);
             setStatus(statusEl, label, true);
             if (data.phase === 'phase3') {
+                _runningPhase = 'completeness';
                 _donePhases.add('classification');
                 _setActivePhase('completeness');
                 if (!mainOutput.querySelector('#qp-extraction-log')) renderExtractionPanel(mainOutput);
             } else if (data.phase === 'phase5') {
+                _runningPhase = 'extraction';
                 _donePhases.add('classification');
                 _donePhases.add('completeness');
                 _setActivePhase('extraction');
-                if (!mainOutput.querySelector('#qp-extraction-log')) renderExtractionPanel(mainOutput);
+                renderExtractionPanel(mainOutput);
             }
         },
 
@@ -1776,7 +1787,8 @@ function updateRunMeta(overlay, state) {
     if (!el) return;
     const fmt = s => s ? String(s).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : null;
     const projectType  = fmt(state.project_type);
-    const completeness = state.plan_completeness != null ? String(state.plan_completeness) : null;
+    const cScore = state.plan_completeness?.score;
+    const completeness = cScore != null ? `${cScore}%` : null;
     el.innerHTML = [
         projectType  ? `<span class="qp-run-meta-item">${_esc(projectType)}</span>`  : '',
         completeness ? `<span class="qp-run-meta-item">Completeness: ${_esc(completeness)}</span>` : '',
@@ -2016,14 +2028,18 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
     overlay.querySelector('#qp-close-btn').addEventListener('click', onClose);
 
     const _donePhases = new Set();
+    const _reachablePhases = new Set();
+    let _runningPhase = null;
     const _paneFor = phaseKey => phaseKey === 'classification' ? 'classification' : 'extraction';
 
     const _setActivePhase = (phaseKey) => {
+        _reachablePhases.add(phaseKey);
         overlay.querySelectorAll('.qp-phase-step').forEach(s => {
             const k = s.dataset.phase;
-            if (k === phaseKey) { s.classList.add('active'); s.classList.remove('done'); }
-            else if (_donePhases.has(k)) { s.classList.add('done'); s.classList.remove('active'); }
-            else { s.classList.remove('active', 'done'); }
+            if (k === phaseKey) { s.classList.add('active'); s.classList.remove('done', 'running'); }
+            else if (_donePhases.has(k)) { s.classList.add('done'); s.classList.remove('active', 'running'); }
+            else if (k === _runningPhase) { s.classList.add('running'); s.classList.remove('active', 'done'); }
+            else { s.classList.remove('active', 'done', 'running'); }
         });
         const pane = _paneFor(phaseKey);
         overlay.querySelectorAll('.qp-phase-pane').forEach(p => {
@@ -2033,7 +2049,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
 
     overlay.querySelector('#qp-phase-bar').addEventListener('click', e => {
         const step = e.target.closest('.qp-phase-step');
-        if (step && (_donePhases.has(step.dataset.phase) || step.classList.contains('active'))) {
+        if (step && (_donePhases.has(step.dataset.phase) || _reachablePhases.has(step.dataset.phase))) {
             _setActivePhase(step.dataset.phase);
         }
     });
@@ -2079,7 +2095,8 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
         if (!indexMeta) return;
         const fmt = s => s ? String(s).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : null;
         const projectType  = fmt(runMetaState.project_type);
-        const completeness = runMetaState.plan_completeness != null ? String(runMetaState.plan_completeness) : null;
+        const cScore = runMetaState.plan_completeness?.score;
+        const completeness = cScore != null ? `${cScore}%` : null;
         const html = [
             projectType  ? `<span class="qp-run-meta-item">${_esc(projectType)}</span>`  : '',
             completeness ? `<span class="qp-run-meta-item">Completeness: ${_esc(completeness)}</span>` : '',
@@ -2114,14 +2131,16 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
                     : (data.label || `Phase: ${data.phase}`);
                 setStatus(statusEl, label, true);
                 if (data.phase === 'phase3') {
+                    _runningPhase = 'completeness';
                     _donePhases.add('classification');
                     _setActivePhase('completeness');
                     if (!mainOutput.querySelector('#qp-extraction-log')) renderExtractionPanel(mainOutput);
                 } else if (data.phase === 'phase5') {
+                    _runningPhase = 'extraction';
                     _donePhases.add('classification');
                     _donePhases.add('completeness');
                     _setActivePhase('extraction');
-                    if (!mainOutput.querySelector('#qp-extraction-log')) renderExtractionPanel(mainOutput);
+                    renderExtractionPanel(mainOutput);
                 }
             },
             onPhaseComplete(data) {

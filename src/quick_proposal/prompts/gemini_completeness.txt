@@ -68,6 +68,7 @@ Write these keys to the index:
 
   plan_completeness — a JSON object:
     {
+      "score":             <integer 0–100 — your overall estimate of how complete this plan set is for cost estimation>,
       "ROW_Roads":         "present" | "partial" | "absent",
       "Sewer":             "present" | "partial" | "absent",
       "Water":             "present" | "partial" | "absent",
