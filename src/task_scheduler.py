@@ -1090,6 +1090,8 @@ class TaskScheduler:
             # through as `command` so action_cookbook_serve can json.loads it.
             elif task.action == "cookbook_serve" and task.prompt:
                 kwargs["command"] = task.prompt
+            elif task.action == "get_updates" and task.prompt:
+                kwargs["upstream_repo"] = task.prompt
             result, success = await action_fn(**kwargs)
             return result, success
         except TaskNoop:
@@ -1783,6 +1785,10 @@ class TaskScheduler:
                 logger.warning(f"Grace summarization failed: {e}")
                 if tool_results:
                     full_text = "\n".join(tool_results[-5:])
+
+        if full_text:
+            from src.tool_parsing import strip_tool_blocks
+            full_text = strip_tool_blocks(full_text, skip_fenced=False).strip()
 
         return full_text or "(no output)"
 

@@ -722,6 +722,50 @@ async def _execute_tool_block_impl(
         logger.info("Tool executed: %s", desc)
         return desc, result
 
+    # Local models (e.g. Qwen, Llama) sometimes wrap named tool calls inside
+    # ```bash``` blocks instead of using the tool name as the fence tag.
+    # Example: ```bash\nlist_email_accounts\n``` or
+    #          ```bash\nlist_emails {"folder": "Sent"}\n```
+    # Detect this by checking whether the first token of the bash content is a
+    # recognised tool name, and silently re-dispatch as that tool so the call
+    # succeeds without requiring a model-side prompt change.
+    if tool == "bash" and content.strip():
+        from src.agent_tools import TOOL_TAGS
+        _tokens = content.strip().split(None, 1)
+        _first = _tokens[0] if _tokens else ""
+        # Only redirect to non-shell tools — bash/python/grep/ls are legitimate
+        # shell commands and should not be intercepted.
+        _SHELL_TOOLS = {"bash", "python", "grep", "ls"}
+        if _first in TOOL_TAGS and _first not in _SHELL_TOOLS:
+            _rest = _tokens[1] if len(_tokens) > 1 else ""
+            # Run through the same converter as native function calls so that
+            # email tools get the mcp__email__ prefix and other tools get the
+            # correct ToolBlock format.  Fall back to direct assignment if the
+            # converter returns None (e.g. a non-MCP builtin tool name).
+            try:
+                import json as _json
+                from src.tool_schemas import function_call_to_tool_block
+                _args_str = _rest.strip()
+                if not _args_str or not _args_str.startswith("{"):
+                    _args_str = "{}"
+                _redirected = function_call_to_tool_block(_first, _args_str)
+            except Exception:
+                _redirected = None
+            if _redirected:
+                logger.info(
+                    "Misfenced bash block redirected to tool '%s' (args=%r)",
+                    _redirected.tool_type, _rest[:120],
+                )
+                tool = _redirected.tool_type
+                content = _redirected.content
+            else:
+                logger.info(
+                    "Misfenced bash block redirected to tool '%s' (args=%r)",
+                    _first, _rest[:120],
+                )
+                tool = _first
+                content = _rest
+
     # Background execution: a `bash` block whose first line is the `#!bg`
     # marker runs DETACHED — returns a job id immediately so the chat stream
     # isn't held open for a multi-minute install/ffmpeg/download. The always-on

@@ -175,6 +175,11 @@ class ValidateRequest(BaseModel):
     manager_model: str = ""
 
 
+class QPChatRequest(BaseModel):
+    messages: List[dict]
+    manager_model: str = ""
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 async def _emit(queue: asyncio.Queue, event_type: str, **kwargs):
@@ -2270,7 +2275,7 @@ def setup_quick_proposal_routes():
                 "max_tokens": 1,
             }
             try:
-                with httpx.Client(timeout=15.0) as client:
+                with httpx.Client(timeout=60.0) as client:
                     r = client.post(url, headers={**headers, "content-type": "application/json"}, json=payload)
                 if r.status_code >= 400:
                     try:

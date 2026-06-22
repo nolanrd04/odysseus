@@ -2222,7 +2222,7 @@ async def action_cookbook_serve(
 
 
 async def action_get_updates(owner: str, **kwargs) -> Tuple[str, bool]:
-    """Summarize new git commits since last run and email a digest to yourself."""
+    """Summarize new commits from the upstream repo since last run and email a digest."""
     try:
         import json as _json
         import asyncio as _asyncio
@@ -2243,35 +2243,86 @@ async def action_get_updates(owner: str, **kwargs) -> Tuple[str, bool]:
 
         last_commit = (state.get("last_commit") or "").strip()
         history = state.get("history") or []
-
-        # Repo root = parent of src/
         repo_root = str(_P(__file__).parent.parent)
 
-        if last_commit:
-            git_args = ["git", "-C", repo_root, "log", "--oneline", "--no-merges", f"{last_commit}..HEAD"]
-        else:
-            git_args = ["git", "-C", repo_root, "log", "--oneline", "--no-merges", "--since=30 days ago"]
+        commit_list = ""
+        new_last_commit = last_commit
 
-        proc = await _asyncio.create_subprocess_exec(
-            *git_args,
-            stdout=_asyncio.subprocess.PIPE,
-            stderr=_asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await _asyncio.wait_for(proc.communicate(), timeout=15)
-        commit_list = stdout.decode("utf-8", errors="replace").strip()
+        # Check whether a .git repo is accessible (not the case inside Docker)
+        git_ok = False
+        try:
+            _chk = await _asyncio.create_subprocess_exec(
+                "git", "-C", repo_root, "rev-parse", "--git-dir",
+                stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
+            )
+            await _asyncio.wait_for(_chk.communicate(), timeout=5)
+            git_ok = (_chk.returncode == 0)
+        except Exception:
+            pass
+
+        if git_ok:
+            # Fetch from the upstream remote and compare against local dev
+            _fetch = await _asyncio.create_subprocess_exec(
+                "git", "-C", repo_root, "fetch", "--quiet", "upstream",
+                stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
+            )
+            await _asyncio.wait_for(_fetch.communicate(), timeout=30)
+
+            _log = await _asyncio.create_subprocess_exec(
+                "git", "-C", repo_root, "log", "--oneline", "--no-merges", "HEAD..upstream/dev",
+                stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
+            )
+            _log_out, _ = await _asyncio.wait_for(_log.communicate(), timeout=15)
+            commit_list = _log_out.decode("utf-8", errors="replace").strip()
+
+            if commit_list:
+                _ref = await _asyncio.create_subprocess_exec(
+                    "git", "-C", repo_root, "rev-parse", "upstream/dev",
+                    stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
+                )
+                _ref_out, _ = await _asyncio.wait_for(_ref.communicate(), timeout=10)
+                new_last_commit = _ref_out.decode("utf-8", errors="replace").strip()
+
+        else:
+            # .git not present (Docker) — use the GitHub compare API.
+            # Requires in data/settings.json:
+            #   "upstream_github_repo": "upstream-owner/repo"
+            #   "fork_github_repo":     "your-fork-owner/repo"
+            import urllib.request as _urlreq
+            from src.settings import get_setting
+
+            _upstream = (get_setting("upstream_github_repo") or "").strip().strip("/")
+            _fork     = (get_setting("fork_github_repo") or "").strip().strip("/")
+            if not _upstream or not _fork:
+                return (
+                    "Add both keys to data/settings.json:\n"
+                    '  "upstream_github_repo": "pewdiepie-archdaemon/odysseus"\n'
+                    '  "fork_github_repo":     "nolanrd04/odysseus"'
+                ), False
+
+            _fork_owner = _fork.split("/")[0]
+            # Compare fork:dev...upstream/dev — returns commits in upstream not yet in fork
+            _cmp_url = f"https://api.github.com/repos/{_upstream}/compare/{_fork_owner}:dev...dev"
+            _req = _urlreq.Request(_cmp_url, headers={
+                "User-Agent": "Odysseus/1.0",
+                "Accept": "application/vnd.github.v3+json",
+            })
+            with _urlreq.urlopen(_req, timeout=20) as _resp:
+                _cmp = _json.loads(_resp.read())
+
+            _ahead = _cmp.get("commits", [])
+            if _ahead:
+                # API returns oldest-first; reverse so newest is at top
+                commit_list = "\n".join(
+                    f"{_c['sha'][:7]} {_c['commit']['message'].splitlines()[0]}"
+                    for _c in reversed(_ahead)
+                )
+                new_last_commit = _ahead[-1]["sha"]
 
         if not commit_list:
             raise TaskNoop("no new commits since last check")
 
         commit_count = len([ln for ln in commit_list.splitlines() if ln.strip()])
-
-        head_proc = await _asyncio.create_subprocess_exec(
-            "git", "-C", repo_root, "rev-parse", "HEAD",
-            stdout=_asyncio.subprocess.PIPE,
-            stderr=_asyncio.subprocess.PIPE,
-        )
-        head_out, _ = await _asyncio.wait_for(head_proc.communicate(), timeout=10)
-        new_last_commit = head_out.decode("utf-8", errors="replace").strip()
 
         prev_summaries = "\n\n---\n".join(
             f"[{h.get('date', '')}] {h.get('summary', '')}" for h in history[:3]
@@ -2308,7 +2359,7 @@ async def action_get_updates(owner: str, **kwargs) -> Tuple[str, bool]:
             timeout=60,
         )
         if not summary:
-            return "LLM returned an empty summary.", False
+            summary = commit_list
 
         # Send email
         email_sent = False
