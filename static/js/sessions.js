@@ -502,10 +502,43 @@ function createSessionItem(s) {
     e.stopPropagation();
     dropdown.style.display = 'none';
     try {
+      // Proposal sessions: read pipeline UI from sessionStorage cache
+      if (s.proposal_run_id) {
+        const cached = sessionStorage.getItem(`qp_pipeline_html_${s.proposal_run_id}`);
+        if (cached) {
+          const tmp = document.createElement('div');
+          tmp.innerHTML = cached;
+          const pLines = [];
+          tmp.querySelectorAll('.qp-chat-phase-row').forEach(row => {
+            const label = row.querySelector('.qp-chat-phase-label')?.textContent.trim();
+            if (label) pLines.push((row.classList.contains('done') ? '✓ ' : '○ ') + label);
+          });
+          const indexPanel = tmp.querySelector('#qp-index-values');
+          if (indexPanel) {
+            indexPanel.querySelectorAll('.qp-index-item').forEach(item => {
+              const k = item.querySelector('.qp-index-key')?.textContent.trim();
+              const v = item.querySelector('.qp-index-val')?.textContent.trim();
+              if (k && v) pLines.push(`${k}: ${v}`);
+            });
+          }
+          const text = pLines.join('\n');
+          if (text.trim()) {
+            try { await navigator.clipboard.writeText(text); } catch (_) {
+              const ta = document.createElement('textarea');
+              ta.value = text;
+              ta.style.cssText = 'position:fixed;left:-9999px';
+              document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+            }
+            uiModule.showToast('Pipeline copied to clipboard');
+            return;
+          }
+        }
+        uiModule.showToast('Pipeline still running — use Export Log when complete');
+        return;
+      }
       const res = await fetch(`${API_BASE}/api/history/${s.id}`);
       const data = await res.json();
       const msgs = data.history || [];
-      if (!msgs.length) { uiModule.showToast('No messages to copy'); return; }
       const lines = msgs
         .filter(m => m.role === 'user' || m.role === 'assistant')
         .map(m => {
@@ -514,10 +547,10 @@ function createSessionItem(s) {
           return `${label}: ${text}`;
         });
       const text = lines.join('\n\n');
+      if (!text.trim()) { uiModule.showToast('No messages to copy'); return; }
       try {
         await navigator.clipboard.writeText(text);
       } catch (_clipErr) {
-        // Fallback for non-secure contexts
         const ta = document.createElement('textarea');
         ta.value = text;
         ta.style.cssText = 'position:fixed;left:-9999px';
@@ -1718,6 +1751,18 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     }
     // Check server for active stream (survives page refresh)
     _checkServerStream(id);
+
+    // Proposal mode: if this session has a linked QP run, hand off to chat.js
+    const sessionMeta = sessions.find(s => s.id === id);
+    if (sessionMeta && sessionMeta.proposal_run_id) {
+      document.dispatchEvent(new CustomEvent('proposal-session-loaded', {
+        detail: { sessionId: id, runId: sessionMeta.proposal_run_id }
+      }));
+    } else {
+      const _qpPanel = document.getElementById('qp-pipeline-panel');
+      if (_qpPanel) { _qpPanel.style.display = 'none'; _qpPanel.innerHTML = ''; }
+    }
+
     // Document panel: keep open if next session also wants it, otherwise close
     if (window.documentModule) {
       const docBtn = document.getElementById('overflow-doc-btn');
@@ -1795,6 +1840,10 @@ export function createDirectChat(url, modelId, endpointId) {
   }
   const docInd = document.getElementById('doc-indicator-btn');
   if (docInd) docInd.classList.remove('visible', 'active');
+
+  // Hide QP pipeline panel — new chat has no proposal run
+  const _qpPanel = document.getElementById('qp-pipeline-panel');
+  if (_qpPanel) { _qpPanel.style.display = 'none'; _qpPanel.innerHTML = ''; }
 
   // Clear chat area and show welcome
   const box = document.getElementById('chat-history');

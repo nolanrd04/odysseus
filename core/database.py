@@ -149,6 +149,7 @@ class Session(TimestampMixin, Base):
     total_output_tokens = Column(Integer, default=0)
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
+    proposal_run_id = Column(String, nullable=True)  # links to a QP run directory
 
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
@@ -177,6 +178,7 @@ class Session(TimestampMixin, Base):
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
+            'proposal_run_id': self.proposal_run_id,
         }
 
 class ChatMessage(Base):
@@ -1838,6 +1840,19 @@ def init_db():
     _migrate_encrypt_signatures()
     _migrate_encrypt_endpoint_keys()
     _migrate_backfill_task_folders()
+    _migrate_add_proposal_run_id_column()
+
+
+def _migrate_add_proposal_run_id_column():
+    try:
+        with engine.connect() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(sessions)"))]
+            if "proposal_run_id" not in cols:
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN proposal_run_id TEXT"))
+                conn.commit()
+                logging.getLogger(__name__).info("Added proposal_run_id column to sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"proposal_run_id migration: {e}")
 
 
 def _migrate_backfill_task_folders():

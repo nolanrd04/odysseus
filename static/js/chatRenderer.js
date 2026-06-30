@@ -1967,8 +1967,20 @@ export function displayMetrics(messageElement, metrics) {
       footer.appendChild(ctxRing);
     }
   } else {
-    messageElement.appendChild(metricsContainer);
-    if (ctxRing) messageElement.appendChild(ctxRing);
+    // No footer exists (e.g. QP bubbles with footer stripped) — create a minimal one
+    // so .response-metrics and .ctx-ring get the same CSS styling as regular messages.
+    const _miniFoot = document.createElement('div');
+    _miniFoot.className = 'msg-footer';
+    _miniFoot.appendChild(metricsContainer);
+    if (ctxRing) {
+      const _ctxDiv = document.createElement('span');
+      _ctxDiv.textContent = ' | ';
+      _ctxDiv.style.color = 'var(--color-muted-alt)';
+      _ctxDiv.style.pointerEvents = 'none';
+      _miniFoot.appendChild(_ctxDiv);
+      _miniFoot.appendChild(ctxRing);
+    }
+    messageElement.appendChild(_miniFoot);
   }
 
   if (uiModule) uiModule.scrollHistory();
@@ -1985,6 +1997,32 @@ export function addMessage(role, content, modelName, metadata) {
 
     var esc = uiModule.esc;
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
+
+    // --- Pipeline/proposal message guards ---
+    if (role === 'system') return null;
+    if (role === 'user' && (metadata?.source === 'pipeline_seed' || metadata?.source === 'pipeline_nudge')) return null;
+    if (role === 'tool') {
+      const _toolName = metadata?.tool_name || 'tool';
+      if (_toolName === 'end_generation') return null;
+      const _toolLabel = _toolName === 'send_to_gemini' ? 'Gemini' : _toolName.replace(/_/g, ' ');
+      const _toolWrap = document.createElement('div');
+      _toolWrap.className = 'agent-thread';
+      const _toolNode = document.createElement('div');
+      _toolNode.className = 'agent-thread-node';
+      _toolNode.innerHTML = `<div class="agent-thread-dot"></div>
+        <div class="agent-thread-header">
+          <span class="agent-thread-icon">✓</span>
+          <span class="agent-thread-tool">${esc(_toolLabel)}</span>
+          <span class="agent-thread-status">done</span>
+          <span class="agent-thread-chevron">▶</span>
+        </div>
+        <div class="agent-thread-content">
+          <details class="agent-tool-output"><summary>Output</summary><pre>${esc(String(textRaw || '(no output)'))}</pre></details>
+        </div>`;
+      _toolWrap.appendChild(_toolNode);
+      box.appendChild(_toolWrap);
+      return _toolWrap;
+    }
 
     // --- Agent multi-bubble reconstruction from saved metadata ---
     if (role === 'assistant' && metadata && metadata.tool_events && metadata.tool_events.length > 0) {

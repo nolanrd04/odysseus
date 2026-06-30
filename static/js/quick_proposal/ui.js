@@ -705,7 +705,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
     return overlay;
 }
 
-async function loadModels(select, { preferClaude = false } = {}) {
+export async function loadModels(select, { preferClaude = false } = {}) {
     try {
         // Same fetch pattern as the main model picker: cached (no refresh), with credentials.
         const res = await fetch('/api/models', { credentials: 'same-origin' });
@@ -817,23 +817,33 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
 
     setStatus(statusEl, 'Starting pipeline…', true);
 
-    let runId;
+    let runId, sessionId;
     try {
-        const res = await fetch('/api/quick_proposal/run', {
+        const res = await fetch('/api/quick_proposal/start-proposal-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId, project_type: projectType }),
+            credentials: 'same-origin',
         });
         if (!res.ok) throw new Error(`Run failed: ${res.status}`);
-        runId = (await res.json()).run_id;
-        mainOutput._qpRunId       = runId;
-        mainOutput._qpSidebarPages = sidebarPages;
-        mainOutput._qpGeminiModel  = geminiModel;
+        ({ run_id: runId, session_id: sessionId } = await res.json());
     } catch (err) {
         setStatus(statusEl, `Error: ${err.message}`);
         runBtn.disabled = false;
         return;
     }
+
+    // Close the overlay, reload the session list, then navigate to the new
+    // proposal session. selectSession dispatches proposal-session-loaded which
+    // enterProposalMode in chat.js uses to wire up proposal-mode behaviour.
+    window.quickProposalModule?.close();
+    if (window.sessionModule) {
+        await window.sessionModule.loadSessions();
+        await window.sessionModule.selectSession(sessionId);
+    } else {
+        window.location.hash = sessionId;
+    }
+    return;
 
     formArea.style.display = 'none';
     contentArea.style.display = 'flex';
@@ -1628,7 +1638,7 @@ function updateContextMeter(mainOutput, data) {
 }
 
 
-function appendExtractionMessage(mainOutput, data) {
+export function appendExtractionMessage(mainOutput, data) {
     const container = mainOutput.querySelector('#qp-extraction-messages');
     if (!container) return;
     if (!container._toolNodes) container._toolNodes = new Map();
@@ -1734,15 +1744,47 @@ function appendExtractionMessage(mainOutput, data) {
         </div>`;
         container.appendChild(wrap);
 
-    } else if (data.role === 'claude') {
+    } else if (data.role === 'claude_text_start') {
         const label = data.model || 'Manager';
         const wrap = document.createElement('div');
-        wrap.className = 'qp-exmsg qp-exmsg-manager';
+        wrap.className = 'qp-exmsg qp-exmsg-manager qp-claude-live';
         wrap.innerHTML = `<div class="qp-msg-bubble qp-msg-manager">
                 <span class="qp-msg-avatar qp-avatar-manager">${_esc(label)}</span>
-                <div class="qp-msg-text">${markdownModule.processWithThinking(data.text || '')}</div>
+                <div class="qp-msg-text"><pre class="qp-live-pre" style="white-space:pre-wrap;margin:0;font-family:inherit;font-size:inherit"></pre></div>
             </div>`;
         container.appendChild(wrap);
+        container.scrollTop = container.scrollHeight;
+
+    } else if (data.role === 'claude_text_delta') {
+        const live = container.querySelector('.qp-claude-live .qp-live-pre');
+        if (live) {
+            live.textContent += data.text || '';
+            container.scrollTop = container.scrollHeight;
+        }
+
+    } else if (data.role === 'claude_text_end') {
+        // Turn produced no visible content — remove the live bubble to prevent it going stale
+        // and capturing the next turn's content via querySelector('.qp-claude-live').
+        const liveWrap = container.querySelector('.qp-claude-live');
+        if (liveWrap) liveWrap.remove();
+
+    } else if (data.role === 'claude') {
+        const label = data.model || 'Manager';
+        // If a live streaming bubble exists, upgrade it to rendered markdown.
+        const liveWrap = container.querySelector('.qp-claude-live');
+        if (liveWrap) {
+            liveWrap.classList.remove('qp-claude-live');
+            const textDiv = liveWrap.querySelector('.qp-msg-text');
+            if (textDiv) textDiv.innerHTML = markdownModule.processWithThinking(data.text || '');
+        } else {
+            const wrap = document.createElement('div');
+            wrap.className = 'qp-exmsg qp-exmsg-manager';
+            wrap.innerHTML = `<div class="qp-msg-bubble qp-msg-manager">
+                    <span class="qp-msg-avatar qp-avatar-manager">${_esc(label)}</span>
+                    <div class="qp-msg-text">${markdownModule.processWithThinking(data.text || '')}</div>
+                </div>`;
+            container.appendChild(wrap);
+        }
 
     } else if (data.role === 'claude_to_gemini') {
         const id = 'qp-instr-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);

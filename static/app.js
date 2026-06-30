@@ -325,6 +325,21 @@ function initializeEventListeners() {
           lines.push(line);
         }
         parts.push(lines.join('\n'));
+      } else if (child.classList?.contains('qp-chat-pipeline-root')) {
+        const pLines = [];
+        child.querySelectorAll('.qp-chat-phase-row').forEach(row => {
+          const label = row.querySelector('.qp-chat-phase-label')?.textContent.trim();
+          if (label) pLines.push((row.classList.contains('done') ? '✓ ' : '○ ') + label);
+        });
+        const indexPanel = child.querySelector('#qp-index-values');
+        if (indexPanel) {
+          indexPanel.querySelectorAll('.qp-index-item').forEach(item => {
+            const k = item.querySelector('.qp-index-key')?.textContent.trim();
+            const v = item.querySelector('.qp-index-val')?.textContent.trim();
+            if (k && v) pLines.push(`${k}: ${v}`);
+          });
+        }
+        if (pLines.length) parts.push(pLines.join('\n'));
       }
     }
     return parts.join('\n\n');

@@ -45,6 +45,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
   let _pendingContinue = null; // Stores the stopped AI element to merge with new response
+  let _proposalRunId = null;     // set when the active session is a proposal session
+  let _proposalSessionId = null; // session ID paired with _proposalRunId
+  let _proposalCloseStream = null; // closes the active proposal EventSource from outside the closure
+  let _proposalInvocationId = 0; // incremented each call; guard against concurrent EventSources
+  const _chatClassifications = new Map(); // pageIdx → { sheet_type, importance, description, regions }
+  let _chatClassifyRunId = null; // runId for the currently displayed proposal run
+  const _IMPORTANCE_COLOR = { high: '#22c55e', medium: '#f59e0b', low: '#6b7280' };
   // ── Auto-recovery: when a turn's stream silently dies (connection drop) or
   // goes quiet while the connection is alive, re-engage the model with a
   // completion handshake instead of leaving it hung. Capped so it can't loop.
@@ -970,6 +977,138 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }
         catch { return ''; }
       })();
+
+      // --- Proposal mode: route to QP continuation endpoint ---
+      if (_proposalRunId && sessionModule.getCurrentSessionId() === _proposalSessionId) {
+        const _qpRunId = _proposalRunId;
+        if (spinner) { spinner.destroy(); spinner = null; currentSpinner = null; }
+        const _bodyDiv = holder ? holder.querySelector('.body') : null;
+        if (_bodyDiv) _bodyDiv.innerHTML = '';
+
+        const _qpThread = document.createElement('div');
+        _qpThread.className = 'agent-thread qp-proposal-thread';
+        if (holder) box.insertBefore(_qpThread, holder);
+        const _qpToolNodes = new Map();
+        let _qpAccumulated = '';
+        let _qpHasNodes = false;
+        const _esc = uiModule.esc;
+
+        try {
+          const _qpRes = await fetch(`${API_BASE}/api/quick_proposal/runs/${_qpRunId}/chat-stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: _finalMsgWithInject, manager_model: '' }),
+            signal: abortCtrl.signal
+          });
+
+          if (!_qpRes.ok) {
+            clearResponseTimeout();
+            if (_bodyDiv) _bodyDiv.textContent = `Error ${_qpRes.status}`;
+            _qpThread.remove();
+            return;
+          }
+
+          const _qpReader = _qpRes.body.getReader();
+          const _qpDec = new TextDecoder();
+          let _qpBuf = '';
+          let _qpEvt = '';
+          let _qpDone = false;
+
+          while (!_qpDone) {
+            const { done, value } = await _qpReader.read();
+            if (done) break;
+            _qpBuf += _qpDec.decode(value, { stream: true });
+            const _qpLines = _qpBuf.split('\n');
+            _qpBuf = _qpLines.pop() || '';
+
+            for (const _qpLine of _qpLines) {
+              if (_qpLine === '') {
+                _qpEvt = '';
+              } else if (_qpLine.startsWith('event: ')) {
+                _qpEvt = _qpLine.slice(7).trim();
+              } else if (_qpLine.startsWith('data: ')) {
+                if (_qpEvt === 'phase_complete') { _qpDone = true; break; }
+                const _qpRaw = _qpLine.slice(6);
+                if (_qpRaw === '[DONE]') { _qpDone = true; break; }
+                if (_qpEvt === 'extraction_message') {
+                  try {
+                    const d = JSON.parse(_qpRaw);
+                    if (d.role === 'claude') {
+                      _qpAccumulated += d.text || '';
+                      if (_bodyDiv) {
+                        _bodyDiv.innerHTML = markdownModule.processWithThinking(
+                          markdownModule.squashOutsideCode(_qpAccumulated)
+                        );
+                      }
+                      uiModule.scrollHistory();
+                    } else if (d.role === 'tool_call') {
+                      _qpHasNodes = true;
+                      const _qpNode = document.createElement('div');
+                      _qpNode.className = 'agent-thread-node running';
+                      const _tid = d.tool_id || '';
+                      _qpNode.innerHTML = `<div class="agent-thread-dot"></div>
+                        <div class="agent-thread-header">
+                          <span class="agent-thread-icon">⚙</span>
+                          <span class="agent-thread-tool">${_esc(d.tool || '')}</span>
+                          <span class="agent-thread-wave">▱▲△</span>
+                        </div>
+                        <div class="agent-thread-content">
+                          <details class="agent-tool-output"><summary>Input</summary><pre>${_esc(d.args || '{}')}</pre></details>
+                        </div>`;
+                      _qpThread.appendChild(_qpNode);
+                      if (_tid) _qpToolNodes.set(_tid, _qpNode);
+                    } else if (d.role === 'tool_result') {
+                      const _qpNode = d.tool_id ? _qpToolNodes.get(d.tool_id) : null;
+                      if (_qpNode) {
+                        const _inHtml = _qpNode.querySelector('.agent-tool-output')?.outerHTML || '';
+                        _qpNode.className = 'agent-thread-node';
+                        _qpNode.innerHTML = `<div class="agent-thread-dot"></div>
+                          <div class="agent-thread-header">
+                            <span class="agent-thread-icon">✓</span>
+                            <span class="agent-thread-tool">${_esc(d.tool || '')}</span>
+                            <span class="agent-thread-status">done</span>
+                            <span class="agent-thread-chevron">▶</span>
+                          </div>
+                          <div class="agent-thread-content">
+                            ${_inHtml}
+                            <details class="agent-tool-output"><summary>Output</summary><pre>${_esc(d.result || '(no output)')}</pre></details>
+                          </div>`;
+                      }
+                    }
+                  } catch {}
+                }
+              }
+            }
+          }
+        } catch (err) {
+          if (!abortCtrl.signal.aborted) {
+            console.error('[proposal-mode] continuation error:', err);
+          }
+        }
+
+        clearResponseTimeout();
+        if (_qpHasNodes) {
+          if (_qpAccumulated) _qpThread.classList.add('has-bottom');
+        } else {
+          _qpThread.remove();
+        }
+        if (_qpAccumulated && _bodyDiv) {
+          _bodyDiv.innerHTML = markdownModule.processWithThinking(
+            markdownModule.squashOutsideCode(_qpAccumulated)
+          );
+          if (window.hljs) _bodyDiv.querySelectorAll('pre code').forEach(b => window.hljs.highlightElement(b));
+        } else if (!_qpAccumulated && holder) {
+          holder.remove();
+          holder = null;
+          currentHolder = null;
+        }
+        if (holder) holder.classList.remove('streaming');
+        currentHolder = null;
+        uiModule.scrollHistory();
+        return; // finally block handles isStreaming=false and button/input reset
+      }
+      // --- end proposal mode ---
+
       const res = await fetch(`${API_BASE}/api/chat_stream`, {
         method: 'POST',
         body: fd,
@@ -4977,6 +5116,1340 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }
   }
 
+  function _buildChatPipelineRoot() {
+    const root = document.createElement('div');
+    root.className = 'qp-chat-pipeline-root';
+    root.innerHTML = `
+      <div class="qp-tabs">
+        <button class="qp-tab active" data-tab="pipeline">Status</button>
+        <button class="qp-tab" data-tab="pages">Pages</button>
+        <button class="qp-tab" data-tab="classified">Classified</button>
+        <button class="qp-tab" data-tab="values">Values</button>
+        <button class="qp-tab" data-tab="extraction">Extraction</button>
+      </div>
+      <div class="qp-tab-panel active" data-panel="pipeline">
+        <div class="qp-panel-automode">
+          <label class="qp-panel-automode-label"><input type="checkbox" class="qp-panel-auto-checkbox"> Auto-advance</label>
+        </div>
+        <div class="qp-chat-phases-list"></div>
+        <div class="qp-ctx-window-status" style="display:none;padding:6px 10px;font-size:11px;color:var(--color-muted-alt);border-top:1px solid var(--border);gap:8px;flex-wrap:wrap;"></div>
+      </div>
+      <div class="qp-tab-panel" data-panel="pages">
+        <div class="qp-chat-strip-wrap">
+          <div class="qp-chat-page-strip"></div>
+        </div>
+      </div>
+      <div class="qp-tab-panel" data-panel="classified">
+        <div class="qp-chat-classify-wrap"></div>
+      </div>
+      <div class="qp-tab-panel" data-panel="values">
+        <div class="qp-chat-index-panel">
+          <div class="qp-chat-index-header">Extracted Values</div>
+          <div class="qp-index-values" id="qp-index-values"></div>
+        </div>
+      </div>
+      <div class="qp-tab-panel" data-panel="extraction">
+        <div class="qp-extraction-messages" id="qp-extraction-messages"></div>
+      </div>
+    `;
+    const _autoCheckbox = root.querySelector('.qp-panel-auto-checkbox');
+    _autoCheckbox.checked = localStorage.getItem('qp_auto_mode') !== 'false';
+    _autoCheckbox.addEventListener('change', () => {
+      localStorage.setItem('qp_auto_mode', _autoCheckbox.checked ? 'true' : 'false');
+      if (_autoCheckbox.checked) {
+        const advBtn = root.querySelector('.qp-chat-advance-btn');
+        if (advBtn && !advBtn.disabled) advBtn.click();
+      }
+    });
+
+    return root;
+  }
+
+  function _renderClassificationGrid(targetEl, classifiedPages, runId) {
+    if (!targetEl || !classifiedPages.size) return;
+    targetEl.querySelector('.qp-chat-classify-grid')?.remove();
+    for (const [pageIdx, data] of [...classifiedPages.entries()].sort((a, b) => a[0] - b[0])) {
+      _addClassificationCard(targetEl, pageIdx, data, runId);
+    }
+  }
+
+  function _addClassificationCard(classifyWrap, pageIdx, data, runId) {
+    if (!classifyWrap) return;
+    let grid = classifyWrap.querySelector('.qp-chat-classify-grid');
+    if (!grid) {
+      grid = document.createElement('div');
+      grid.className = 'qp-chat-classify-grid';
+      classifyWrap.appendChild(grid);
+    }
+    grid.querySelector(`[data-page-idx="${pageIdx}"]`)?.remove();
+
+    _chatClassifications.set(pageIdx, {
+      sheet_type: data.sheet_type, importance: data.importance,
+      description: data.description || '', regions: (data.regions || []).map(r => ({ ...r })),
+    });
+
+    const card = document.createElement('div');
+    card.className = 'qp-chat-classify-card';
+    card.dataset.pageIdx = pageIdx;
+    const imgUrl = `/api/quick_proposal/pages/${runId}/${pageIdx}`;
+    const regions = data.regions || [];
+    const impBg = _IMPORTANCE_COLOR[data.importance] || '#6b7280';
+    const svgRects = regions.map(r => {
+      const [x1, y1, x2, y2] = r.bbox || [0, 0, 0, 0];
+      if (x2 <= x1 || y2 <= y1) return '';
+      const c = _IMPORTANCE_COLOR[r.importance] || '#0af';
+      return `<rect x="${x1}" y="${y1}" width="${x2-x1}" height="${y2-y1}" fill="${c}22" stroke="${c}" stroke-width="1.2" rx="0.5"/>`;
+    }).join('');
+
+    const imgWrap = document.createElement('div');
+    imgWrap.className = 'qp-chat-classify-img-wrap';
+    imgWrap.style.cursor = 'pointer';
+    imgWrap.innerHTML = `<img src="${imgUrl}" alt="Page ${pageIdx+1}" loading="lazy">${svgRects ? `<svg class="qp-chat-classify-svg" viewBox="0 0 100 100" preserveAspectRatio="none">${svgRects}</svg>` : ''}`;
+    imgWrap.addEventListener('click', () => _showPagePreview(imgUrl, pageIdx));
+
+    const meta = document.createElement('div');
+    meta.className = 'qp-chat-classify-meta';
+    const badge = document.createElement('span');
+    badge.className = 'qp-chat-classify-badge';
+    badge.style.background = impBg;
+    badge.textContent = (data.sheet_type || 'unknown').replace(/_/g, ' ');
+    meta.appendChild(badge);
+
+    if (data.description || regions.length) {
+      const details = document.createElement('details');
+      details.className = 'qp-chat-classify-details';
+      const summary = document.createElement('summary');
+      summary.className = 'qp-chat-classify-summary';
+      summary.textContent = 'Details';
+      details.appendChild(summary);
+
+      if (data.description) {
+        const subDesc = document.createElement('details');
+        subDesc.className = 'qp-chat-classify-sub-details';
+        const subDescSum = document.createElement('summary');
+        subDescSum.className = 'qp-chat-classify-sub-summary';
+        subDescSum.textContent = 'Description';
+        const desc = document.createElement('div');
+        desc.className = 'qp-chat-classify-desc';
+        desc.textContent = data.description;
+        subDesc.appendChild(subDescSum);
+        subDesc.appendChild(desc);
+        details.appendChild(subDesc);
+      }
+
+      if (regions.length) {
+        const subLbls = document.createElement('details');
+        subLbls.className = 'qp-chat-classify-sub-details';
+        const subLblsSum = document.createElement('summary');
+        subLblsSum.className = 'qp-chat-classify-sub-summary';
+        subLblsSum.textContent = `Region labels (${regions.length})`;
+        subLbls.appendChild(subLblsSum);
+        const lblList = document.createElement('div');
+        lblList.className = 'qp-chat-classify-regions';
+        regions.forEach(r => {
+          const row = document.createElement('div');
+          row.className = 'qp-chat-classify-region-row';
+          const dot = document.createElement('span');
+          dot.className = 'qp-chat-classify-region-dot';
+          dot.style.background = _IMPORTANCE_COLOR[r.importance] || '#6b7280';
+          const lbl = document.createElement('span');
+          lbl.textContent = r.label || '';
+          row.appendChild(dot);
+          row.appendChild(lbl);
+          lblList.appendChild(row);
+        });
+        subLbls.appendChild(lblList);
+        details.appendChild(subLbls);
+      }
+
+      const bboxRegions = regions.filter(r => r.bbox);
+      if (bboxRegions.length) {
+        const subBbox = document.createElement('details');
+        subBbox.className = 'qp-chat-classify-sub-details';
+        const subBboxSum = document.createElement('summary');
+        subBboxSum.className = 'qp-chat-classify-sub-summary';
+        subBboxSum.textContent = `Bounding boxes (${bboxRegions.length})`;
+        subBbox.appendChild(subBboxSum);
+        const bboxList = document.createElement('div');
+        bboxList.className = 'qp-chat-classify-regions';
+        bboxRegions.forEach(r => {
+          const row = document.createElement('div');
+          row.className = 'qp-chat-classify-region-row';
+          const coords = document.createElement('span');
+          coords.className = 'qp-chat-classify-region-coords';
+          coords.style.fontSize = '9px';
+          coords.textContent = `[${r.bbox.map(v => Math.round(v)).join(', ')}]`;
+          row.appendChild(coords);
+          bboxList.appendChild(row);
+        });
+        subBbox.appendChild(bboxList);
+        details.appendChild(subBbox);
+      }
+      meta.appendChild(details);
+    }
+    card.appendChild(imgWrap);
+    card.appendChild(meta);
+
+    const existing = [...grid.querySelectorAll('.qp-chat-classify-card[data-page-idx]')];
+    const after = existing.find(c => parseInt(c.dataset.pageIdx) > pageIdx);
+    if (after) grid.insertBefore(card, after);
+    else grid.appendChild(card);
+  }
+
+  function _rebuildFromServerResults(root, results, runId) {
+    _chatClassifyRunId = runId;
+    const _ALL_PHASES = [
+      ['load',   'Rendering pages…'],
+      ['index',  'Loading knowledge base…'],
+      ['phase1', 'Detecting job type…'],
+      ['phase2', 'Classifying pages…'],
+      ['phase3', 'Scoring completeness…'],
+      ['phase4', 'Building extraction index…'],
+      ['phase5', 'Extracting values…'],
+    ];
+    const pages    = results.pages || [];
+    const bboxes   = results.bboxes || {};
+    const extracted = results.extracted_values || {};
+
+    // All phase rows shown as done
+    const list = root.querySelector('.qp-chat-phases-list');
+    for (const [, label] of _ALL_PHASES) {
+      const row = document.createElement('div');
+      row.className = 'qp-chat-phase-row done';
+      row.innerHTML = `<span class="qp-chat-phase-check">✓</span><span class="qp-chat-phase-label">${label}</span>`;
+      list.appendChild(row);
+    }
+
+    // Thumbnail strip
+    const strip = root.querySelector('.qp-chat-page-strip');
+    for (const page of pages) {
+      _addChatThumb(strip, page.idx, `/api/quick_proposal/pages/${runId}/${page.idx}`);
+      const thumb = strip.querySelector(`[data-page-idx="${page.idx}"]`);
+      if (thumb && page.sheet_type) {
+        const badge = document.createElement('div');
+        badge.className = 'qp-chat-thumb-badge';
+        badge.textContent = page.sheet_type;
+        badge.dataset.importance = page.importance || 'low';
+        thumb.appendChild(badge);
+      }
+    }
+    if (pages.length) root.querySelector('.qp-chat-strip-wrap')?.classList.remove('qp-chat-strip-hidden');
+
+    // Classification grid with bbox overlays
+    const classifiedPages = new Map();
+    for (const page of pages) {
+      const regions = (page.bbox_ids || [])
+        .map(bid => bboxes[bid]).filter(Boolean)
+        .map(b => ({ bbox: [b.x1, b.y1, b.x2, b.y2], label: b.description || '', importance: b.importance || 'medium' }));
+      classifiedPages.set(page.idx, { page_idx: page.idx, sheet_type: page.sheet_type, importance: page.importance, regions });
+    }
+    if (classifiedPages.size) _renderClassificationGrid(root.querySelector('.qp-chat-classify-wrap'), classifiedPages, runId);
+
+    // Export button
+    const exportBtn = document.createElement('button');
+    exportBtn.className = 'qp-chat-export-btn';
+    exportBtn.textContent = 'Export log';
+    list.appendChild(exportBtn);
+
+    const rerunBtn = document.createElement('button');
+    rerunBtn.className = 'qp-chat-rerun-btn';
+    rerunBtn.dataset.runId = runId;
+    rerunBtn.textContent = 'Re-run extraction';
+    list.appendChild(rerunBtn);
+
+    // Index values panel (project type, road LF, etc.)
+    const valContainer = root.querySelector('#qp-index-values');
+    const panel = root.querySelector('.qp-chat-index-panel');
+    let indexCount = 0;
+    for (const [key, entry] of Object.entries(extracted)) {
+      if (key === 'extraction_complete') continue;
+      const item = document.createElement('details');
+      item.className = 'qp-index-item';
+      item.dataset.key = key;
+      const val = entry.value == null ? 'null'
+        : (typeof entry.value === 'object' ? JSON.stringify(entry.value) : String(entry.value));
+      item.open = val.length < 60;
+      item.innerHTML = `<summary class="qp-index-item-summary"><span class="qp-index-key">${key}</span><span class="qp-index-conf qp-index-conf-${entry.confidence || 'medium'}">${entry.confidence || ''}</span></summary><div class="qp-index-val">${val}</div>`;
+      valContainer.appendChild(item);
+      indexCount++;
+    }
+    if (indexCount > 0) panel.style.display = '';
+  }
+
+  // Delegated handlers — set up once so restored sessionStorage HTML stays interactive
+  if (!window.__qpTabHandlerBound) {
+    window.__qpTabHandlerBound = true;
+    document.body.addEventListener('click', e => {
+      const tab = e.target.closest('.qp-tab');
+      if (!tab) return;
+      const pRoot = tab.closest('.qp-chat-pipeline-root');
+      if (!pRoot) return;
+      pRoot.querySelectorAll('.qp-tab').forEach(t => t.classList.remove('active'));
+      pRoot.querySelectorAll('.qp-tab-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      pRoot.querySelector(`[data-panel="${tab.dataset.tab}"]`)?.classList.add('active');
+    });
+  }
+
+  if (!window._qpChatDelegatedBound) {
+    window._qpChatDelegatedBound = true;
+    document.addEventListener('click', (e) => {
+      const thumb = e.target.closest('.qp-chat-thumb[data-page-url]');
+      if (thumb) {
+        _showPagePreview(thumb.dataset.pageUrl, parseInt(thumb.dataset.pageIdx || '0', 10));
+        return;
+      }
+      const rerunTrigger = e.target.closest('.qp-chat-rerun-btn');
+      if (rerunTrigger) {
+        const rRunId = rerunTrigger.dataset.runId;
+        if (!rRunId) return;
+        const form = document.createElement('div');
+        form.className = 'qp-chat-rerun-form';
+        form.innerHTML = `
+          <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Extraction model</span><select class="qp-model-select qp-chat-rerun-select" data-role="gemini"><option>Loading…</option></select></div>
+          <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Manager model</span><select class="qp-model-select qp-chat-rerun-select" data-role="manager"><option>Loading…</option></select></div>
+          <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Resume prior values</span><input type="checkbox" class="qp-chat-rerun-resume"></div>
+          <div class="qp-chat-rerun-actions"><button class="qp-chat-rerun-go">Run</button><button class="qp-chat-rerun-cancel">Cancel</button></div>
+        `;
+        rerunTrigger.replaceWith(form);
+        const geminiSel = form.querySelector('[data-role="gemini"]');
+        const managerSel = form.querySelector('[data-role="manager"]');
+        if (window.quickProposalModule?.loadModels) {
+          window.quickProposalModule.loadModels(geminiSel, { preferClaude: false });
+          window.quickProposalModule.loadModels(managerSel, { preferClaude: true });
+        }
+        form.querySelector('.qp-chat-rerun-cancel').onclick = () => {
+          const btn = document.createElement('button');
+          btn.className = 'qp-chat-rerun-btn';
+          btn.dataset.runId = rRunId;
+          btn.textContent = 'Re-run extraction';
+          form.replaceWith(btn);
+        };
+        form.querySelector('.qp-chat-rerun-go').onclick = async () => {
+          const goBtn = form.querySelector('.qp-chat-rerun-go');
+          goBtn.disabled = true;
+          goBtn.textContent = 'Starting…';
+          const rSessionId = sessionModule.getCurrentSessionId();
+          try {
+            const res = await fetch(`${API_BASE}/api/quick_proposal/runs/${rRunId}/phase5`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                manager_model: managerSel.value,
+                gemini_model: geminiSel.value,
+                gemini_retry_attempts: 3,
+                gemini_fallback_models: [],
+                holdout_kp_path: '',
+                resume: form.querySelector('.qp-chat-rerun-resume').checked,
+                completeness_only: false,
+              }),
+            });
+            if (!res.ok) {
+              goBtn.disabled = false;
+              goBtn.textContent = 'Error — retry';
+              return;
+            }
+            // Clear old run messages before entering the new run
+            const _ch = document.getElementById('chat-history');
+            if (_ch) {
+              _ch.innerHTML = '';
+              delete _ch._qpToolNodes;
+              delete _ch._qpLiveBubble;
+              delete _ch._qpLiveText;
+            }
+            await enterProposalMode(rSessionId, rRunId);
+          } catch (_err) {
+            goBtn.disabled = false;
+            goBtn.textContent = 'Error — retry';
+          }
+        };
+        return;
+      }
+
+      const exportBtn = e.target.closest('.qp-chat-export-btn');
+      if (exportBtn) {
+        const msgs = exportBtn.closest('.qp-chat-pipeline-root')?.querySelector('#qp-extraction-messages');
+        if (!msgs) return;
+        const text = Array.from(msgs.children)
+          .map(el => el.innerText?.trim()).filter(Boolean).join('\n\n---\n\n');
+        navigator.clipboard.writeText(text).then(() => {
+          const orig = exportBtn.textContent;
+          exportBtn.textContent = 'Copied!';
+          setTimeout(() => { exportBtn.textContent = orig; }, 1500);
+        });
+      }
+    });
+  }
+
+  function _showPagePreview(url, pageIdx) {
+    document.getElementById('qp-chat-preview-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'qp-chat-preview-overlay';
+    overlay.className = 'qp-chat-preview-overlay';
+    const backdrop = document.createElement('div');
+    backdrop.className = 'qp-chat-preview-backdrop';
+    const modal = document.createElement('div');
+    modal.className = 'qp-chat-preview-modal';
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'qp-chat-preview-close';
+    closeBtn.textContent = '×';
+    modal.appendChild(closeBtn);
+
+    if (_chatClassifyRunId) {
+      const redoBtn = document.createElement('button');
+      redoBtn.className = 'qp-chat-preview-redo';
+      redoBtn.textContent = '↻ Redo Page';
+      redoBtn.addEventListener('click', async () => {
+        redoBtn.disabled = true; redoBtn.textContent = '↻ Classifying…';
+        try {
+          const res = await fetch(`${API_BASE}/api/quick_proposal/runs/${_chatClassifyRunId}/reclassify/${pageIdx}`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          _chatClassifications.set(pageIdx, { sheet_type: data.sheet_type, importance: data.importance, description: data.description || '', regions: data.regions || [] });
+          overlay.remove();
+          _showPagePreview(url, pageIdx);
+        } catch (e) { redoBtn.textContent = `↻ Error: ${e.message}`; redoBtn.disabled = false; }
+      });
+      modal.appendChild(redoBtn);
+    }
+
+    const imgWrap = document.createElement('div');
+    imgWrap.className = 'qp-chat-preview-img-wrap';
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = `Page ${pageIdx + 1}`;
+    imgWrap.appendChild(img);
+
+    const regions = (_chatClassifications.get(pageIdx) || {}).regions || [];
+    if (regions.length) {
+      const NS = 'http://www.w3.org/2000/svg';
+      const bboxSvg = document.createElementNS(NS, 'svg');
+      bboxSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      bboxSvg.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;';
+      img.addEventListener('load', () => {
+        const W = img.naturalWidth || 1000, H = img.naturalHeight || 1000;
+        bboxSvg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+        regions.forEach(r => {
+          const [x1p, y1p, x2p, y2p] = r.bbox || [0,0,0,0];
+          if (x2p <= x1p || y2p <= y1p) return;
+          const color = _IMPORTANCE_COLOR[r.importance] || '#0af';
+          const rect = document.createElementNS(NS, 'rect');
+          rect.setAttribute('x',      String(x1p / 100 * W));
+          rect.setAttribute('y',      String(y1p / 100 * H));
+          rect.setAttribute('width',  String((x2p - x1p) / 100 * W));
+          rect.setAttribute('height', String((y2p - y1p) / 100 * H));
+          rect.setAttribute('fill', 'none');
+          rect.setAttribute('stroke', color);
+          rect.setAttribute('stroke-width', '2');
+          rect.setAttribute('vector-effect', 'non-scaling-stroke');
+          bboxSvg.appendChild(rect);
+        });
+      });
+      imgWrap.appendChild(bboxSvg);
+    }
+
+    const lbl = document.createElement('div');
+    lbl.className = 'qp-chat-preview-label';
+    lbl.textContent = `Page ${pageIdx + 1}`;
+    modal.appendChild(imgWrap);
+    modal.appendChild(lbl);
+    overlay.appendChild(backdrop);
+    overlay.appendChild(modal);
+    const dismiss = () => overlay.remove();
+    backdrop.addEventListener('click', dismiss);
+    closeBtn.addEventListener('click', dismiss);
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { dismiss(); document.removeEventListener('keydown', esc); }
+    });
+    document.body.appendChild(overlay);
+  }
+
+  function _addChatThumb(strip, pageIdx, url) {
+    const thumb = document.createElement('div');
+    thumb.className = 'qp-chat-thumb';
+    thumb.dataset.pageIdx = pageIdx;
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = `Page ${pageIdx + 1}`;
+    img.loading = 'lazy';
+    const lbl = document.createElement('div');
+    lbl.className = 'qp-chat-thumb-label';
+    lbl.textContent = `p.${pageIdx + 1}`;
+    thumb.appendChild(img);
+    thumb.appendChild(lbl);
+    thumb.dataset.pageUrl = url;
+    thumb.style.cursor = 'pointer';
+    strip.appendChild(thumb);
+  }
+
+  function _appendQpMessage(data) {
+    const box = document.getElementById('chat-history');
+    if (!box) return;
+    if (!box._qpToolNodes) box._qpToolNodes = new Map();
+    if (!box._qpPendingMetrics) box._qpPendingMetrics = {};
+    const esc = uiModule.esc;
+
+    if (data.role === 'claude_thinking_start') {
+      const id = 'qp-think-' + (data.thinking_id || Date.now());
+      const wrap = document.createElement('div');
+      wrap.innerHTML = `<div class="thinking-section">
+        <div class="thinking-header" data-thinking-id="${id}">
+          <div class="thinking-header-left"><span data-label="Manager thinking">Manager thinking…</span></div>
+          <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
+        </div>
+        <div class="thinking-content" id="${id}">
+          <pre class="thinking-content-inner" id="${id}-live" style="white-space:pre-wrap;margin:0;font-family:inherit;font-size:inherit"></pre>
+        </div>
+      </div>`;
+      box.appendChild(wrap.firstElementChild);
+
+    } else if (data.role === 'claude_thinking_delta') {
+      const liveEl = document.getElementById('qp-think-' + (data.thinking_id || '') + '-live');
+      if (liveEl) liveEl.textContent += data.text || '';
+
+    } else if (data.role === 'claude_thinking') {
+      const id = 'qp-think-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+      const wrap = document.createElement('div');
+      wrap.innerHTML = `<div class="thinking-section">
+        <div class="thinking-header" data-thinking-id="${id}">
+          <div class="thinking-header-left"><span data-label="Manager thinking">Manager thinking</span></div>
+          <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
+        </div>
+        <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${markdownModule.mdToHtml(data.text || '')}</div></div>
+      </div>`;
+      box.appendChild(wrap.firstElementChild);
+
+    } else if (data.role === 'gemini_thinking') {
+      const id = 'qp-gthink-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+      const wrap = document.createElement('div');
+      wrap.innerHTML = `<div class="thinking-section">
+        <div class="thinking-header" data-thinking-id="${id}">
+          <div class="thinking-header-left"><span data-label="Gemini reasoning">Gemini reasoning</span></div>
+          <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
+        </div>
+        <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${markdownModule.mdToHtml(data.text || '')}</div></div>
+      </div>`;
+      box.appendChild(wrap.firstElementChild);
+
+    } else if (data.role === 'claude_text_start') {
+      const _liveId = 'qp-mgr-live-' + Date.now();
+      const _liveWrap = document.createElement('div');
+      _liveWrap.className = 'msg msg-ai';
+      _liveWrap.dataset.liveId = _liveId;
+      _liveWrap.innerHTML = `<div class="role">${uiModule.esc(data.model ? data.model.split('/').pop() : 'Manager')}</div>`
+        + `<div class="body"><pre id="${_liveId}-text" style="white-space:pre-wrap;margin:0;font-family:inherit;font-size:inherit"></pre></div>`;
+      box.appendChild(_liveWrap);
+      box._qpLiveBubble = _liveWrap;
+      box._qpLiveText = '';
+      uiModule.scrollHistory();
+      return;
+
+    } else if (data.role === 'claude_text_delta') {
+      box._qpLiveText = (box._qpLiveText || '') + (data.text || '');
+      const _pre = box._qpLiveBubble?.querySelector('pre');
+      if (_pre) _pre.textContent = box._qpLiveText;
+      uiModule.scrollHistory();
+      return;
+
+    } else if (data.role === 'claude') {
+      let _el;
+      if (box._qpLiveBubble) {
+        // Replace raw-text live bubble with properly rendered markdown
+        const _body = box._qpLiveBubble.querySelector('.body');
+        if (_body) _body.innerHTML = markdownModule.mdToHtml(data.text || '');
+        _el = box._qpLiveBubble;
+        box._qpLiveBubble = null;
+        box._qpLiveText = '';
+      } else {
+        _el = chatRenderer.addMessage('assistant', data.text || '', data.model || null, {});
+      }
+      if (_el) {
+        _el.querySelector('.msg-footer')?.remove();
+        if (box._qpPendingMetrics.claude) {
+          chatRenderer.displayMetrics(_el, box._qpPendingMetrics.claude);
+          delete box._qpPendingMetrics.claude;
+        }
+      }
+
+    } else if (data.role === 'gemini') {
+      const _el = chatRenderer.addMessage('assistant', data.text || '', null, { character_name: 'Gemini' });
+      if (_el) {
+        _el.querySelector('.msg-footer')?.remove();
+        if (box._qpPendingMetrics.gemini) {
+          chatRenderer.displayMetrics(_el, box._qpPendingMetrics.gemini);
+          delete box._qpPendingMetrics.gemini;
+        }
+      }
+
+    } else if (data.role === 'claude_to_gemini') {
+      const id = 'qp-instr-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+      const wrap = document.createElement('div');
+      wrap.innerHTML = `<div class="thinking-section">
+        <div class="thinking-header" data-thinking-id="${id}">
+          <div class="thinking-header-left"><span data-label="→ Gemini instruction">→ Gemini instruction</span></div>
+          <div style="display:flex;align-items:center;gap:6px;"><span class="thinking-toggle" id="${id}-toggle"></span></div>
+        </div>
+        <div class="thinking-content" id="${id}"><div class="thinking-content-inner">${markdownModule.mdToHtml(data.text || '')}</div></div>
+      </div>`;
+      box.appendChild(wrap.firstElementChild);
+      uiModule.scrollHistory();
+      return;
+
+    } else if (data.role === 'retry_notice' || data.role === 'region_preview') {
+      return;
+
+    } else if (data.role === 'tool_call') {
+      let thread = box.lastElementChild?.classList.contains('agent-thread')
+        ? box.lastElementChild : null;
+      if (!thread) {
+        thread = document.createElement('div');
+        thread.className = 'agent-thread';
+        box.appendChild(thread);
+      }
+      const toolId = data.tool_id || '';
+      const toolLabel = data.tool === 'send_to_gemini' ? 'Gemini' : (data.tool || 'tool').replace(/_/g, ' ');
+      const node = document.createElement('div');
+      node.className = 'agent-thread-node running';
+      node.dataset.toolId = toolId;
+      node.innerHTML = `<div class="agent-thread-dot"></div>
+        <div class="agent-thread-header">
+          <span class="agent-thread-icon">⚙</span>
+          <span class="agent-thread-tool">${esc(toolLabel)}</span>
+          <span class="agent-thread-wave">▱▲△</span>
+        </div>
+        <div class="agent-thread-content">
+          <details class="agent-tool-output"><summary>Input</summary><pre>${esc(data.args || '{}')}</pre></details>
+        </div>`;
+      thread.appendChild(node);
+      if (toolId) box._qpToolNodes.set(toolId, node);
+
+    } else if (data.role === 'tool_result') {
+      const node = data.tool_id ? box._qpToolNodes.get(data.tool_id) : null;
+      if (node) {
+        const inputHtml = node.querySelector('.agent-tool-output')?.outerHTML || '';
+        node.className = 'agent-thread-node';
+        const toolLabel = data.tool === 'send_to_gemini' ? 'Gemini' : (data.tool || 'tool').replace(/_/g, ' ');
+        const imgHtml = data.image_url
+          ? `<img src="${esc(data.image_url)}" style="max-width:100%;border-radius:4px;margin-top:6px;" loading="lazy">`
+          : '';
+        node.innerHTML = `<div class="agent-thread-dot"></div>
+          <div class="agent-thread-header">
+            <span class="agent-thread-icon">✓</span>
+            <span class="agent-thread-tool">${esc(toolLabel)}</span>
+            <span class="agent-thread-status">done</span>
+            <span class="agent-thread-chevron">▶</span>
+          </div>
+          <div class="agent-thread-content">
+            ${inputHtml}
+            <details class="agent-tool-output"><summary>Output</summary><pre>${esc(data.result || '(no output)')}</pre>${imgHtml}</details>
+          </div>`;
+      }
+    }
+
+    uiModule.scrollHistory();
+  }
+
+  async function enterProposalMode(sessionId, runId) {
+    const _myInvId = ++_proposalInvocationId; // stamp this call; any earlier concurrent call is now stale
+    _proposalRunId = null;
+    _proposalSessionId = null;
+    // Close any previous EventSource immediately so it can't compete for SSE events
+    if (_proposalCloseStream) { _proposalCloseStream(); _proposalCloseStream = null; }
+    if (sessionModule.getCurrentSessionId() !== sessionId) return;
+    // Clear stale per-session maps from any previous proposal session
+    const _chatBox = document.getElementById('chat-history');
+    if (_chatBox) { _chatBox._qpToolNodes = new Map(); _chatBox._qpPendingMetrics = {}; _chatBox._qpCtxWindows = {}; _chatBox._qpLiveBubble = null; _chatBox._qpLiveText = ''; }
+    const messageInput = uiModule.el('message');
+    try {
+      const statusRes = await fetch(`${API_BASE}/api/quick_proposal/runs/${runId}/status`);
+      if (!statusRes.ok) return;
+      const { status } = await statusRes.json();
+
+      // Restore or reconstruct pipeline UI for a completed session
+      if (status === 'complete') {
+        if (!document.querySelector('link[href="/static/css/quick_proposal.css"]')) {
+          const link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = '/static/css/quick_proposal.css';
+          document.head.appendChild(link);
+        }
+        const _panel = document.getElementById('qp-pipeline-panel');
+        if (_panel) {
+          _panel.innerHTML = '';
+
+          // Use sessionStorage only if it has both index values AND the classification grid.
+          // A cache without the grid means the grid failed to render during the live run — bypass it.
+          const cached = sessionStorage.getItem(`qp_pipeline_html_${runId}`);
+          const _probe = cached ? (() => { const d = document.createElement('div'); d.innerHTML = cached; return d; })() : null;
+          const _cacheComplete = _probe?.querySelector('.qp-index-item') != null && _probe?.querySelector('.qp-chat-classify-grid') != null;
+
+          if (_cacheComplete) {
+            const restored = document.createElement('div');
+            restored.className = 'qp-chat-pipeline-root';
+            restored.innerHTML = cached;
+            // Inject rerun button if the cache predates this feature
+            const _cList = restored.querySelector('.qp-chat-phases-list');
+            if (_cList && _cList.querySelector('.qp-chat-export-btn') && !_cList.querySelector('.qp-chat-rerun-btn, .qp-chat-rerun-form')) {
+              const _cRerun = document.createElement('button');
+              _cRerun.className = 'qp-chat-rerun-btn';
+              _cRerun.dataset.runId = runId;
+              _cRerun.textContent = 'Re-run extraction';
+              _cList.appendChild(_cRerun);
+            }
+            _panel.appendChild(restored);
+            _panel.style.display = '';
+          } else {
+            // Reconstruct from server run record — always populated regardless of run status
+            if (sessionModule.getCurrentSessionId() !== sessionId) return;
+            try {
+              const res = await fetch(`${API_BASE}/api/quick_proposal/runs/${runId}`);
+              if (sessionModule.getCurrentSessionId() !== sessionId) return;
+              if (res.ok) {
+                const results = await res.json();
+                const root = _buildChatPipelineRoot();
+                _rebuildFromServerResults(root, results, runId);
+                _panel.appendChild(root);
+                _panel.style.display = '';
+                sessionStorage.setItem(`qp_pipeline_html_${runId}`, root.innerHTML);
+              } else if (cached) {
+                // 404 / server error — fall back to partial cache rather than blank
+                const restored = document.createElement('div');
+                restored.className = 'qp-chat-pipeline-root';
+                restored.innerHTML = cached;
+                _panel.appendChild(restored);
+                _panel.style.display = '';
+              }
+            } catch (e) {
+              console.warn('[proposal-mode] server reconstruct failed:', e);
+              if (cached) {
+                const restored = document.createElement('div');
+                restored.className = 'qp-chat-pipeline-root';
+                restored.innerHTML = cached;
+                _panel.appendChild(restored);
+                _panel.style.display = '';
+              }
+            }
+          }
+          // Ensure export + rerun buttons are present regardless of which populate path ran
+          const _ensureList = _panel.querySelector('.qp-chat-phases-list');
+          if (_ensureList) {
+            if (!_ensureList.querySelector('.qp-chat-export-btn')) {
+              const _ee = document.createElement('button');
+              _ee.className = 'qp-chat-export-btn';
+              _ee.textContent = 'Export log';
+              _ensureList.appendChild(_ee);
+            }
+            if (!_ensureList.querySelector('.qp-chat-rerun-btn, .qp-chat-rerun-form')) {
+              const _er = document.createElement('button');
+              _er.className = 'qp-chat-rerun-btn';
+              _er.dataset.runId = runId;
+              _er.textContent = 'Re-run extraction';
+              _ensureList.appendChild(_er);
+            }
+          }
+          hideWelcomeScreen();
+          uiModule.scrollHistory();
+        }
+      }
+
+      if (status !== 'complete') {
+        // Re-check after async status fetch — user may have switched sessions
+        if (sessionModule.getCurrentSessionId() !== sessionId) return;
+        if (messageInput && status !== 'error' && status !== 'cancelled') {
+          messageInput.disabled = true;
+          messageInput.placeholder = 'Extraction running…';
+        }
+
+        // Ensure QP stylesheet is loaded (normally injected when the QP panel opens)
+        if (!document.querySelector('link[href="/static/css/quick_proposal.css"]')) {
+          const link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = '/static/css/quick_proposal.css';
+          document.head.appendChild(link);
+        }
+
+        const _phaseLabels = {
+          load: 'Rendering pages…', index: 'Loading knowledge base…',
+          phase1: 'Detecting job type…', phase2: 'Classifying pages…',
+          phase3: 'Scoring completeness…', phase4: 'Building extraction index…',
+          phase5: 'Extracting values…', phase6: 'Finalizing…',
+        };
+        const _phaseRows = new Map();     // phase key → row DOM element
+        const _classifiedPages = new Map(); // pageIdx → classification data
+        const _seededPhases = new Set();  // phases already rendered as ✓ from server seed
+
+        const box = document.getElementById('chat-history');
+        const _livePanel = document.getElementById('qp-pipeline-panel');
+        let _liveMain = null;
+        if (box) {
+          _liveMain = _buildChatPipelineRoot();
+          // Seed from server: thumbnails, classification, and extracted values survive hard refresh.
+          // Uses the same /runs/{runId} endpoint as buildViewPanel — always populated from the DB.
+          try {
+            const _runRes = await fetch(`${API_BASE}/api/quick_proposal/runs/${runId}`);
+            if (_runRes.ok && sessionModule.getCurrentSessionId() === sessionId) {
+              const _run = await _runRes.json();
+              const _pages = _run.pages || [];
+              const _bboxMap = _run.bboxes || {};
+              const _strip = _liveMain.querySelector('.qp-chat-page-strip');
+              const _seedList = _liveMain.querySelector('.qp-chat-phases-list');
+              _chatClassifyRunId = runId;
+
+              // Infer which phases are complete from run data and pre-render ✓ rows.
+              // This reconstructs the phase checklist for hard-refresh and gate-paused sessions
+              // where SSE events for already-completed phases were consumed by the previous client.
+              const _ev = _run.extracted_values || {};
+              const _allClassified = _pages.length > 0 && _pages.every(p => p.sheet_type);
+              const _someClassified = !_allClassified && _pages.some(p => p.sheet_type);
+              const _phase3Done = _ev.plan_completeness != null;
+              const _phase45Done = Object.keys(_ev).some(k => !['project_type', 'plan_completeness', 'completeness_notes', 'extraction_complete'].includes(k));
+              const _seedPhaseLabels = {
+                load: 'Rendering pages…', index: 'Loading knowledge base…',
+                phase1: 'Detecting job type…', phase2: 'Classifying pages…',
+                phase3: 'Scoring completeness…', phase4: 'Building extraction index…',
+                phase5: 'Extracting values…',
+              };
+              const _seedDonePhases = [];
+              if (_pages.length > 0) _seedDonePhases.push('load', 'index');
+              if (_ev.project_type != null) _seedDonePhases.push('phase1');
+              if (_allClassified) _seedDonePhases.push('phase2');
+              if (_phase3Done) _seedDonePhases.push('phase3');
+              if (_phase45Done) _seedDonePhases.push('phase4', 'phase5');
+              for (const ph of _seedDonePhases) {
+                const r = document.createElement('div');
+                r.className = 'qp-chat-phase-row done';
+                r.innerHTML = `<span class="qp-chat-phase-check">✓</span><span class="qp-chat-phase-label">${_seedPhaseLabels[ph]}</span>`;
+                _seedList.appendChild(r);
+                _seededPhases.add(ph);
+              }
+              // If classification is mid-flight, add a running spinner SSE can update to ✓
+              if (_someClassified) {
+                const r = document.createElement('div');
+                r.className = 'qp-chat-phase-row running';
+                r.innerHTML = `<span class="qp-chat-phase-spinner"></span><span class="qp-chat-phase-label">Classifying pages…</span>`;
+                _phaseRows.set('phase2', r);
+                _seedList.appendChild(r);
+              }
+
+              // Add thumbnails and classification badges
+              for (const _page of _pages) {
+                _addChatThumb(_strip, _page.idx, `/api/quick_proposal/pages/${runId}/${_page.idx}`);
+                if (_page.sheet_type) {
+                  const _regions = (_page.bbox_ids || []).map(bid => {
+                    const b = _bboxMap[bid];
+                    return b ? { bbox: [b.x1, b.y1, b.x2, b.y2], label: b.description || '', importance: b.importance || 'medium' } : null;
+                  }).filter(Boolean);
+                  _classifiedPages.set(_page.idx, { page_idx: _page.idx, sheet_type: _page.sheet_type, importance: _page.importance, description: _page.description || '', regions: _regions });
+                  _chatClassifications.set(_page.idx, { sheet_type: _page.sheet_type, importance: _page.importance, description: _page.description || '', regions: _regions });
+                  const _thumb = _strip.querySelector(`[data-page-idx="${_page.idx}"]`);
+                  if (_thumb) {
+                    const _badge = document.createElement('div');
+                    _badge.className = 'qp-chat-thumb-badge';
+                    _badge.textContent = _page.sheet_type;
+                    _badge.dataset.importance = _page.importance || 'low';
+                    _thumb.appendChild(_badge);
+                  }
+                }
+              }
+              if (_pages.length) _liveMain.querySelector('.qp-chat-strip-wrap')?.classList.remove('qp-chat-strip-hidden');
+
+              // Render classification grid now — placed correctly below the ✓ phase rows added above.
+              // For live fresh runs (seed has no pages) the grid renders at phase2_complete via SSE instead.
+              if (_allClassified && _classifiedPages.size > 0) {
+                const _seedClassifyWrap = _liveMain.querySelector('.qp-chat-classify-wrap');
+                if (_seedClassifyWrap && !_seedClassifyWrap.querySelector('.qp-chat-classify-grid')) {
+                  _renderClassificationGrid(_seedClassifyWrap, _classifiedPages, runId);
+                }
+              }
+
+              // Re-inject the advance button for sessions paused at a gate.
+              // The phase_gate SSE event is consume-once; reconnecting clients never see it.
+              const _doAdvance = () => fetch(`${API_BASE}/api/quick_proposal/advance-phase`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ run_id: runId }),
+              }).catch(err => console.warn('[proposal-mode] advance-phase failed:', err));
+              const _autoMode = localStorage.getItem('qp_auto_mode') !== 'false';
+              const _pipelinePanel = _liveMain.querySelector('[data-panel="pipeline"]');
+              if (_pages.length > 0 && !_someClassified && !_allClassified && !_phase3Done && !_phase45Done && _run.status === 'running') {
+                // Paused at classify gate (pages rendered, classify not yet started)
+                if (_autoMode) {
+                  _doAdvance();
+                } else {
+                  const _gateBtn = document.createElement('button');
+                  _gateBtn.className = 'qp-chat-advance-btn';
+                  _gateBtn.textContent = 'Continue: Classify Pages →';
+                  _pipelinePanel?.appendChild(_gateBtn);
+                  _gateBtn.onclick = () => { _gateBtn.disabled = true; _gateBtn.textContent = '…'; _doAdvance().then(() => _gateBtn.remove()); };
+                }
+              } else if (_allClassified && !_phase3Done && !_phase45Done) {
+                if (_autoMode) {
+                  _doAdvance();
+                } else {
+                  const _gateBtn = document.createElement('button');
+                  _gateBtn.className = 'qp-chat-advance-btn';
+                  _gateBtn.textContent = 'Continue: Completeness Scoring →';
+                  _pipelinePanel?.appendChild(_gateBtn);
+                  _gateBtn.onclick = () => { _gateBtn.disabled = true; _gateBtn.textContent = '…'; _doAdvance().then(() => _gateBtn.remove()); };
+                }
+              } else if (_phase3Done && !_phase45Done) {
+                if (_autoMode) {
+                  _doAdvance();
+                } else {
+                  const _gateBtn = document.createElement('button');
+                  _gateBtn.className = 'qp-chat-advance-btn';
+                  _gateBtn.textContent = 'Continue: Extraction →';
+                  _pipelinePanel?.appendChild(_gateBtn);
+                  _gateBtn.onclick = () => { _gateBtn.disabled = true; _gateBtn.textContent = '…'; _doAdvance().then(() => _gateBtn.remove()); };
+                }
+              }
+
+              const _valContainer = _liveMain.querySelector('#qp-index-values');
+              const _panel = _liveMain.querySelector('.qp-chat-index-panel');
+              let _idxCount = 0;
+              for (const [_key, _entry] of Object.entries(_ev)) {
+                if (_key === 'extraction_complete') continue;
+                const _item = document.createElement('details');
+                _item.className = 'qp-index-item';
+                _item.dataset.key = _key;
+                const _val = _entry.value == null ? 'null' : (typeof _entry.value === 'object' ? JSON.stringify(_entry.value) : String(_entry.value));
+                _item.open = _val.length < 60;
+                _item.innerHTML = `<summary class="qp-index-item-summary"><span class="qp-index-key">${_key}</span><span class="qp-index-conf qp-index-conf-${_entry.confidence || 'medium'}">${_entry.confidence || ''}</span></summary><div class="qp-index-val">${_val}</div>`;
+                _valContainer.appendChild(_item);
+                _idxCount++;
+              }
+              if (_idxCount > 0 && _panel) _panel.style.display = '';
+            }
+          } catch (_e) {}
+          if (_livePanel) { _livePanel.innerHTML = ''; _livePanel.appendChild(_liveMain); _livePanel.style.display = ''; }
+          hideWelcomeScreen();
+          uiModule.scrollHistory();
+        }
+
+        // If a newer enterProposalMode call started during the seed fetch (async gap),
+        // abort here — only the latest call should own the SSE queue.
+        if (_myInvId !== _proposalInvocationId) return;
+
+        // Errored/cancelled runs: restore panel state, mark incomplete phases, re-enable input — no SSE.
+        // 'cancelled' must be handled here too — task.cancel() raises CancelledError (BaseException),
+        // which bypasses the `except Exception` cleanup in run_pipeline, so no null sentinel is ever
+        // put in the queue. Reconnecting to that queue would block forever on keepalive events.
+        if (status === 'error' || status === 'cancelled') {
+          _liveMain?.querySelectorAll('.qp-chat-phase-row.running').forEach(row => {
+            row.classList.remove('running');
+            row.classList.add('error');
+            row.querySelector('.qp-chat-phase-spinner')?.remove();
+          });
+          const _phasesList = _liveMain?.querySelector('.qp-chat-phases-list');
+          if (_phasesList && runId) {
+            const _rerunBtn = document.createElement('button');
+            _rerunBtn.className = 'qp-chat-rerun-btn';
+            _rerunBtn.dataset.runId = runId;
+            _rerunBtn.textContent = 'Re-run extraction';
+            _phasesList.appendChild(_rerunBtn);
+          }
+          if (messageInput) { messageInput.disabled = false; messageInput.placeholder = ''; }
+          return;
+        }
+
+        if (_liveMain) {
+          const _stopBtn = document.createElement('button');
+          _stopBtn.className = 'qp-chat-stop-btn';
+          _stopBtn.textContent = 'Stop run';
+          (_liveMain.querySelector('[data-panel="pipeline"]') || _liveMain).appendChild(_stopBtn);
+          _stopBtn.onclick = () => {
+            _stopBtn.disabled = true;
+            _stopBtn.textContent = 'Stopping…';
+            fetch(`${API_BASE}/api/quick_proposal/runs/${runId}/cancel`, { method: 'POST' }).catch(() => {});
+          };
+        }
+
+        await new Promise(resolve => {
+          const source = new EventSource(`${API_BASE}/api/quick_proposal/stream/${runId}`);
+          let closed = false;
+          let _hadBackendError = false;
+          const _markPhasesErrored = () => {
+            _liveMain?.querySelectorAll('.qp-chat-phase-row.running').forEach(row => {
+              row.classList.remove('running');
+              row.classList.add('error');
+              row.querySelector('.qp-chat-phase-spinner')?.remove();
+            });
+          };
+          const _close = () => {
+            if (closed) return;
+            closed = true;
+            source.close();
+            _liveMain?.querySelector('.qp-chat-stop-btn')?.remove();
+            // If a live text bubble exists, finalize it by rendering the full text as markdown
+            const _cb = document.getElementById('chat-history');
+            if (_cb?._qpLiveBubble) {
+              const _body = _cb._qpLiveBubble.querySelector('.body');
+              if (_body) {
+                // Render the full accumulated text as markdown (no truncation marker)
+                const rendered = markdownModule.mdToHtml(_cb._qpLiveText || '');
+                _body.innerHTML = rendered;
+              }
+              _cb._qpLiveBubble = null;
+              _cb._qpLiveText = '';
+            }
+            // Save final state — captures index values and mid-phase content on any close
+            if (_liveMain) sessionStorage.setItem(`qp_pipeline_html_${runId}`, _liveMain.innerHTML);
+            _proposalCloseStream = null;
+            resolve();
+          };
+          _proposalCloseStream = _close;
+
+          source.addEventListener('phase_start', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              const d = JSON.parse(e.data);
+              // Skip phases already shown as ✓ by the server seed (avoid duplicate rows)
+              if (_seededPhases.has(d.phase)) return;
+              // Skip phase2 if seed already added a running spinner for it
+              if (d.phase === 'phase2' && _phaseRows.has('phase2')) return;
+              const label = _phaseLabels[d.phase] || d.label || d.phase;
+              const list = _liveMain?.querySelector('.qp-chat-phases-list');
+              if (!list) return;
+              const row = document.createElement('div');
+              row.className = 'qp-chat-phase-row running';
+              row.innerHTML = `<span class="qp-chat-phase-spinner"></span><span class="qp-chat-phase-label">${label}</span>`;
+              _phaseRows.set(d.phase, row);
+              list.appendChild(row);
+              uiModule.scrollHistory();
+            } catch {}
+          });
+
+          source.addEventListener('phase_gate', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              const d = JSON.parse(e.data);
+              const autoMode = localStorage.getItem('qp_auto_mode') !== 'false';
+              const doAdvance = () => fetch(`${API_BASE}/api/quick_proposal/advance-phase`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ run_id: runId }),
+              }).catch(err => console.warn('[proposal-mode] advance-phase failed:', err));
+
+              if (autoMode) {
+                doAdvance();
+              } else {
+                if (!_liveMain) return;
+                let btn = _liveMain.querySelector('.qp-chat-advance-btn');
+                if (btn) btn.remove();
+                btn = document.createElement('button');
+                btn.className = 'qp-chat-advance-btn';
+                const label = d.next_phase_label ? `Continue: ${d.next_phase_label} →` : 'Continue →';
+                btn.textContent = label;
+                (_liveMain.querySelector('[data-panel="pipeline"]') || _liveMain).appendChild(btn);
+                btn.onclick = () => {
+                  btn.disabled = true;
+                  btn.textContent = '…';
+                  doAdvance().then(() => btn.remove());
+                };
+                uiModule.scrollHistory();
+              }
+            } catch {}
+          });
+
+          source.addEventListener('phase_complete', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              const d = JSON.parse(e.data);
+              const row = _phaseRows.get(d.phase);
+              if (row) {
+                row.classList.remove('running');
+                row.classList.add('done');
+                const spinner = row.querySelector('.qp-chat-phase-spinner');
+                if (spinner) {
+                  const check = document.createElement('span');
+                  check.className = 'qp-chat-phase-check';
+                  check.textContent = '✓';
+                  spinner.replaceWith(check);
+                }
+              }
+              // After classification, render pages with bbox overlays
+              if (d.phase === 'phase2' && _classifiedPages.size) {
+                const classifyWrap = _liveMain?.querySelector('.qp-chat-classify-wrap');
+                if (classifyWrap && !classifyWrap.querySelector('.qp-chat-classify-grid')) _renderClassificationGrid(classifyWrap, _classifiedPages, runId);
+              }
+              if (d.phase === 'phase5' || d.phase === 'phase6') {
+                const list = _liveMain?.querySelector('.qp-chat-phases-list');
+                if (list && !list.querySelector('.qp-chat-export-btn')) {
+                  const exportBtn = document.createElement('button');
+                  exportBtn.className = 'qp-chat-export-btn';
+                  exportBtn.textContent = 'Export log';
+                  list.appendChild(exportBtn);
+                }
+                if (list && !list.querySelector('.qp-chat-rerun-btn, .qp-chat-rerun-form')) {
+                  const _rerunBtn = document.createElement('button');
+                  _rerunBtn.className = 'qp-chat-rerun-btn';
+                  _rerunBtn.dataset.runId = runId;
+                  _rerunBtn.textContent = 'Re-run extraction';
+                  list.appendChild(_rerunBtn);
+                }
+              }
+              // Cache AFTER all visual updates so grid/export-btn are included
+              if (_liveMain) {
+                sessionStorage.setItem(`qp_pipeline_html_${runId}`, _liveMain.innerHTML);
+              }
+              if (d.phase === 'phase5' || d.phase === 'phase6') {
+                _close();
+              }
+            } catch { _close(); }
+          });
+
+          source.addEventListener('page_ready', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              const d = JSON.parse(e.data);
+              const strip = _liveMain?.querySelector('.qp-chat-page-strip');
+              if (strip && d.url != null && !strip.querySelector(`[data-page-idx="${d.page_idx}"]`)) {
+                _addChatThumb(strip, d.page_idx, d.url);
+                strip.closest('.qp-chat-strip-wrap')?.classList.remove('qp-chat-strip-hidden');
+              }
+            } catch {}
+          });
+
+          source.addEventListener('page_classified', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              const d = JSON.parse(e.data);
+              _classifiedPages.set(d.page_idx, d);
+              const strip = _liveMain?.querySelector('.qp-chat-page-strip');
+              if (!strip) return;
+              let thumb = strip.querySelector(`[data-page-idx="${d.page_idx}"]`);
+              if (!thumb) {
+                _addChatThumb(strip, d.page_idx, `/api/quick_proposal/pages/${runId}/${d.page_idx}`);
+                strip.closest('.qp-chat-strip-wrap')?.classList.remove('qp-chat-strip-hidden');
+                thumb = strip.querySelector(`[data-page-idx="${d.page_idx}"]`);
+              }
+              if (thumb && d.sheet_type) {
+                let badge = thumb.querySelector('.qp-chat-thumb-badge');
+                if (!badge) {
+                  badge = document.createElement('div');
+                  badge.className = 'qp-chat-thumb-badge';
+                  thumb.appendChild(badge);
+                }
+                badge.textContent = d.sheet_type;
+                badge.dataset.importance = d.importance || 'low';
+              }
+              if (d.sheet_type) {
+                const classifyWrap = _liveMain?.querySelector('.qp-chat-classify-wrap');
+                _addClassificationCard(classifyWrap, d.page_idx, d, runId);
+                uiModule.scrollHistory();
+              }
+            } catch {}
+          });
+
+          source.addEventListener('extraction_message', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              _appendQpMessage(JSON.parse(e.data));
+            } catch (err) {
+              console.warn('[proposal-mode] extraction_message error:', err);
+            }
+          });
+
+          source.addEventListener('context_usage', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              const d = JSON.parse(e.data);
+              const _cb = document.getElementById('chat-history');
+              if (!_cb) return;
+              if (!_cb._qpPendingMetrics) _cb._qpPendingMetrics = {};
+              const _ctxPct = d.context_window ? (d.input_tokens / d.context_window * 100) : null;
+              _cb._qpPendingMetrics[d.role] = {
+                input_tokens: d.input_tokens || 0,
+                output_tokens: d.output_tokens || 0,
+                context_percent: _ctxPct != null ? Math.round(_ctxPct * 10) / 10 : undefined,
+                context_length: d.context_window || 0,
+                model: d.model || '',
+              };
+              // Update context window status panel in the Status tab
+              const _ctxDiv = _liveMain?.querySelector('.qp-ctx-window-status');
+              if (_ctxDiv) {
+                _cb._qpCtxWindows = _cb._qpCtxWindows || {};
+                _cb._qpCtxWindows[d.role] = { pct: _ctxPct, window: d.context_window, model: d.model };
+                const _fmtCtx = (info) => {
+                  if (!info) return null;
+                  const pctStr = info.pct != null ? `${info.pct.toFixed(1)}%` : '?%';
+                  const winStr = info.window ? (info.window >= 1000000
+                    ? `${(info.window / 1000000).toFixed(1)}M` : `${Math.round(info.window / 1000)}k`) : '';
+                  const color = info.pct >= 85 ? 'var(--red,#e06c75)' : info.pct >= 70 ? '#ff9900' : 'inherit';
+                  return `<span style="color:${color}">${pctStr}${winStr ? ' of ' + winStr : ''}</span>`;
+                };
+                const parts = [];
+                if (_cb._qpCtxWindows.claude) parts.push(`Manager: ${_fmtCtx(_cb._qpCtxWindows.claude)}`);
+                if (_cb._qpCtxWindows.gemini) parts.push(`Gemini: ${_fmtCtx(_cb._qpCtxWindows.gemini)}`);
+                if (parts.length) {
+                  _ctxDiv.innerHTML = parts.join(' &nbsp;|&nbsp; ');
+                  _ctxDiv.style.display = 'flex';
+                }
+              }
+            } catch {}
+          });
+
+          source.addEventListener('index_update', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              const d = JSON.parse(e.data);
+              const valContainer = _liveMain?.querySelector('#qp-index-values');
+              if (!valContainer) return;
+              let item = valContainer.querySelector(`[data-key="${CSS.escape(d.key)}"]`);
+              const val = d.value == null ? 'null'
+                : (typeof d.value === 'object' ? JSON.stringify(d.value) : String(d.value));
+              if (!item) {
+                item = document.createElement('details');
+                item.className = 'qp-index-item';
+                item.dataset.key = d.key;
+                item.open = val.length < 60;
+                item.innerHTML = `<summary class="qp-index-item-summary"><span class="qp-index-key">${d.key}</span><span class="qp-index-conf qp-index-conf-${d.confidence || 'medium'}">${d.confidence || ''}</span></summary><div class="qp-index-val">${val}</div>`;
+                valContainer.appendChild(item);
+              } else {
+                const valEl = item.querySelector('.qp-index-val');
+                if (valEl) valEl.textContent = val;
+              }
+              const panel = _liveMain?.querySelector('.qp-chat-index-panel');
+              if (panel) panel.style.display = '';
+            } catch {}
+          });
+
+          source.addEventListener('region_preview', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              const d = JSON.parse(e.data);
+              if (!d.image_url) return;
+              const msgContainer = _liveMain?.querySelector('#qp-extraction-messages');
+              if (!msgContainer) return;
+              const tile = document.createElement('div');
+              tile.className = 'qp-chat-region-tile';
+              const img = document.createElement('img');
+              img.src = d.image_url;
+              img.alt = d.bbox_id || 'region';
+              img.loading = 'lazy';
+              const lbl = document.createElement('div');
+              lbl.className = 'qp-chat-region-lbl';
+              lbl.textContent = d.bbox_id || '';
+              tile.appendChild(img);
+              tile.appendChild(lbl);
+              msgContainer.appendChild(tile);
+              uiModule.scrollHistory();
+            } catch {}
+          });
+
+          source.addEventListener('page_ready', (e) => {
+            if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
+            try {
+              const d = JSON.parse(e.data);
+              const strip = _liveMain?.querySelector('.qp-chat-page-strip');
+              if (!strip) return;
+              if (strip.querySelector(`[data-page-idx="${d.page_idx}"]`)) return;
+              _addChatThumb(strip, d.page_idx, d.url);
+              strip.closest('.qp-chat-strip-wrap')?.classList.remove('qp-chat-strip-hidden');
+              uiModule.scrollHistory();
+            } catch {}
+          });
+
+          source.addEventListener('error', (e) => {
+            // e.data is set when the server emitted event: error\ndata: {...}
+            // e.data is undefined for transport-level drops (network cut, server crash)
+            const _eb = document.getElementById('chat-history');
+            const _isCurrentSession = sessionModule.getCurrentSessionId() === sessionId;
+            if (e.data) {
+              _hadBackendError = true;
+              _markPhasesErrored();
+              try {
+                const d = JSON.parse(e.data);
+                if (_eb && _isCurrentSession) {
+                  const _ew = document.createElement('div');
+                  _ew.className = 'msg msg-ai';
+                  _ew.innerHTML = '<div class="role" style="color:var(--red,#e06c75)">Error</div>'
+                    + `<div class="body" style="color:var(--red,#e06c75)">⚠ Extraction failed: ${uiModule.esc(d.message || 'Unknown error')}</div>`;
+                  _eb.appendChild(_ew);
+                  uiModule.scrollHistory();
+                }
+              } catch {}
+            } else if (!_hadBackendError && _eb && _isCurrentSession) {
+              // Unexpected transport drop — model crashed or server restarted
+              _markPhasesErrored();
+              const _ew = document.createElement('div');
+              _ew.className = 'msg msg-ai';
+              _ew.innerHTML = '<div class="role" style="color:var(--red,#e06c75)">Connection lost</div>'
+                + '<div class="body" style="color:var(--red,#e06c75)">⚠ Stream disconnected — the model may have crashed or run out of memory. Check the server logs.</div>';
+              _eb.appendChild(_ew);
+              uiModule.scrollHistory();
+            }
+            _close();
+          });
+          setTimeout(_close, 30 * 60 * 1000);
+        });
+
+        // Post-stream refresh: fill any pages/classifications the EventSource missed
+        try {
+          if (sessionModule.getCurrentSessionId() === sessionId && _liveMain) {
+            const _postRes = await fetch(`${API_BASE}/api/quick_proposal/runs/${runId}`);
+            if (_postRes.ok) {
+              const _postRun = await _postRes.json();
+              const _postBboxMap = _postRun.bboxes || {};
+              const _postStrip = _liveMain.querySelector('.qp-chat-page-strip');
+              for (const _pp of (_postRun.pages || [])) {
+                if (_postStrip && !_postStrip.querySelector(`[data-page-idx="${_pp.idx}"]`)) {
+                  _addChatThumb(_postStrip, _pp.idx, `/api/quick_proposal/pages/${runId}/${_pp.idx}`);
+                  _postStrip.closest('.qp-chat-strip-wrap')?.classList.remove('qp-chat-strip-hidden');
+                }
+                if (_pp.sheet_type) {
+                  const _pt = _postStrip?.querySelector(`[data-page-idx="${_pp.idx}"]`);
+                  if (_pt && !_pt.querySelector('.qp-chat-thumb-badge')) {
+                    const _pb = document.createElement('div');
+                    _pb.className = 'qp-chat-thumb-badge';
+                    _pb.textContent = _pp.sheet_type;
+                    _pb.dataset.importance = _pp.importance || 'low';
+                    _pt.appendChild(_pb);
+                  }
+                  if (!_chatClassifications.has(_pp.idx)) {
+                    const _pr = (_pp.bbox_ids || []).map(bid => { const b = _postBboxMap[bid]; return b ? { bbox: [b.x1, b.y1, b.x2, b.y2], label: b.description || '', importance: b.importance || 'medium' } : null; }).filter(Boolean);
+                    _chatClassifications.set(_pp.idx, { sheet_type: _pp.sheet_type, importance: _pp.importance, description: _pp.description || '', regions: _pr });
+                    _classifiedPages.set(_pp.idx, { page_idx: _pp.idx, sheet_type: _pp.sheet_type, importance: _pp.importance, regions: _pr });
+                  }
+                }
+              }
+              const _postWrap = _liveMain.querySelector('.qp-chat-classify-wrap');
+              if (_postWrap && !_postWrap.querySelector('.qp-chat-classify-grid') && _classifiedPages.size) {
+                _renderClassificationGrid(_postWrap, _classifiedPages, runId);
+              }
+              const _postVC = _liveMain.querySelector('#qp-index-values');
+              const _postPanel = _liveMain.querySelector('.qp-chat-index-panel');
+              for (const [_pk, _pe] of Object.entries(_postRun.extracted_values || {})) {
+                if (_pk === 'extraction_complete') continue;
+                if (!_postVC?.querySelector(`[data-key="${CSS.escape(_pk)}"]`)) {
+                  const _pi = document.createElement('details');
+                  _pi.className = 'qp-index-item'; _pi.dataset.key = _pk;
+                  const _pv = _pe.value == null ? 'null' : (typeof _pe.value === 'object' ? JSON.stringify(_pe.value) : String(_pe.value));
+                  _pi.open = _pv.length < 60;
+                  _pi.innerHTML = `<summary class="qp-index-item-summary"><span class="qp-index-key">${_pk}</span><span class="qp-index-conf qp-index-conf-${_pe.confidence || 'medium'}">${_pe.confidence || ''}</span></summary><div class="qp-index-val">${_pv}</div>`;
+                  _postVC?.appendChild(_pi);
+                  if (_postPanel) _postPanel.style.display = '';
+                }
+              }
+            }
+          }
+        } catch (_postE) {}
+
+        if (messageInput) {
+          messageInput.disabled = false;
+          messageInput.placeholder = '';
+        }
+      }
+    } catch (e) {
+      console.warn('[proposal-mode] enterProposalMode error:', e);
+      if (messageInput) { messageInput.disabled = false; messageInput.placeholder = ''; }
+      return;
+    }
+    if (sessionModule.getCurrentSessionId() !== sessionId) return;
+    _proposalRunId = runId;
+    _proposalSessionId = sessionId;
+  }
+
   // Public API
   const chatModule = {
     init,
@@ -5006,6 +6479,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     continueFrom,
     _appendViewReportLink,
     hasActiveStream,
+    enterProposalMode,
   };
 
   // Single delegated handler for tool-call fold/expand. One listener on
@@ -5023,6 +6497,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     });
     window.__odysseus_thread_click_bound = true;
   }
+
+  // Proposal mode: enter when a proposal session is selected from the sidebar
+  // or navigated to. ui.js handleRun() calls selectSession() directly after
+  // loadSessions(), which dispatches this event.
+  document.addEventListener('proposal-session-loaded', ({ detail }) => {
+    enterProposalMode(detail.sessionId, detail.runId);
+  });
 
   export default chatModule;
   window.chatModule = chatModule;

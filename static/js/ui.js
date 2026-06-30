@@ -446,10 +446,25 @@ export function showError(msg) {
  * Throttled during streaming so it doesn't fight user scrolling.
  */
 let _scrollThrottleTimer = null;
+let _scrollListenerAttached = false;
+let _lastProgrammaticScrollMs = 0;
+
 export function scrollHistory() {
   if (!autoScrollEnabled) return;
   if (!_scrollBox) {
     _scrollBox = document.getElementById('chat-history');
+    if (_scrollBox && !_scrollListenerAttached) {
+      _scrollListenerAttached = true;
+      _scrollBox.addEventListener('scroll', () => {
+        // Ignore scroll events caused by _smoothScrollStep itself
+        if (Date.now() - _lastProgrammaticScrollMs < 150) return;
+        const box = _scrollBox;
+        if (!box) return;
+        const diff = box.scrollHeight - box.clientHeight - box.scrollTop;
+        if (diff > 60) autoScrollEnabled = false;
+        else if (diff < 30) autoScrollEnabled = true;
+      }, { passive: true });
+    }
   }
   // Throttle: only start a new scroll animation every 500ms
   if (_scrollThrottleTimer) return;
@@ -469,13 +484,8 @@ function _smoothScrollStep() {
   const current = box.scrollTop;
   const diff = target - current;
 
-  // If user scrolled up significantly, don't force them down
-  if (diff > 300) {
-    _scrollRafId = null;
-    return;
-  }
-
   if (diff <= 1) {
+    _lastProgrammaticScrollMs = Date.now();
     box.scrollTop = target;
     _scrollRafId = null;
     return;
@@ -483,6 +493,7 @@ function _smoothScrollStep() {
 
   // Lerp: gentle catch-up
   const factor = window.innerWidth <= 768 ? 0.4 : 0.2;
+  _lastProgrammaticScrollMs = Date.now();
   box.scrollTop = current + diff * factor;
   _scrollRafId = requestAnimationFrame(_smoothScrollStep);
 }

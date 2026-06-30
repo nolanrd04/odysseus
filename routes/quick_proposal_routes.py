@@ -12,15 +12,17 @@ from pathlib import Path
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from src.constants import DATA_DIR, UPLOAD_DIR
-from core.database import SessionLocal, ModelEndpoint
+from core.database import SessionLocal, ModelEndpoint, Session as DbSession
 from src.endpoint_resolver import resolve_endpoint_runtime, build_chat_url, build_headers
 
 logger = logging.getLogger(__name__)
+
+_session_manager = None  # set by setup_quick_proposal_routes; used by _save_chat_message
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
@@ -162,7 +164,7 @@ class RunRequest(BaseModel):
     gemini_fallback_models: List[str] = []
     holdout_kp_path: str = ""
     import_from_run_id: str = ""
-    project_type: str = ""  # "" = auto-detect via Phase 0.5; else: residential_subdivision | commercial_development | rural_access | mixed
+    project_type: str = ""  # "" = auto-detect via Phase 1; else: residential_subdivision | commercial_development | rural_access | mixed
 
 
 class AdvancePhaseRequest(BaseModel):
@@ -180,7 +182,52 @@ class QPChatRequest(BaseModel):
     manager_model: str = ""
 
 
+class QPContinuationRequest(BaseModel):
+    message: str
+    manager_model: str = ""
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _save_chat_message(session_id: str, role: str, content, meta: dict | None = None) -> None:
+    """Persist a single manager-conversation turn to the session's ChatMessage table.
+
+    Uses session_manager.add_message when available so the in-memory session
+    cache stays current — otherwise a hard refresh (server still up) returns
+    stale history from the cache and the extraction log disappears.
+    """
+    if not session_id:
+        return
+    content_str = content if isinstance(content, str) else json.dumps(content)
+    if _session_manager is not None:
+        from core.models import ChatMessage as CoreChatMessage
+        try:
+            _session_manager.add_message(
+                session_id,
+                CoreChatMessage(role=role, content=content_str, metadata=meta or {}),
+            )
+            return  # success — in-memory cache + DB both updated
+        except Exception as e:
+            logger.warning(f"[quick_proposal] ChatMessage save via session_manager failed (falling back to direct DB write): {e}")
+    # Fallback: direct DB write (session_manager not wired up)
+    from core.database import ChatMessage as DbChatMessage, SessionLocal as _SL
+    db = _SL()
+    try:
+        msg = DbChatMessage(
+            id=uuid.uuid4().hex,
+            session_id=session_id,
+            role=role,
+            content=content_str,
+            meta_data=json.dumps(meta) if meta else None,
+        )
+        db.add(msg)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"[quick_proposal] ChatMessage save failed: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
 
 async def _emit(queue: asyncio.Queue, event_type: str, **kwargs):
     await queue.put({"type": event_type, **kwargs})
@@ -240,7 +287,7 @@ def _save_extracted_values(run_id: str, extracted_values: dict) -> None:
         logger.warning(f"[quick_proposal] extracted_values save failed run={run_id}: {e}")
 
 
-async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False, completeness_only: bool = False) -> None:
+async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False, completeness_only: bool = False, session_id: str = "") -> None:
     """Re-run phase2 index build + phase3 extraction loop using saved page classifications."""
     try:
         await _emit(queue, "phase_start", phase="phase4", label="Building extraction index…")
@@ -251,7 +298,7 @@ async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_mod
             await phase3_completeness_score(index, queue, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models)
 
         if not completeness_only:
-            await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume)
+            await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume, session_id=session_id)
         _save_run_results(run_id, index)
         _save_run_meta(run_id, status="complete")
     except Exception as e:
@@ -1042,6 +1089,7 @@ async def _run_gemini_with_tools(
     fallback_models_info: list | None = None,
     tools: list | None = None,
     stop_keys: set | None = None,
+    session_id: str = "",
 ) -> str:
     """Append user_message to Gemini history, call Gemini, handle tool loops, return final text."""
     image_store = gemini_state.setdefault("image_store", {})
@@ -1148,6 +1196,7 @@ async def _run_gemini_with_tools(
                         **({"image_url": result_image} if result_image else {}))
             if log_path := gemini_state.get("log_path"):
                 _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result", "tool_id": tc_id, "tool": tool_name, "result": result_text})
+            _save_chat_message(session_id, "tool", result_text, {"tool_name": tool_name, "source": "gemini_subtool"})
             # Gemini OpenAI-compat rejects image_url in tool messages; keep only text
             # here and carry images forward as a user message instead.
             text_parts = [b["text"] for b in result_blocks if b.get("type") == "text"]
@@ -1261,7 +1310,7 @@ async def phase1_detect_job_type(
         tools=_GEMINI_UTILITY_TOOLS,
     )
     detected = index.extracted_values.get("project_type", {}).get("value", "unknown")
-    logger.info(f"[quick_proposal] phase0.5 complete — project_type={detected}")
+    logger.info(f"[quick_proposal] phase1 complete — project_type={detected}")
     await _emit(queue, "phase_complete", phase="phase1")
 
 
@@ -1293,7 +1342,7 @@ async def phase3_completeness_score(
         tools=_GEMINI_COMPLETENESS_TOOLS,
         stop_keys={"completeness_complete"},
     )
-    logger.info(f"[quick_proposal] phase1.5 complete — project_type={project_type}")
+    logger.info(f"[quick_proposal] phase3 complete — project_type={project_type}")
     await _emit(queue, "phase_complete", phase="phase3")
 
 
@@ -1382,7 +1431,7 @@ def _kp_lookup(knowledge_pack: dict, query: str) -> str:
     return json.dumps({"query": q, "matches": {k: _build_result(k) for k in matches}})
 
 
-_THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+_THINK_TAG_RE = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL)
 
 
 async def _stream_manager_call(
@@ -1405,6 +1454,7 @@ async def _stream_manager_call(
     thinking_id  = uuid.uuid4().hex[:8]
     thinking_buf = ""
     thinking_streaming = False   # True once we've sent the start event
+    text_streaming = False        # True once we've sent the text_start event
     content_buf = ""
     tool_calls_map: dict[int, dict] = {}
     usage: dict = {}
@@ -1413,10 +1463,41 @@ async def _stream_manager_call(
     req_headers = {**headers, "content-type": "application/json"}
     timeout = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    try:
+      # Pre-flight: log payload details before sending
+      try:
+        payload_json = json.dumps(stream_payload)
+        payload_size = len(payload_json.encode('utf-8'))
+        logger.info(f"[quick_proposal] Sending manager request: {payload_size} bytes, {len(stream_payload.get('messages', []))} messages, {len(stream_payload.get('tools', []))} tools")
+      except Exception as e:
+        logger.error(f"[quick_proposal] Could not serialize payload to JSON: {e}")
+        return {"error": {"message": f"Failed to serialize request payload: {e}"}}
+
+      async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", url, headers=req_headers, json=stream_payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
+            if not resp.is_success:
+                # Read full body before raising so we have the error message
+                body_text = await resp.aread()
+                body_str = body_text.decode('utf-8', errors='ignore')
+                logger.error(f"[quick_proposal] manager HTTP {resp.status_code}")
+                logger.error(f"  Response body: {body_str}")
+                logger.error(f"  Response headers: {dict(resp.headers)}")
+                logger.error(f"  Request model: {payload.get('model')}")
+                logger.error(f"  Request messages count: {len(payload.get('messages', []))}")
+                logger.error(f"  Request tools count: {len(payload.get('tools', []))}")
+                if payload.get('messages'):
+                    total_chars = sum(len(str(m.get('content', ''))) for m in payload.get('messages', []))
+                    logger.error(f"  Total message content chars: {total_chars}")
+                return {"error": {"message": f"Model returned {resp.status_code}: {body_str}"}}
+            _line_iter = resp.aiter_lines().__aiter__()
+            while True:
+                try:
+                    line = await asyncio.wait_for(_line_iter.__anext__(), timeout=120.0)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning("[quick_proposal] manager stream idle >120s — model may have crashed")
+                    return {"error": {"message": "Model stopped responding (no tokens for 120 seconds). The model may have crashed or run out of memory."}}
                 if not line.startswith("data: ") or line == "data: [DONE]":
                     continue
                 try:
@@ -1463,6 +1544,12 @@ async def _stream_manager_call(
                 content = delta.get("content") or ""
                 if content:
                     content_buf += content
+                    if not text_streaming:
+                        text_streaming = True
+                        await _emit(queue, "extraction_message",
+                                    role="claude_text_start", model=mgr_model_id)
+                    await _emit(queue, "extraction_message",
+                                role="claude_text_delta", text=content, model=mgr_model_id)
 
                 # Tool call argument chunks — accumulate by index.
                 for tc_delta in (delta.get("tool_calls") or []):
@@ -1479,6 +1566,14 @@ async def _stream_manager_call(
                         tool_calls_map[idx]["function"]["name"] += fn["name"]
                     if fn.get("arguments"):
                         tool_calls_map[idx]["function"]["arguments"] += fn["arguments"]
+
+    except httpx.HTTPStatusError as _http_err:
+        # Fallback if somehow an HTTPStatusError still gets raised (shouldn't happen now)
+        logger.error(f"[quick_proposal] Unexpected HTTPStatusError: {_http_err}")
+        return {"error": {"message": f"Model returned {_http_err.response.status_code}: (unexpected error)"}}
+    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as _conn_err:
+        logger.error(f"[quick_proposal] manager stream connection error: {_conn_err}")
+        return {"error": {"message": f"Connection to model failed: {_conn_err}"}}
 
     # Inline <think> fallback — models that embed thinking in content rather than
     # a separate field. Emit as a single claude_thinking event (not streamed).
@@ -1512,7 +1607,22 @@ async def _stream_manager_call(
     }
 
 
-async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False) -> None:
+async def _fetch_context_window_async(chat_url: str, model_id: str) -> int:
+    """Try to get context window from Ollama /api/show. Returns 0 if unsupported or failed."""
+    base = re.sub(r'/v1(?:/.*)?$', '', chat_url)
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(f"{base}/api/show", json={"model": model_id})
+            if r.is_success:
+                ctx = (r.json().get("model_info") or {}).get("llama.context_length")
+                if ctx:
+                    return int(ctx)
+    except Exception:
+        pass
+    return 0
+
+
+async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False, session_id: str = "") -> None:
     """Phase 3: Manager LLM orchestrates Gemini extraction via send_to_gemini tool."""
     # Resolve manager endpoint — prefer the explicitly selected model, fall back to Anthropic endpoint.
     mgr_url = mgr_headers = mgr_api_key = mgr_model_id = None
@@ -1551,6 +1661,8 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     message="No manager endpoint found — add an endpoint in Settings",
                     phase="phase5")
         return
+
+    mgr_context_window = await _fetch_context_window_async(mgr_url, mgr_model_id) or 200000
 
     if gemini_model:
         found = _get_endpoint_for_model(gemini_model)
@@ -1620,10 +1732,10 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
 
     ctx_parts = ["Here is the Phase 1 classification index for this plan set:\n\n" + phase1_summary]
     if project_type_val:
-        ctx_parts.append(f"\nProject type (from Phase 0.5 / UI picker): {project_type_val}")
+        ctx_parts.append(f"\nProject type (from Phase 1 / UI picker): {project_type_val}")
     if plan_completeness_val:
         ctx_parts.append(
-            "\nPlan completeness scores (from Phase 1.5):\n"
+            "\nPlan completeness scores (from Phase 3):\n"
             + json.dumps(plan_completeness_val, indent=2)
         )
     if completeness_notes_val:
@@ -1644,7 +1756,6 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
     manager_system    = (_PROMPTS_DIR / "manager_system.txt").read_text(encoding="utf-8")
     system_prompt_txt = (_PROMPTS_DIR / "system_prompt.txt").read_text(encoding="utf-8")
     combined_system   = manager_system + "\n\n---\n\n" + system_prompt_txt
-
     send_to_gemini_tool = {
         "type": "function",
         "function": {
@@ -1769,6 +1880,8 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
         {"role": "user",      "content": "Here is the Phase 1 index from the plan set. Begin extraction.\n\n" + phase1_summary},
     ]
 
+
+
     if resume and index.extracted_values:
         already_done = json.dumps(index.extracted_values, indent=2)
         # Append to the last user message — inserting a new user message here would
@@ -1826,18 +1939,30 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                             role="claude", model=mgr_model_id,
                             input_tokens=usage.get("prompt_tokens", 0),
                             output_tokens=usage.get("completion_tokens", 0),
-                            context_window=200000)
+                            context_window=mgr_context_window)
 
             if text_content.strip():
                 await _emit(queue, "extraction_message", role="claude", text=text_content, model=mgr_model_id)
                 if log_path:
                     _log_phase3_event(log_path, {"type": "extraction_message", "role": "claude",
                                                   "text": text_content, "model": mgr_model_id})
+            else:
+                # No visible content (all tokens were in <think>/<thinking> blocks or whitespace).
+                # Signal the frontend to remove the live streaming bubble so it doesn't become stale.
+                await _emit(queue, "extraction_message", role="claude_text_end", model=mgr_model_id)
 
-            assistant_msg: dict = {"role": "assistant", "content": text_content or None}
+            assistant_msg: dict = {"role": "assistant"}
+            # Only include content if non-empty; Ollama's OpenAI-compat rejects null content
+            if text_content.strip():
+                assistant_msg["content"] = text_content
+            elif not tool_calls:
+                # If no tool calls and no text, still need some content (use empty string)
+                assistant_msg["content"] = ""
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
             mgr_messages.append(assistant_msg)
+            _save_chat_message(session_id, "assistant", text_content or "",
+                               {"tool_calls": tool_calls} if tool_calls else None)
 
             logger.info(f"[quick_proposal] manager finish_reason={finish_reason} output_tokens={usage.get('completion_tokens', '?')}")
 
@@ -1845,7 +1970,17 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                 logger.warning("[quick_proposal] manager output truncated (finish_reason=length) — sending continuation")
                 await _emit(queue, "extraction_message", role="claude",
                             text="*(output truncated — continuing…)*", model=mgr_model_id)
-                mgr_messages.append({"role": "user", "content": "Continue exactly where you left off. Do not repeat anything already written."})
+                _extraction_done = bool(index.extracted_values.get("extraction_complete"))
+                if _extraction_done:
+                    _nudge = (
+                        "Your proposal output was cut off mid-generation. "
+                        "Continue writing the proposal exactly where you left off — do not repeat anything already written. "
+                        "Once the full proposal is complete, call end_generation(grand_total) with the final Grand Total to finish the pipeline."
+                    )
+                else:
+                    _nudge = "Continue exactly where you left off. Do not repeat anything already written."
+                mgr_messages.append({"role": "user", "content": _nudge})
+                _save_chat_message(session_id, "user", _nudge, {"source": "pipeline_nudge"})
                 continue
 
             if not tool_calls:
@@ -1854,18 +1989,20 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     phase_b_nudges += 1
                     extraction_done = bool(index.extracted_values.get("extraction_complete"))
                     if not extraction_done:
-                        mgr_messages.append({"role": "user", "content": (
+                        _nudge_text = (
                             "Gemini has not yet called extraction_complete. "
                             "Use send_to_gemini to send your QC feedback or redirect to Gemini — "
                             "do not write instructions for Gemini as plain text. "
                             "All communication with Gemini must go through the send_to_gemini tool."
-                        )})
+                        )
                     else:
-                        mgr_messages.append({"role": "user", "content": (
+                        _nudge_text = (
                             "Generate the complete Phase B proposal if not already done, "
                             "then call end_generation(grand_total) with the final Grand Total "
                             "to complete the pipeline."
-                        )})
+                        )
+                    mgr_messages.append({"role": "user", "content": _nudge_text})
+                    _save_chat_message(session_id, "user", _nudge_text, {"source": "pipeline_nudge"})
                     continue
                 break
 
@@ -1883,17 +2020,26 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     if log_path:
                         _log_phase3_event(log_path, {"type": "extraction_message", "role": "claude_to_gemini",
                                                       "text": msg_text, "model": mgr_model_id})
+                    await _emit(queue, "extraction_message",
+                                role="tool_call", tool_id=tool_id, tool="send_to_gemini", model=mgr_model_id,
+                                args=json.dumps({"message": msg_text[:300]}))
                     gemini_resp = await _run_gemini_with_tools(
                         msg_text, gemini_state, index, queue,
                         retry_attempts=retry_attempts,
                         fallback_models_info=fallback_models_info or None,
+                        session_id=session_id,
                     )
+                    await _emit(queue, "extraction_message",
+                                role="tool_result", tool_id=tool_id, tool="send_to_gemini", model=mgr_model_id,
+                                result=gemini_resp or "(extraction complete)")
                     if gemini_resp.strip():
                         await _emit(queue, "extraction_message", role="gemini", text=gemini_resp)
                         if log_path:
                             _log_phase3_event(log_path, {"type": "extraction_message", "role": "gemini", "text": gemini_resp})
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id,
                                          "content": gemini_resp or "(extraction complete)"})
+                    _save_chat_message(session_id, "tool", gemini_resp or "(extraction complete)",
+                                       {"tool_call_id": tool_id, "tool_name": "send_to_gemini"})
                 elif tool_name == "read_index":
                     index_json = json.dumps(index.extracted_values, indent=2)
                     await _emit(queue, "extraction_message",
@@ -1904,6 +2050,8 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                         _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result",
                                                       "tool_id": tool_id, "tool": "read_index", "result": index_json})
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": index_json})
+                    _save_chat_message(session_id, "tool", index_json,
+                                       {"tool_call_id": tool_id, "tool_name": "read_index"})
                 elif tool_name == "kp_lookup":
                     item_query    = tool_input.get("item", "").strip()
                     lookup_result = _kp_lookup(index.knowledge_pack or {}, item_query)
@@ -1917,13 +2065,17 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                         _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result",
                                                       "tool_id": tool_id, "tool": "kp_lookup", "result": lookup_result})
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": lookup_result})
+                    _save_chat_message(session_id, "tool", lookup_result,
+                                       {"tool_call_id": tool_id, "tool_name": "kp_lookup"})
                 elif tool_name == "end_generation":
                     grand_total = tool_input.get("grand_total")
                     await _emit(queue, "grand_total", amount=grand_total, model=mgr_model_id)
                     if log_path:
                         _log_phase3_event(log_path, {"type": "grand_total", "amount": grand_total})
-                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id,
-                                         "content": f"Pipeline complete. Grand Total recorded: ${grand_total:,.2f}"})
+                    _end_content = f"Pipeline complete. Grand Total recorded: ${grand_total:,.2f}" if grand_total is not None else "Pipeline complete."
+                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": _end_content})
+                    _save_chat_message(session_id, "tool", _end_content,
+                                       {"tool_call_id": tool_id, "tool_name": "end_generation"})
                     phase_b_complete = True
                     break
                 else:
@@ -2008,6 +2160,7 @@ async def run_pipeline(
     holdout_kp_path: str = "",
     import_from_run_id: str = "",
     project_type: str = "",
+    session_id: str = "",
 ) -> None:
     _success = False
     try:
@@ -2054,7 +2207,7 @@ async def run_pipeline(
                     kp_path=kp_path_used)
         await _emit(queue, "phase_complete", phase="index")
 
-        # Step 2.5 — Write project_type if provided by UI picker; else run Phase 0.5 detection
+        # Step 2.5 — Write project_type if provided by UI picker; else run Phase 1 detection
         if project_type:
             index.extracted_values["project_type"] = {
                 "value": project_type, "source_bbox_id": None, "confidence": "high",
@@ -2123,10 +2276,11 @@ async def run_pipeline(
             await _emit(queue, "phase_complete", phase="phase2")
             logger.info(f"[quick_proposal] imported classifications from run {import_from_run_id}")
         else:
+            await _wait_for_gate(run_id, queue, "classify", "Classify Pages")
             await phase2_classify_pages(index, queue, model_override=gemini_model, retry_attempts=gemini_retry_attempts, fallback_models=gemini_fallback_models)
         _save_run_results(run_id, index)  # persist phase1 classifications + bboxes
 
-        # Step 3.5 — Build phase1_summary (needed by Phase 1.5), then gate → Phase 1.5
+        # Step 3.5 — Build phase1_summary (needed by Phase 3), then gate → Phase 3
         index.extracted_data["phase1_summary"] = _build_phase1_summary(index)
 
         await _wait_for_gate(run_id, queue, "phase2", "Completeness Scoring")
@@ -2146,7 +2300,7 @@ async def run_pipeline(
         await _wait_for_gate(run_id, queue, "phase3", "Extraction")
 
         # Step 5 — Phase 3: manager LLM + Gemini extraction tool loop
-        await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=gemini_retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path)
+        await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=gemini_retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, session_id=session_id)
         _success = True
 
     except BaseException as e:
@@ -2168,8 +2322,349 @@ async def run_pipeline(
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
-def setup_quick_proposal_routes():
+def _load_index_from_run(run_id: str):
+    """Reconstruct a ChatIndex from a completed run's results.json for phase-6 chat."""
+    from src.quick_proposal.index import ChatIndex, PageRecord, BboxRecord
+    results_path = Path(RUNS_DIR) / run_id / "results.json"
+    if not results_path.is_file():
+        return None
+    data = json.loads(results_path.read_text(encoding="utf-8"))
+
+    pages_dir = Path(RUNS_DIR) / run_id / "pages"
+    pages = [
+        PageRecord(
+            idx=p["idx"],
+            image_path=str(pages_dir / f"page_{p['idx']:04d}.jpg"),
+            classification=p.get("sheet_type", ""),
+            importance=p.get("importance", ""),
+            description=p.get("description", ""),
+            bbox_ids=p.get("bbox_ids", []),
+        )
+        for p in data.get("pages", [])
+    ]
+
+    bboxes = {
+        bid: BboxRecord(
+            id=rec["id"],
+            page_idx=rec["page_idx"],
+            x1=rec["x1"], y1=rec["y1"],
+            x2=rec["x2"], y2=rec["y2"],
+            parent_id=rec.get("parent_id"),
+            depth=rec.get("depth", 0),
+            description=rec.get("description", ""),
+            element_type=rec.get("element_type"),
+            element_subtype=rec.get("element_subtype"),
+            importance=rec.get("importance"),
+        )
+        for bid, rec in data.get("bboxes", {}).items()
+    }
+
+    index = ChatIndex(run_id=run_id)
+    index.pages = pages
+    index.bboxes = bboxes
+    index.extracted_values = data.get("extracted_values", {})
+    index.extracted_data = data.get("extracted_data", {})
+    index.knowledge_pack = _load_knowledge_pack(None)
+    return index
+
+
+async def _qp_continuation_task(
+    run_id: str,
+    session_id: str,
+    meta: dict,
+    user_message: str,
+    manager_model: str,
+    queue: asyncio.Queue,
+) -> None:
+    """Drive one user turn of phase-6 chat: load history, call manager, handle tools."""
+    from core.database import ChatMessage as DbChatMessage, SessionLocal as _SL
+
+    # Resolve manager endpoint (prefer override, fall back to meta, then Anthropic default).
+    mgr_url = mgr_headers = mgr_api_key = mgr_model_id = None
+    effective_model = manager_model or meta.get("manager_model", "")
+    if effective_model:
+        found = _get_endpoint_for_model(effective_model)
+        if found:
+            mgr_url, mgr_headers, mgr_api_key, mgr_model_id = found
+            mgr_url = _to_openai_compat_url(mgr_url)
+
+    if not mgr_url:
+        try:
+            db = _SL()
+            try:
+                ep = db.query(ModelEndpoint).filter(
+                    ModelEndpoint.base_url.ilike("%anthropic.com%")
+                ).first()
+                if ep:
+                    from src.endpoint_resolver import resolve_endpoint_runtime, build_chat_url, build_headers as _build_headers
+                    base, mgr_api_key = resolve_endpoint_runtime(ep)
+                    mgr_url      = build_chat_url(base)
+                    mgr_headers  = _build_headers(mgr_api_key, base)
+                    mgr_model_id = getattr(ep, "model", None) or _CLAUDE_MODEL
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"[qp_chat] could not load manager endpoint: {e}")
+    mgr_url      = mgr_url      or "https://api.anthropic.com/v1/chat/completions"
+    mgr_model_id = mgr_model_id or _CLAUDE_MODEL
+
+    # Load chat history from DB.
+    db = _SL()
+    try:
+        rows = db.query(DbChatMessage).filter(
+            DbChatMessage.session_id == session_id
+        ).order_by(DbChatMessage.timestamp).all()
+    finally:
+        db.close()
+
+    mgr_system = ""
+    mgr_messages: list = []
+    for row in rows:
+        meta_d = json.loads(row.meta_data) if row.meta_data else {}
+        if row.role == "system":
+            mgr_system = row.content
+            continue
+        msg: dict = {"role": row.role, "content": row.content or None}
+        if row.role == "assistant":
+            raw_tc = meta_d.get("tool_calls")
+            if raw_tc:
+                msg["tool_calls"] = raw_tc
+                msg["content"] = row.content or None
+        elif row.role == "tool":
+            msg["tool_call_id"] = meta_d.get("tool_call_id", "")
+        mgr_messages.append(msg)
+
+    # Append the new human turn.
+    mgr_messages.append({"role": "user", "content": user_message, "name": "user"})
+    _save_chat_message(session_id, "user", user_message, {"name": "user"})
+
+    # Reconstruct index + gemini_state for tool execution.
+    index = _load_index_from_run(run_id)
+    if index is None:
+        await _emit(queue, "error", message="Run results not found — cannot continue chat.", phase="phase6")
+        return
+
+    gemini_model = meta.get("gemini_model", "")
+    if gemini_model:
+        found = _get_endpoint_for_model(gemini_model)
+        if found:
+            gemini_url, gemini_headers, gemini_api_key, _unused = found
+        else:
+            gemini_url, gemini_headers, gemini_api_key, _unused = _get_gemini_endpoint()
+    else:
+        gemini_url, gemini_headers, gemini_api_key, gemini_model = _get_gemini_endpoint()
+
+    gemini_phase3_prompt = (_PROMPTS_DIR / "gemini_phase3.txt").read_text(encoding="utf-8")
+    image_store: dict = {}
+    for page in index.pages:
+        try:
+            image_store[f"p{page.idx}_thumbnail"] = {
+                "bytes": Path(page.image_path).read_bytes(),
+                "desc":  f"Page {page.idx} thumbnail",
+            }
+        except Exception:
+            pass
+
+    log_path = str(Path(RUNS_DIR) / run_id / "phase5_log.jsonl")
+    gemini_state: dict = {
+        "messages":    [{"role": "system", "content": gemini_phase3_prompt}],
+        "url":         gemini_url,
+        "headers":     gemini_headers,
+        "model":       gemini_model,
+        "cache_name":  None,
+        "log_path":    log_path,
+        "image_store": image_store,
+    }
+
+    all_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "send_to_gemini",
+                "description": "Sends a message to the Gemini extraction sub-agent and returns its response.",
+                "parameters": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_index",
+                "description": "Returns the current state of all extracted values in the shared index as JSON.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "kp_lookup",
+                "description": "Look up knowledge pack data on demand.",
+                "parameters": {"type": "object", "properties": {"item": {"type": "string"}}, "required": ["item"]},
+            },
+        },
+    ]
+
+    # Drive manager loop (up to 10 iterations for multi-step tool calls).
+    for _ in range(10):
+        oai_messages = [{"role": "system", "content": mgr_system}] + mgr_messages
+        payload = {"model": mgr_model_id, "max_tokens": 16000, "messages": oai_messages, "tools": all_tools}
+        resp = await _stream_manager_call(mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path)
+
+        if "error" in resp:
+            await _emit(queue, "error", message=resp.get("error", {}).get("message", str(resp)), phase="phase6")
+            return
+
+        choice        = resp.get("choices", [{}])[0]
+        msg           = choice.get("message", {})
+        text_content  = msg.get("content") or ""
+        tool_calls    = msg.get("tool_calls") or []
+
+        if text_content.strip():
+            await _emit(queue, "extraction_message", role="claude", text=text_content, model=mgr_model_id)
+
+        assistant_msg: dict = {"role": "assistant", "content": text_content or None}
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+        mgr_messages.append(assistant_msg)
+        _save_chat_message(session_id, "assistant", text_content or "",
+                           {"tool_calls": tool_calls} if tool_calls else None)
+
+        if not tool_calls:
+            break
+
+        for tc in tool_calls:
+            tool_id   = tc.get("id", "")
+            tool_name = tc.get("function", {}).get("name", "")
+            try:
+                tool_input = json.loads(tc.get("function", {}).get("arguments", "{}"))
+            except json.JSONDecodeError:
+                tool_input = {}
+
+            if tool_name == "send_to_gemini":
+                msg_text = tool_input.get("message", "")
+                await _emit(queue, "extraction_message", role="claude_to_gemini", text=msg_text, model=mgr_model_id)
+                await _emit(queue, "extraction_message",
+                            role="tool_call", tool_id=tool_id, tool="send_to_gemini", model=mgr_model_id,
+                            args=json.dumps({"message": msg_text[:300]}))
+                gemini_resp = await _run_gemini_with_tools(msg_text, gemini_state, index, queue, session_id=session_id)
+                await _emit(queue, "extraction_message",
+                            role="tool_result", tool_id=tool_id, tool="send_to_gemini", model=mgr_model_id,
+                            result=gemini_resp or "(no response)")
+                if gemini_resp.strip():
+                    await _emit(queue, "extraction_message", role="gemini", text=gemini_resp)
+                result = gemini_resp or "(no response)"
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "send_to_gemini"})
+            elif tool_name == "read_index":
+                result = json.dumps(index.extracted_values, indent=2)
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "read_index"})
+            elif tool_name == "kp_lookup":
+                item_query = tool_input.get("item", "").strip()
+                result = _kp_lookup(index.knowledge_pack or {}, item_query)
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "kp_lookup"})
+            else:
+                result = f"Unknown tool: {tool_name}"
+            mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": result})
+
+    await _emit(queue, "phase_complete", phase="phase6")
+
+
+def setup_quick_proposal_routes(session_manager=None):
+    global _session_manager
+    _session_manager = session_manager
     router = APIRouter(prefix="/api/quick_proposal", tags=["quick_proposal"])
+
+    @router.post("/start-proposal-session")
+    async def start_proposal_session(req: RunRequest, request: Request):
+        """Create a real chat Session linked to a QP run, then start the pipeline.
+
+        Returns {session_id, run_id}. The frontend navigates to #<session_id>
+        and opens the SSE stream on /stream/<run_id> as usual.
+        """
+        from src.auth_helpers import effective_user
+        if session_manager is None:
+            raise HTTPException(status_code=500, detail="session_manager not available")
+
+        run_id     = str(uuid.uuid4())
+        session_id = str(uuid.uuid4())
+        owner      = effective_user(request)
+
+        os.makedirs(os.path.join(RUNS_DIR, run_id, "pages"), exist_ok=True)
+        _save_run_meta(
+            run_id,
+            id=run_id,
+            session_id=session_id,
+            upload_id=req.upload_id,
+            filename=req.filename or req.upload_id,
+            run_name=req.run_name,
+            notes=req.notes,
+            timestamp=int(time.time()),
+            status="running",
+            holdout_kp_path=req.holdout_kp_path or "",
+            gemini_model=req.gemini_model or "",
+            manager_model=req.manager_model or "",
+        )
+
+        # Resolve manager endpoint for session model/url metadata.
+        mgr_url = mgr_model_id = None
+        if req.manager_model:
+            found = _get_endpoint_for_model(req.manager_model)
+            if found:
+                mgr_url, _, _, mgr_model_id = found
+                mgr_url = _to_openai_compat_url(mgr_url)
+        if not mgr_url:
+            try:
+                db = SessionLocal()
+                try:
+                    ep = db.query(ModelEndpoint).filter(
+                        ModelEndpoint.base_url.ilike("%anthropic.com%")
+                    ).first()
+                    if ep:
+                        from src.endpoint_resolver import resolve_endpoint_runtime, build_chat_url
+                        base, _ = resolve_endpoint_runtime(ep)
+                        mgr_url      = build_chat_url(base)
+                        mgr_model_id = getattr(ep, "model", None) or _CLAUDE_MODEL
+                finally:
+                    db.close()
+            except Exception:
+                pass
+        mgr_url      = mgr_url      or "https://api.anthropic.com/v1/chat/completions"
+        mgr_model_id = mgr_model_id or _CLAUDE_MODEL
+
+        session_manager.create_session(
+            session_id,
+            name=req.run_name or req.filename or req.upload_id,
+            endpoint_url=mgr_url,
+            model=mgr_model_id,
+            owner=owner,
+        )
+
+        # Stamp proposal_run_id on the DB row so the frontend can detect proposal sessions.
+        db = SessionLocal()
+        try:
+            row = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if row:
+                row.proposal_run_id = run_id
+                db.commit()
+        finally:
+            db.close()
+
+        queue: asyncio.Queue = asyncio.Queue()
+        _active_runs[run_id] = queue
+
+        task = asyncio.create_task(run_pipeline(
+            run_id, req.upload_id, queue,
+            notes=req.notes,
+            selected_jobs=req.selected_jobs or None,
+            gemini_model=req.gemini_model,
+            manager_model=req.manager_model,
+            gemini_retry_attempts=req.gemini_retry_attempts,
+            gemini_fallback_models=req.gemini_fallback_models or None,
+            holdout_kp_path=req.holdout_kp_path,
+            import_from_run_id=req.import_from_run_id,
+            project_type=req.project_type,
+            session_id=session_id,
+        ))
+        _active_tasks[run_id] = task
+        return {"session_id": session_id, "run_id": run_id}
 
     @router.post("/run")
     async def start_run(req: RunRequest):
@@ -2238,9 +2733,21 @@ def setup_quick_proposal_routes():
         if not meta_path.is_file():
             raise HTTPException(status_code=404, detail="Run not found")
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        status = meta.get("status", "unknown")
+        # If meta says running but no active queue exists (server restart), auto-correct.
+        if status == "running" and run_id not in _active_runs:
+            results_path = Path(RUNS_DIR) / run_id / "results.json"
+            if results_path.is_file():
+                results = json.loads(results_path.read_text(encoding="utf-8"))
+                ev = results.get("extracted_values") or {}
+                corrected = "complete" if any(k not in ("project_type", "plan_completeness", "completeness_notes", "extraction_complete") for k in ev) else "cancelled"
+            else:
+                corrected = "cancelled"
+            _save_run_meta(run_id, status=corrected)
+            status = corrected
         return {
             "run_id":    run_id,
-            "status":    meta.get("status", "unknown"),
+            "status":    status,
             "filename":  meta.get("filename", ""),
             "timestamp": meta.get("timestamp", 0),
         }
@@ -2467,11 +2974,40 @@ def setup_quick_proposal_routes():
                 if key in saved_ev:
                     index.extracted_values[key] = saved_ev[key]
 
+        # Write the starting extracted_values to disk immediately so the frontend
+        # seed fetch (which runs right after this request returns) sees the correct
+        # state rather than stale values from the previous run.
+        results["extracted_values"] = dict(index.extracted_values)
+        results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+
+        session_id = meta.get("session_id", "")
+
+        # On a fresh rerun (not resume), wipe the session's chat history so a
+        # hard refresh shows only the new run's messages — not all prior runs'.
+        if not req.resume and session_id:
+            from core.database import ChatMessage as _DbMsg, SessionLocal as _SL2
+            _db2 = _SL2()
+            try:
+                _db2.query(_DbMsg).filter(_DbMsg.session_id == session_id).delete()
+                _db2.commit()
+            except Exception as _e:
+                logger.warning(f"[quick_proposal] failed to clear session messages before rerun: {_e}")
+                _db2.rollback()
+            finally:
+                _db2.close()
+            if _session_manager is not None:
+                try:
+                    sess = _session_manager.get_session(session_id)
+                    if sess:
+                        sess.history = []
+                except Exception:
+                    pass
+
         queue: asyncio.Queue = asyncio.Queue()
         _active_runs[run_id] = queue
         _save_run_meta(run_id, status="running")
 
-        task = asyncio.create_task(_run_phase5_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None, holdout_kp_path=req.holdout_kp_path, resume=req.resume, completeness_only=req.completeness_only))
+        task = asyncio.create_task(_run_phase5_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None, holdout_kp_path=req.holdout_kp_path, resume=req.resume, completeness_only=req.completeness_only, session_id=session_id))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
 
@@ -2632,6 +3168,69 @@ def setup_quick_proposal_routes():
             while True:
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield ":\n\n"
+                    continue
+                if item is None:
+                    break
+                yield f"event: {item['type']}\ndata: {json.dumps(item)}\n\n"
+
+        return StreamingResponse(
+            sse_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.get("/runs/{run_id}/status")
+    async def get_run_status(run_id: str):
+        meta_path = Path(RUNS_DIR) / run_id / "meta.json"
+        if not meta_path.is_file():
+            raise HTTPException(404, f"Run {run_id} not found")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        return {"run_id": run_id, "status": meta.get("status", "unknown"), "session_id": meta.get("session_id", "")}
+
+    @router.get("/runs/{run_id}/results")
+    async def get_run_results(run_id: str):
+        results_path = Path(RUNS_DIR) / run_id / "results.json"
+        if not results_path.is_file():
+            raise HTTPException(404, f"Results not found for run {run_id}")
+        return json.loads(results_path.read_text(encoding="utf-8"))
+
+    @router.post("/runs/{run_id}/chat-stream")
+    async def qp_chat_continuation(run_id: str, req: QPContinuationRequest, request: Request):
+        """Phase-6 chat: continue conversing with the manager after extraction completes."""
+        meta_path = Path(RUNS_DIR) / run_id / "meta.json"
+        if not meta_path.is_file():
+            raise HTTPException(404, f"Run {run_id} not found")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        session_id = meta.get("session_id", "")
+        if not session_id:
+            raise HTTPException(400, "Run has no linked session — use /start-proposal-session")
+
+        cont_queue: asyncio.Queue = asyncio.Queue()
+
+        async def _run():
+            try:
+                await _qp_continuation_task(
+                    run_id=run_id,
+                    session_id=session_id,
+                    meta=meta,
+                    user_message=req.message,
+                    manager_model=req.manager_model,
+                    queue=cont_queue,
+                )
+            except Exception as e:
+                logger.error(f"[qp_chat] continuation error run={run_id}: {e}", exc_info=True)
+                await _emit(cont_queue, "error", message=str(e), phase="phase6")
+            finally:
+                await cont_queue.put(None)
+
+        asyncio.create_task(_run())
+
+        async def sse_generator():
+            while True:
+                try:
+                    item = await asyncio.wait_for(cont_queue.get(), timeout=60.0)
                 except asyncio.TimeoutError:
                     yield ":\n\n"
                     continue

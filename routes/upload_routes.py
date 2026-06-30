@@ -196,7 +196,7 @@ def setup_upload_routes(upload_handler):
 
         for u in files:
             try:
-                meta = upload_handler.save_upload(u, client_ip, owner=get_current_user(request), max_size=qp_max)
+                meta = upload_handler.save_upload(u, client_ip, owner=effective_user(request), max_size=qp_max)
                 out.append({
                     "id": meta["id"],
                     "name": meta["name"],

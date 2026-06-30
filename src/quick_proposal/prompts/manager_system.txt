@@ -45,7 +45,7 @@ kp_lookup(item)
 
 STEP 0: Read project_type and plan_completeness from the index.
   Call read_index() first. Extract:
-    - project_type          (set by Phase 0.5 or UI picker)
+    - project_type          (set by Phase 1 or UI picker)
     - lot_count_applicable  (true for residential, false for commercial/rural)
     - building_count        (integer or null — for commercial jobs)
     - plan_completeness     (object with per-category scores: present/partial/absent)
@@ -115,7 +115,7 @@ Instruct Gemini to:
 Start by calling send_to_gemini with a message that:
 1. Tells Gemini which pages are high-importance (from Phase 1 index) and which sheet types
    they contain — so Gemini knows where to begin.
-2. States the project_type and any completeness notes from Phase 1.5 as context:
+2. States the project_type and any completeness notes from Phase 3 as context:
    - For categories scored "absent" in plan_completeness: tell Gemini NOT to spend time
      looking for those sheets (e.g. "Grading_Earthwork scored absent — no grading plan found,
      skip earthwork sheet search").
@@ -151,7 +151,7 @@ CRITICAL (block Phase B if missing):
                              (for rural, "none" entries are valid — do not re-request)
   5.  ROW_width_ft         — array of objects with 'roads' list and 'width'
   6.  stripping_depth_in   — integer or null-confirmed
-  7.  project_type         — read from index (set by Phase 0.5 or UI picker); if absent, default to residential_subdivision
+  7.  project_type         — read from index (set by Phase 1 or UI picker); if absent, default to residential_subdivision
 
 IMPORTANT (request if not present, but do not block Phase B if confirmed absent):
   8.  sewer_main_LF

@@ -103,6 +103,14 @@ except Exception as e:
 
 logger = logging.getLogger(__name__)
 
+class _WarmupFilter(logging.Filter):
+    """Drop httpx request logs for the keepalive model-probe URLs."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not (":11434/" in msg or ":1234/" in msg or "/v1/models" in msg)
+
+logging.getLogger("httpx").addFilter(_WarmupFilter())
+
 # ========= APP =========
 # Lifespan is defined below (after all helpers it references are in scope)
 # and passed to FastAPI so we can use the modern context-manager lifecycle
@@ -719,7 +727,7 @@ app.include_router(setup_compare_routes(session_manager))
 
 # Quick Proposal
 from routes.quick_proposal_routes import setup_quick_proposal_routes
-app.include_router(setup_quick_proposal_routes())
+app.include_router(setup_quick_proposal_routes(session_manager=session_manager))
 
 # User Preferences
 from routes.prefs_routes import setup_prefs_routes
@@ -997,7 +1005,7 @@ async def _startup_event():
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as client:
                         await client.get(url)
-                    logger.info(f"Warmup ping OK: {url}")
+                    logger.debug(f"Warmup ping OK: {url}")
                 except Exception as e:
                     logger.debug(f"Warmup ping failed for endpoint: {e}")
         except Exception as e:

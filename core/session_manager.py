@@ -76,9 +76,13 @@ class SessionManager:
         """
         db = SessionLocal()
         try:
+            from sqlalchemy import or_
             db_sessions = db.query(DbSession).filter(
                 DbSession.archived == False,
-                DbSession.message_count > 0,
+                or_(
+                    DbSession.message_count > 0,
+                    DbSession.proposal_run_id.isnot(None),
+                ),
             ).order_by(DbSession.last_accessed.desc()).limit(100).all()
 
             loaded_count = 0

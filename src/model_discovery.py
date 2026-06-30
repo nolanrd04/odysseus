@@ -192,7 +192,7 @@ class ModelDiscovery:
         hosts = self._get_hosts()
         items = []
 
-        logger.info(f"Scanning {len(hosts)} hosts for models: {hosts}")
+        logger.debug(f"Scanning {len(hosts)} hosts for models: {hosts}")
 
         # Well-known ports: 8000-8020 (vLLM, llama.cpp, SGLang, Cookbook),
         # 1234 (LM Studio), 11434 (Ollama), 11435 for APFEL as its default port is
@@ -218,7 +218,7 @@ class ModelDiscovery:
         # Sort by host then port for consistent ordering
         items.sort(key=lambda x: (x["host"], x["port"]))
 
-        logger.info(
+        logger.debug(
             f"Discovered {len(items)} model endpoints across {len(hosts)} hosts"
         )
         return {"hosts": hosts, "items": items}

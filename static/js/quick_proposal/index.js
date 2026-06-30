@@ -1,4 +1,4 @@
-import { buildPanel, buildRunsPanel, buildViewPanel, buildPromptsPanel } from './ui.js';
+import { buildPanel, buildRunsPanel, buildViewPanel, buildPromptsPanel, appendExtractionMessage, loadModels } from './ui.js';
 
 let _savedChildren = [];
 let _currentPanel  = null;
@@ -85,4 +85,4 @@ document.getElementById('qp-new-proposal-btn')?.addEventListener('click', open);
 document.getElementById('qp-runs-btn')?.addEventListener('click', openRuns);
 document.getElementById('qp-prompts-btn')?.addEventListener('click', openPrompts);
 
-window.quickProposalModule = { open, close };
+window.quickProposalModule = { open, close, appendExtractionMessage, loadModels };
