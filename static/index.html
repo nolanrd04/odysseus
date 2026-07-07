@@ -1034,7 +1034,6 @@
     })();
     </script>
     <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
-    <div id="qp-pipeline-panel" style="display:none"></div>
 
     <!-- Attachments strip -->
     <div id="attach-strip" class="attach-strip"></div>
@@ -1278,6 +1277,12 @@
 
 
   </main>
+
+  <!-- Quick Proposal pipeline panel — docked right of the chat area, body-level
+       flex sibling like the sidebar, so the chat is sandwiched between the two.
+       Shown only for proposal sessions (sessions.js hides it otherwise);
+       populated by chat.js. -->
+  <aside id="qp-pipeline-panel" style="display:none" aria-label="Proposal pipeline"></aside>
   <button id="scroll-bottom-btn" class="scroll-nav-btn" title="Scroll to bottom">▼</button>
   <script nonce="{{CSP_NONCE}}">
   (function(){

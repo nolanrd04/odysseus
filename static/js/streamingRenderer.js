@@ -34,6 +34,36 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   let tailShownLen = 0; // rendered-text length of the live tail (drives token fade)
   let appendMode = null; // { codeText: Text, appendedLen } while an open fence streams
   let degraded = !ENABLED; // true once we fall back to full re-render
+  // A blank-line-free block (a growing GFM table, a long unfenced list, ...)
+  // never produces a freeze boundary until it closes, so it stays the "live
+  // tail" for its entire streaming duration. Without coalescing, that means a
+  // full render() + DOM rebuild of the whole (ever-larger) tail on every
+  // single token — real O(n^2) work that can stall the tab for many seconds
+  // on a large table long before the model is actually done. Batching to at
+  // most once per animation frame bounds render() calls by wall-clock time
+  // instead of token count, with no change to what eventually gets shown.
+  let tailRaf = null;
+
+  function cancelScheduledTail() {
+    if (tailRaf !== null) {
+      cancelAnimationFrame(tailRaf);
+      tailRaf = null;
+    }
+  }
+
+  function scheduleRenderTail() {
+    if (tailRaf !== null) return; // a frame is already queued; it reads current state when it fires
+    tailRaf = requestAnimationFrame(() => {
+      tailRaf = null;
+      try {
+        renderTail(lastText.slice(committedLen));
+      } catch (err) {
+        degraded = true;
+        console.error('streamingRenderer: falling back to full render', err);
+        fullRender(lastText);
+      }
+    });
+  }
 
   function start() {
     contentEl.textContent = '';
@@ -47,6 +77,7 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   }
 
   function clearTail() {
+    if (!tailMarker) return;
     while (tailMarker.nextSibling) tailMarker.nextSibling.remove();
   }
 
@@ -148,6 +179,7 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   function update(fullText) {
     lastText = fullText;
     if (degraded) {
+      cancelScheduledTail();
       fullRender(fullText);
       return;
     }
@@ -171,8 +203,9 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
         appendMode = null; // whatever was streaming is now frozen
         tailShownLen = 0;
       }
-      renderTail(fullText.slice(committedLen));
+      scheduleRenderTail();
     } catch (err) {
+      cancelScheduledTail();
       degraded = true;
       console.error('streamingRenderer: falling back to full render', err);
       fullRender(fullText);
@@ -185,6 +218,7 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   // reasons and so doesn't call this, but it completes the renderer's lifecycle and
   // is exercised by the tests.
   function finalize() {
+    cancelScheduledTail();
     if (degraded) return;
     try {
       if (!started) start();

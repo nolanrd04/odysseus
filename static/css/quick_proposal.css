@@ -1,17 +1,86 @@
+/* Docked right panel — body-level flex sibling of the sidebar and chat area,
+   so the chat sits sandwiched between the two. Mirrors .sidebar behavior
+   (width transition, drag-resize, collapse), but collapses to a slim expand
+   strip instead of relying on an external hamburger. Inline display:none
+   (set by sessions.js/chat.js) governs whether it applies at all — proposal
+   sessions only. */
 #qp-pipeline-panel {
-  position: fixed;
-  top: 30px;
-  bottom: 80px;
-  left: 240px;
   width: 280px;
+  flex-shrink: 0;
+  min-height: 0;
   overflow: hidden;
-  z-index: 50;
+  position: relative;
   background: var(--sidebar-bg, var(--panel, #1a1d23));
-  border-right: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-left: 1px solid var(--border, rgba(255,255,255,0.08));
   display: flex;
   flex-direction: column;
   font-size: 12px;
+  transition: width 0.25s ease, opacity 0.2s ease;
 }
+#qp-pipeline-panel.resizing {
+  transition: none;
+  user-select: none;
+}
+#qp-pipeline-panel.collapsed {
+  /* !important beats the inline width restored from storage, same trick as
+     .sidebar.hidden — lets the width animate down instead of snapping. */
+  width: 22px !important;
+}
+#qp-pipeline-panel.collapsed > :not(.qp-panel-expand-strip) { display: none; }
+
+.qp-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
+  flex-shrink: 0;
+}
+.qp-panel-title {
+  flex: 1;
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.qp-panel-toggle-btn {
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: none; padding: 2px;
+  color: var(--fg); opacity: 0.55; cursor: pointer;
+  border-radius: 4px;
+}
+.qp-panel-toggle-btn:hover { opacity: 1; background: color-mix(in srgb, var(--fg) 8%, transparent); }
+
+/* Slim strip shown while collapsed — click to expand */
+.qp-panel-expand-strip {
+  display: none;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  background: none; border: none; padding: 0;
+  color: var(--fg); opacity: 0.45; cursor: pointer;
+  width: 100%;
+}
+.qp-panel-expand-strip:hover { opacity: 1; background: color-mix(in srgb, var(--fg) 6%, transparent); }
+#qp-pipeline-panel.collapsed .qp-panel-expand-strip { display: flex; }
+
+/* Drag left edge to resize — same pattern as .sidebar-resize-handle */
+.qp-panel-resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 5px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+  background: transparent;
+}
+.qp-panel-resize-handle:hover,
+.qp-panel-resize-handle.dragging {
+  background: var(--accent, #0af);
+  opacity: 0.6;
+}
+#qp-pipeline-panel.collapsed .qp-panel-resize-handle { display: none; }
 
 .qp-classify-editor {
     position: fixed;
@@ -597,6 +666,13 @@ details[open] > .qp-chat-classify-sub-summary::before { content: '\25BE '; }
 .qp-chat-phase-check {
     font-size: 10px; font-weight: 700;
     color: #22c55e;
+    width: 11px;
+    flex-shrink: 0;
+    text-align: center;
+}
+.qp-chat-phase-x {
+    font-size: 10px; font-weight: 700;
+    color: var(--red, #e06c75);
     width: 11px;
     flex-shrink: 0;
     text-align: center;

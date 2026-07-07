@@ -14,6 +14,9 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 
+from src.chat_attachment_blobs import externalize_blobs as _externalize_blobs
+from src.chat_attachment_blobs import reinline_blobs as _reinline_blobs
+from src.chat_attachment_blobs import cleanup_blobs_for_messages as _cleanup_blobs_for_messages
 from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal, utcnow_naive
 from .models import Session, ChatMessage
 
@@ -41,7 +44,7 @@ def _parse_msg_content(raw):
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, list) and all(isinstance(p, dict) for p in parsed):
-                return parsed
+                return _reinline_blobs(parsed)
         except (json.JSONDecodeError, ValueError):
             pass
     return raw
@@ -233,7 +236,7 @@ class SessionManager:
             # detects the JSON-array prefix and parses it back.
             _content = message.content
             if isinstance(_content, list):
-                _content = json.dumps(_content)
+                _content = json.dumps(_externalize_blobs(_content, msg_id))
             db_message = DbChatMessage(
                 id=msg_id,
                 session_id=session_id,
@@ -282,9 +285,12 @@ class SessionManager:
             ).order_by(DbChatMessage.timestamp).all()
 
             deleted = 0
+            removed_ids = []
             for msg in db_messages[keep_count:]:
+                removed_ids.append(msg.id)
                 db.delete(msg)
                 deleted += 1
+            _cleanup_blobs_for_messages(removed_ids)
 
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
             if db_session:
@@ -315,7 +321,12 @@ class SessionManager:
         session = self.get_session(session_id)
         db = SessionLocal()
         try:
+            old_ids = [
+                row[0] for row in
+                db.query(DbChatMessage.id).filter(DbChatMessage.session_id == session_id).all()
+            ]
             db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).delete()
+            _cleanup_blobs_for_messages(old_ids)
             now = datetime.now(timezone.utc)
             for i, message in enumerate(messages):
                 msg_id = str(uuid.uuid4())
@@ -329,7 +340,7 @@ class SessionManager:
                     # bind its single-quoted repr, which _parse_msg_content
                     # cannot parse (it looks for double-quoted "type"), so the
                     # attachment was destroyed on reload. Mirrors _persist_message.
-                    content=(json.dumps(message.content)
+                    content=(json.dumps(_externalize_blobs(message.content, msg_id))
                              if isinstance(message.content, list)
                              else message.content),
                     meta_data=json.dumps(message.metadata) if message.metadata else None,
@@ -516,7 +527,12 @@ class SessionManager:
             )
 
             # Delete messages
+            msg_ids = [
+                row[0] for row in
+                db.query(DbChatMessage.id).filter(DbChatMessage.session_id == session_id).all()
+            ]
             db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).delete()
+            _cleanup_blobs_for_messages(msg_ids)
 
             # Delete session
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()

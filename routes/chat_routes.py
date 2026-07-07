@@ -1447,6 +1447,18 @@ def setup_chat_routes(
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
         stopped = agent_runs.stop(session_id)
+        # Proposal follow-ups route through a separate detached task
+        # (quick_proposal_routes.qp_chat_continuation) that agent_runs knows
+        # nothing about — without this, Stop only cleared the client-side
+        # bubble while the manager kept generating server-side.
+        try:
+            sess = session_manager.get_session(session_id)
+            run_id = getattr(sess, "proposal_run_id", None) if sess else None
+            if run_id:
+                from routes.quick_proposal_routes import _cancel_continuation
+                stopped = await _cancel_continuation(run_id) or stopped
+        except Exception:
+            logger.warning("chat_stop: failed to cancel proposal continuation for %s", session_id, exc_info=True)
         return {"stopped": stopped}
 
     # ------------------------------------------------------------------ #
@@ -1464,6 +1476,21 @@ def setup_chat_routes(
         if rec is None:
             if agent_runs.is_active(session_id):
                 return {"status": "streaming", "detached": True}
+            # Proposal follow-ups route through a separate detached task
+            # (quick_proposal_routes.qp_chat_continuation) that agent_runs
+            # knows nothing about — without this, a dropped connection during
+            # a still-running phase-6 turn (network blip, backgrounded tab)
+            # looked identical to "nothing running" and never recovered on
+            # its own. See TODO_GG.
+            try:
+                sess = session_manager.get_session(session_id)
+                run_id = getattr(sess, "proposal_run_id", None) if sess else None
+                if run_id:
+                    from routes.quick_proposal_routes import is_continuation_active
+                    if is_continuation_active(run_id):
+                        return {"status": "streaming", "detached": True}
+            except Exception:
+                logger.warning("chat_stream_status: failed to check proposal continuation for %s", session_id, exc_info=True)
             raise HTTPException(404, "No active stream for this session")
         return rec
 

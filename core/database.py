@@ -3,7 +3,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, Float, ForeignKey, JSON, Index, func, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -256,6 +256,35 @@ class DocumentVersion(Base):
     created_at     = Column(DateTime, default=utcnow_naive)
 
     document = relationship("Document", back_populates="versions")
+
+
+class QpGeneration(Base):
+    """Immutable snapshot of one Quick Proposal extraction+proposal attempt for a run.
+
+    Reruns of the same run_id (`POST /runs/{run_id}/phase5`, non-resume) intentionally
+    overwrite results.json and wipe the session's chat history in place — this table is
+    where each attempt survives instead, so past generations can be compared against real
+    bid actuals later (proposal-vs-actual tracking across test reruns).
+    """
+    __tablename__ = "qp_generations"
+
+    id                = Column(String, primary_key=True, index=True)
+    run_id            = Column(String, nullable=False, index=True)
+    session_id        = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    generation_index  = Column(Integer, nullable=False)  # 1, 2, 3... per run_id, in creation order
+    manager_model     = Column(String, nullable=True)
+    gemini_model      = Column(String, nullable=True)
+    holdout_kp_path   = Column(String, nullable=True)
+    grand_total       = Column(Float, nullable=True)
+    results_snapshot  = Column(JSON, nullable=True)   # full results.json content at completion
+    messages_snapshot = Column(JSON, nullable=True)   # serialized ChatMessage rows for this generation
+    created_at        = Column(DateTime, default=utcnow_naive, nullable=False)
+
+    session = relationship("Session", backref=backref("qp_generations", cascade="save-update, merge"))
+
+    __table_args__ = (
+        Index('ix_qp_generations_run', 'run_id', 'generation_index'),
+    )
 
 
 class GalleryAlbum(TimestampMixin, Base):
@@ -1841,6 +1870,60 @@ def init_db():
     _migrate_encrypt_endpoint_keys()
     _migrate_backfill_task_folders()
     _migrate_add_proposal_run_id_column()
+    _migrate_externalize_chat_attachment_blobs()
+
+
+def _migrate_externalize_chat_attachment_blobs():
+    """One-time (idempotent) pass to move inline base64 image/audio attachments
+    already sitting in chat_messages.content out to files on disk, mirroring
+    what SessionManager._persist_message now does on every new write. Existing
+    rows from before that change can be tens of MB each (a multi-page PDF
+    upload embeds one base64 image per page), which is what made every FTS
+    backfill/startup pass slow. Re-running finds nothing to do (no more rows
+    matching the base64 pattern) so this is cheap after the first pass."""
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    import json
+    try:
+        from src.chat_attachment_blobs import externalize_blobs as _externalize_blobs
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"attachment blob externalization skipped (import failed): {e}")
+        return
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT id, content FROM chat_messages "
+                "WHERE content LIKE '[%' AND content LIKE '%;base64,%'"
+            )).fetchall()
+            migrated = 0
+            for msg_id, content_str in rows:
+                try:
+                    content = json.loads(content_str)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if not isinstance(content, list):
+                    continue
+                new_content = _externalize_blobs(content, msg_id)
+                if new_content != content:
+                    conn.execute(
+                        text("UPDATE chat_messages SET content = :c WHERE id = :id"),
+                        {"c": json.dumps(new_content), "id": msg_id},
+                    )
+                    migrated += 1
+            if migrated:
+                conn.commit()
+                logging.getLogger(__name__).info(
+                    f"Externalized inline attachment blobs on {migrated} chat_messages row(s)")
+                # The FTS5 index doesn't shrink when indexed content shrinks —
+                # it just marks old segments stale. Compact them now so the
+                # freed space is reclaimable by a subsequent VACUUM.
+                try:
+                    conn.execute(text("INSERT INTO chat_messages_fts(chat_messages_fts) VALUES('optimize')"))
+                    conn.commit()
+                except Exception as e:
+                    logging.getLogger(__name__).warning(f"chat_messages_fts optimize skipped: {e}")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"attachment blob externalization migration failed: {e}")
 
 
 def _migrate_add_proposal_run_id_column():
@@ -1927,6 +2010,17 @@ def _migrate_chat_messages_fts():
             END;
             """
         )
+        # Fast path: the triggers keep chat_messages_fts in lockstep with
+        # chat_messages on every insert/update/delete, so in steady state the
+        # row counts already match and there is nothing to backfill. Skip the
+        # full-table anti-join below in that case — on a DB with large
+        # attachment-bearing rows, that scan alone was taking minutes on every
+        # boot for zero rows actually inserted.
+        (n_messages,) = conn.execute("SELECT COUNT(*) FROM chat_messages").fetchone()
+        (n_fts,) = conn.execute("SELECT COUNT(*) FROM chat_messages_fts").fetchone()
+        if n_messages == n_fts:
+            conn.commit()
+            return
         conn.execute(
             """
             INSERT INTO chat_messages_fts(content, message_id, session_id, role)

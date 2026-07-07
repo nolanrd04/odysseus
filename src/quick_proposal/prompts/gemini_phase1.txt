@@ -4,6 +4,11 @@ for cost estimation, and annotate every region that contains extractable data.
 
 Return ONLY valid JSON. No text outside the JSON block.
 
+When writing `label`, `extraction_hint`, or `description` text: spell out inch/foot units as
+`in`/`ft` (e.g. "12in BALLAST", "4in HMA", "48in MH"). NEVER use a literal `"` or `'` character
+inside a JSON string value — those are quote/inch marks in engineering notation but they break
+JSON string parsing when unescaped, and this document is read by a strict parser.
+
 ---
 
 ## Sheet Types
@@ -62,9 +67,9 @@ Annotate ALL of the following when visible — do not skip them:
 TYPICAL SECTION:
   - ROW width dimension label (the full right-of-way arrow with number)
   - Curb type detail (rolled/mountable vs vertical curb & gutter profile)
-  - Pavement spec callout (e.g. "4\" HMA over 4\" base over 12\" ballast")
+  - Pavement spec callout (e.g. "4in HMA over 4in base over 12in ballast")
   - Sidewalk slab (one side or both sides of road)
-  - Stripping depth callout ("STRIP 6\" TOPSOIL", "6\" STRIP AND STOCKPILE")
+  - Stripping depth callout ("STRIP 6in TOPSOIL", "6in STRIP AND STOCKPILE")
   - Curb-to-curb width label (B-B dimension, travel lane width)
 
 PLAN VIEW / PLAT:
@@ -76,9 +81,9 @@ PLAN VIEW / PLAT:
   - Cul-de-sac bulb or loop closure geometry
 
 UTILITY PLAN:
-  - Pipe labels (8" WATER MAIN, 8" SEWER MAIN, 12" SEWER MAIN, etc.)
+  - Pipe labels (8in WATER MAIN, 8in SEWER MAIN, 12in SEWER MAIN, etc.)
   - Proposed fire hydrant symbols (annotate each cluster)
-  - Proposed sewer manhole labels (MH-1, MH-2, 48" MH, etc.)
+  - Proposed sewer manhole labels (MH-1, MH-2, 48in MH, etc.)
   - Storm drainage basin labels (BASIN 1, DB-1, drainage area arrows)
   - Stormwater inlet types (catch basin grates, scupper openings, curb inlets)
   - Irrigation service note or irrigation district callout
@@ -100,14 +105,14 @@ GRADING:
 SCOPE FLAGS (on any sheet):
   - Demo callouts ("DEMO PERMIT REQUIRED", "REMOVE & DISPOSE", "REMOVE TO FILL")
   - Existing road widening scope ("ROAD WIDENING", "RIGHT TURN LANE", "WIDEN TO MATCH")
-  - Ballast as separate line item ("12\" BALLAST", "CRUSHED AGGREGATE BASE COURSE" as bid item)
+  - Ballast as separate line item ("12in BALLAST", "CRUSHED AGGREGATE BASE COURSE" as bid item)
   - Haul-off language ("INCL HAUL OFF", "HAUL TO WASTE", "EXPORT TO WASTE SITE")
   - Pedestrian path distinct from sidewalk ("MULTI-USE PATH", "SHARED USE PATH", "TRAIL")
   - RRFB / Rapid Flashing Beacon symbols — rectangular pedestrian crossing devices with flashing
     amber lights, often near school crossings or multi-use paths; look for "RRFB", "HAWK SIGNAL",
     or pedestrian crossing beacon symbols on plan_view or detail sheets
-  - DROP MANHOLE / 60\"+ diameter manhole callouts — larger than standard 48\" MH; look for
-    "DROP MH", "60\" MANHOLE", "72\" MANHOLE" labels on utility_plan sheets
+  - DROP MANHOLE / 60in+ diameter manhole callouts — larger than standard 48in MH; look for
+    "DROP MH", "60in MANHOLE", "72in MANHOLE" labels on utility_plan sheets
   - TEMP TURNAROUND / GRAVEL TURNAROUND — temporary construction access at dead-end roads;
     look for "TEMP TURNAROUND", "TEMPORARY CUL-DE-SAC", "GRAVEL TURNAROUND" on plan_view sheets
   - SILT FENCE — erosion control perimeter fence shown on grading or erosion/SWPPP sheets;

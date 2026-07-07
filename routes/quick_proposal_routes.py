@@ -125,10 +125,83 @@ def _get_claude_endpoint() -> tuple[str, str, str]:
     return _CLAUDE_URL, api_key, _CLAUDE_MODEL
 
 
-# run_id → asyncio.Queue of SSE event dicts (None = end-of-stream sentinel)
-_active_runs: dict[str, asyncio.Queue] = {}
+class _RunBroadcaster:
+    """Fans an SSE event out to every currently-connected client for a run.
+
+    A plain asyncio.Queue only supports one effective consumer: Queue.get() hands each
+    item to a single waiter, so if two browser tabs both open /stream/{run_id} for the
+    same run, each event goes to whichever tab's get() happened to be waiting — the run's
+    event stream gets silently split between tabs instead of shown to both (confirmed via
+    two-tab testing: each tab rendered a different, incomplete subset of the same run's
+    tool calls). This wraps the same put()-based interface pipeline code already calls via
+    _emit(), so no pipeline function needs to change — only stream_run/cancel_run below,
+    which now subscribe()/unsubscribe() per connection instead of sharing one queue.
+    """
+
+    def __init__(self) -> None:
+        self._subscribers: list[asyncio.Queue] = []
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        try:
+            self._subscribers.remove(q)
+        except ValueError:
+            pass
+
+    async def put(self, item) -> None:
+        for q in list(self._subscribers):
+            await q.put(item)
+
+
+# run_id → _RunBroadcaster fanning out SSE event dicts (None = end-of-stream sentinel)
+_active_runs: dict[str, _RunBroadcaster] = {}
 # run_id → asyncio.Task (so we can cancel in-flight pipelines)
 _active_tasks: dict[str, asyncio.Task] = {}
+# run_id → asyncio.Task for the in-flight phase-6 chat continuation (a proposal
+# follow-up question). Previously qp_chat_continuation fired an untracked
+# asyncio.create_task with no way to stop or supersede it, so clicking Stop only
+# ever cleared the client-side bubble — the manager kept generating server-side
+# and, if the user sent another follow-up in the meantime, two turns ran
+# concurrently against the same session and landed out of order (see the
+# "response vanished, then a stale reply appeared after my real question"
+# incident). New requests for the same run now cancel whatever's still running
+# first.
+_active_continuations: dict[str, asyncio.Task] = {}
+
+
+async def _cancel_continuation(run_id: str) -> bool:
+    """Cancel the in-flight chat-continuation task for `run_id`, if any, and wait
+    for it to actually unwind before returning. Safe to call even if nothing is
+    running. Each save inside _qp_continuation_task is an atomic, independent DB
+    write (tool results as they happen, the final reply at the end), so
+    cancelling mid-flight just stops it from producing further messages — no
+    partial-write cleanup is needed."""
+    task = _active_continuations.get(run_id)
+    if not task or task.done():
+        return False
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+    return True
+
+
+def is_continuation_active(run_id: str) -> bool:
+    """Whether a phase-6 chat-continuation task is still running for `run_id`.
+
+    Used by /api/chat/stream_status so a dropped client connection (network
+    blip, tab backgrounding, etc.) degrades to the existing spinner+poll
+    fallback instead of a silent void — qp_chat_continuation's task keeps
+    running and saving messages regardless of whether anyone is still
+    listening on its SSE stream, but without this check the frontend had no
+    way to know that and see it (see TODO_GG)."""
+    task = _active_continuations.get(run_id)
+    return bool(task and not task.done())
 
 
 # ── Request model ──────────────────────────────────────────────────────────────
@@ -141,6 +214,7 @@ class Phase3OnlyRequest(BaseModel):
     holdout_kp_path: str = ""
     resume: bool = False
     completeness_only: bool = False
+    reuse_notes: bool = False
 
 
 class ReclassifyPageRequest(BaseModel):
@@ -252,6 +326,44 @@ def _strip_fences(text: str) -> str:
     return text
 
 
+def _repair_unescaped_quotes(text: str) -> str:
+    """Best-effort fix for literal, unescaped " characters inside JSON string values
+    (e.g. Gemini writing 12" instead of 12in for an inch mark). Walks the text tracking
+    JSON string state; a " encountered mid-string is treated as a real closing quote only
+    if the next non-whitespace character is a JSON structural character, otherwise it's
+    escaped as \\"."""
+    out = []
+    in_string = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_string and ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if ch == '"':
+            if not in_string:
+                in_string = True
+                out.append(ch)
+                i += 1
+                continue
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            nxt = text[j] if j < n else ""
+            if nxt in ",:}]" or nxt == "":
+                in_string = False
+                out.append(ch)
+            else:
+                out.append('\\"')
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _save_run_meta(run_id: str, **fields) -> None:
     meta_path = Path(RUNS_DIR) / run_id / "meta.json"
     try:
@@ -287,6 +399,37 @@ def _save_extracted_values(run_id: str, extracted_values: dict) -> None:
         logger.warning(f"[quick_proposal] extracted_values save failed run={run_id}: {e}")
 
 
+def _save_notes_text(run_id: str, notes_text: dict) -> None:
+    """Patch extracted_data.notes_text into results.json without touching other keys."""
+    results_path = Path(RUNS_DIR) / run_id / "results.json"
+    try:
+        existing: dict = {}
+        if results_path.is_file():
+            existing = json.loads(results_path.read_text(encoding="utf-8"))
+        existing.setdefault("extracted_data", {})["notes_text"] = notes_text
+        results_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[quick_proposal] notes_text save failed run={run_id}: {e}")
+
+
+def _save_context_usage(run_id: str, role: str, payload: dict) -> None:
+    """Patch the latest per-role context-usage snapshot into results.json without touching other keys.
+
+    This is the persisted counterpart to the context_usage SSE event — the event alone only
+    reaches clients connected at the moment it fires, so a role's usage was otherwise lost on
+    reconnect/hard-refresh (see TODO_L/TODO_S).
+    """
+    results_path = Path(RUNS_DIR) / run_id / "results.json"
+    try:
+        existing: dict = {}
+        if results_path.is_file():
+            existing = json.loads(results_path.read_text(encoding="utf-8"))
+        existing.setdefault("context_usage", {})[role] = payload
+        results_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[quick_proposal] context_usage save failed run={run_id}: {e}")
+
+
 async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False, completeness_only: bool = False, session_id: str = "") -> None:
     """Re-run phase2 index build + phase3 extraction loop using saved page classifications."""
     try:
@@ -294,12 +437,21 @@ async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_mod
         index.extracted_data["phase1_summary"] = _build_phase1_summary(index)
         await _emit(queue, "phase_complete", phase="phase4")
 
+        await phase_notes_extraction(
+            index, queue,
+            gemini_model=gemini_model,
+            retry_attempts=retry_attempts,
+            gemini_fallback_models=gemini_fallback_models,
+        )
+
         if completeness_only or "plan_completeness" not in index.extracted_values:
             await phase3_completeness_score(index, queue, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models)
 
         if not completeness_only:
             await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume, session_id=session_id)
         _save_run_results(run_id, index)
+        if not completeness_only:
+            _save_generation_snapshot(run_id, session_id, manager_model, gemini_model, holdout_kp_path)
         _save_run_meta(run_id, status="complete")
     except Exception as e:
         logger.error(f"[quick_proposal] phase3-only error run={run_id}: {e}", exc_info=True)
@@ -312,6 +464,11 @@ async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_mod
 def _save_run_results(run_id: str, index) -> None:
     results_path = Path(RUNS_DIR) / run_id / "results.json"
     try:
+        # Preserve context_usage — it's patched in incrementally by _save_context_usage during
+        # the run, not tracked on `index`, so a naive overwrite here would erase it at completion.
+        existing_context_usage: dict = {}
+        if results_path.is_file():
+            existing_context_usage = json.loads(results_path.read_text(encoding="utf-8")).get("context_usage", {})
         results = {
             "pages": [
                 {
@@ -342,10 +499,86 @@ def _save_run_results(run_id: str, index) -> None:
             },
             "extracted_data":   index.extracted_data,
             "extracted_values": index.extracted_values,
+            "context_usage":    existing_context_usage,
         }
         results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
     except Exception as e:
         logger.warning(f"[quick_proposal] results save failed run={run_id}: {e}")
+
+
+def _save_generation_snapshot(run_id: str, session_id: str, manager_model: str, gemini_model: str, holdout_kp_path: str) -> None:
+    """Persist an immutable QpGeneration row for a just-completed extraction+proposal attempt.
+
+    Called once per completed phase5 run (fresh or rerun) — this is what survives a future
+    rerun's in-place overwrite of results.json / wipe of the session's chat history, so every
+    attempt is a distinct data point instead of only the latest one.
+    """
+    from core.database import ChatMessage as _DbMsg, SessionLocal as _SL, QpGeneration as _QpGen
+
+    results_path = Path(RUNS_DIR) / run_id / "results.json"
+    results_snapshot: dict = {}
+    if results_path.is_file():
+        try:
+            results_snapshot = json.loads(results_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    log_path = Path(RUNS_DIR) / run_id / "phase5_log.jsonl"
+    grand_total = None
+    resolved_manager_model = manager_model or None
+    if log_path.is_file():
+        try:
+            for line in log_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                if entry.get("type") == "grand_total":
+                    grand_total = entry.get("amount")
+                if entry.get("model"):
+                    resolved_manager_model = entry["model"]
+        except Exception:
+            pass
+
+    db = _SL()
+    try:
+        messages_snapshot: list = []
+        if session_id:
+            rows = (
+                db.query(_DbMsg)
+                .filter(_DbMsg.session_id == session_id)
+                .order_by(_DbMsg.timestamp)
+                .all()
+            )
+            messages_snapshot = [
+                {
+                    "role":      r.role,
+                    "content":   r.content,
+                    "metadata":  r.meta_data,
+                    "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                }
+                for r in rows
+            ]
+
+        generation_index = db.query(_QpGen).filter(_QpGen.run_id == run_id).count() + 1
+
+        db.add(_QpGen(
+            id=str(uuid.uuid4()),
+            run_id=run_id,
+            session_id=session_id or None,
+            generation_index=generation_index,
+            manager_model=resolved_manager_model,
+            gemini_model=gemini_model or None,
+            holdout_kp_path=holdout_kp_path or None,
+            grand_total=grand_total,
+            results_snapshot=results_snapshot,
+            messages_snapshot=messages_snapshot,
+        ))
+        db.commit()
+    except Exception as e:
+        logger.warning(f"[quick_proposal] generation snapshot save failed run={run_id}: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _resolve_upload_path(upload_id: str) -> str:
@@ -541,11 +774,17 @@ async def _classify_one_page(
         r = await client.post(url, headers=req_headers, json=payload)
         r.raise_for_status()
         text = r.json()["choices"][0]["message"]["content"]
+        stripped = _strip_fences(text)
         try:
-            return json.loads(_strip_fences(text))
-        except json.JSONDecodeError:
-            logger.warning(f"[quick_proposal] JSON parse failed, raw response: {text[:500]}")
-            raise
+            return json.loads(stripped)
+        except json.JSONDecodeError as e:
+            try:
+                repaired = json.loads(_repair_unescaped_quotes(stripped))
+                logger.info(f"[quick_proposal] JSON parse failed ({e}), repaired via quote-escaping, no retry needed")
+                return repaired
+            except json.JSONDecodeError:
+                logger.warning(f"[quick_proposal] JSON parse failed, raw response: {text[:500]}")
+                raise e
 
 
 async def phase2_classify_pages(index, queue: asyncio.Queue, model_override: str = "", retry_attempts: int = 3, fallback_models: list | None = None) -> None:
@@ -798,6 +1037,21 @@ _GEMINI_PHASE3_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_note",
+            "description": "Writes the COMPLETE VERBATIM text of a notes/list region to the shared notes store. Do not summarize, paraphrase, or omit anything — copy every line exactly, including numbers, units, and callout labels. This is separate from index_write and is only used during the notes-extraction phase.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bbox_id": {"type": "string", "description": "Region identifier this text was read from, e.g. '1_r2'"},
+                    "text":    {"type": "string", "description": "The complete verbatim text visible in the region"},
+                },
+                "required": ["bbox_id", "text"],
+            },
+        },
+    },
 ]
 
 
@@ -809,6 +1063,11 @@ _GEMINI_UTILITY_TOOLS = [
 _GEMINI_COMPLETENESS_TOOLS = [
     t for t in _GEMINI_PHASE3_TOOLS
     if t["function"]["name"] in {"get_image", "list_images", "index_read", "index_write"}
+]
+
+_GEMINI_NOTES_TOOLS = [
+    t for t in _GEMINI_PHASE3_TOOLS
+    if t["function"]["name"] in {"enhance_region", "crop_page", "get_image", "list_images", "write_note", "index_write"}
 ]
 
 # run_id → asyncio.Event set by /advance-phase to unblock a waiting pipeline gate
@@ -987,6 +1246,11 @@ async def _tool_get_image(args: dict, image_store: dict) -> list:
 async def _tool_index_write(args: dict, index, queue: asyncio.Queue) -> list:
     key            = args.get("key", "")
     value          = args.get("value")
+    if isinstance(value, str) and value[:1] in "[{":
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            pass
     source_bbox_id = args.get("source_bbox_id")
     confidence     = args.get("confidence", "medium")
     index.extracted_values[key] = {
@@ -999,6 +1263,18 @@ async def _tool_index_write(args: dict, index, queue: asyncio.Queue) -> list:
                 source_bbox_id=source_bbox_id, confidence=confidence)
     _save_extracted_values(index.run_id, index.extracted_values)
     return [{"type": "text", "text": f"Wrote {key} = {json.dumps(value)} (confidence={confidence})"}]
+
+
+async def _tool_write_note(args: dict, index, queue: asyncio.Queue) -> list:
+    """Writes verbatim notes text to a store separate from extracted_values, so the
+    manager's default read_index() doesn't balloon with it — see read_index(section='notes')."""
+    bbox_id = args.get("bbox_id", "")
+    text    = args.get("text", "")
+    notes   = index.extracted_data.setdefault("notes_text", {})
+    notes[bbox_id] = text
+    await _emit(queue, "notes_update", bbox_id=bbox_id, chars=len(text))
+    _save_notes_text(index.run_id, notes)
+    return [{"type": "text", "text": f"Wrote note for {bbox_id} ({len(text)} chars)"}]
 
 
 async def _execute_gemini_tool(
@@ -1019,6 +1295,8 @@ async def _execute_gemini_tool(
         return await _tool_get_image(args, image_store)
     elif name == "index_write":
         return await _tool_index_write(args, index, queue)
+    elif name == "write_note":
+        return await _tool_write_note(args, index, queue)
     else:
         return [{"type": "text", "text": f"Unknown tool: {name}"}]
 
@@ -1096,6 +1374,7 @@ async def _run_gemini_with_tools(
     gemini_state["messages"].append({"role": "user", "content": user_message})
 
     active_tools = tools if tools is not None else _GEMINI_PHASE3_TOOLS
+    tool_call_counts: dict[str, int] = {}
 
     for _ in range(200):
         payload: dict = {
@@ -1118,12 +1397,13 @@ async def _run_gemini_with_tools(
         resp_data  = r.json()
         g_usage = resp_data.get("usage", {})
         if g_usage:
-            await _emit(queue, "context_usage",
-                        role="gemini",
-                        model=gemini_state.get("model", ""),
-                        input_tokens=g_usage.get("prompt_tokens", 0),
-                        output_tokens=g_usage.get("completion_tokens", 0),
-                        context_window=1048576)
+            _ctx_payload = dict(role="gemini",
+                                 model=gemini_state.get("model", ""),
+                                 input_tokens=g_usage.get("prompt_tokens", 0),
+                                 output_tokens=g_usage.get("completion_tokens", 0),
+                                 context_window=1048576)
+            await _emit(queue, "context_usage", **_ctx_payload)
+            _save_context_usage(index.run_id, "gemini", _ctx_payload)
         choice     = resp_data.get("choices", [{}])[0]
         msg        = choice.get("message", {})
         tool_calls = msg.get("tool_calls") or []
@@ -1151,15 +1431,28 @@ async def _run_gemini_with_tools(
 
         if not tool_calls:
             if not (text_out and text_out.strip()):
-                await _emit(queue, "extraction_message", role="gemini", text="*(no summary)*")
+                if tool_call_counts:
+                    # Gemini did real work this turn (tool calls executed) but returned no
+                    # closing text. Returning "" here would let the caller mistake silence
+                    # for inactivity — surface what actually happened instead.
+                    activity = ", ".join(f"{name} x{n}" for name, n in tool_call_counts.items())
+                    text_out = (
+                        f"(Gemini made {sum(tool_call_counts.values())} tool call(s) this turn "
+                        f"but returned no closing summary text: {activity}. Call read_index() "
+                        f"to see what was written before deciding whether to redirect further.)"
+                    )
+                else:
+                    text_out = "(Gemini returned no text and made no tool calls this turn.)"
+                await _emit(queue, "extraction_message", role="gemini", text=text_out)
                 if log_path := gemini_state.get("log_path"):
-                    _log_phase3_event(log_path, {"type": "extraction_message", "role": "gemini", "text": "*(no summary)*"})
+                    _log_phase3_event(log_path, {"type": "extraction_message", "role": "gemini", "text": text_out})
             return text_out
 
         for tc in tool_calls:
             fn        = tc.get("function", {})
             tool_name = fn.get("name", "")
             raw_args  = fn.get("arguments", "{}")
+            tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
             try:
                 tc_args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
             except json.JSONDecodeError:
@@ -1346,6 +1639,70 @@ async def phase3_completeness_score(
     await _emit(queue, "phase_complete", phase="phase3")
 
 
+def _collect_notes_bboxes(index) -> dict[int, list]:
+    """Group every notes/list-type region by page index for the notes-extraction phase."""
+    by_page: dict[int, list] = {}
+    for bbox_id, rec in index.bboxes.items():
+        if rec.element_type in ("notes", "list"):
+            by_page.setdefault(rec.page_idx, []).append(rec)
+    return by_page
+
+
+async def phase_notes_extraction(
+    index,
+    queue: asyncio.Queue,
+    gemini_model: str = "",
+    retry_attempts: int = 3,
+    gemini_fallback_models: list | None = None,
+) -> None:
+    """Bulk, one-pass verbatim transcription of every general-notes/spec/list region.
+
+    Runs once, before the extraction loop, so Phase 5's manager can pull the full text via
+    read_index(section='notes') instead of repeatedly sending Gemini back to re-read the same
+    notes page for one keyword at a time (earthwork balance, ballast, stripping depth, etc.).
+    """
+    await _emit(queue, "phase_start", phase="notes", label="Extracting plan notes…")
+
+    if index.extracted_data.get("notes_text"):
+        # Already populated (e.g. resuming an interrupted run) — don't re-spend API calls.
+        await _emit(queue, "phase_complete", phase="notes")
+        return
+
+    by_page = _collect_notes_bboxes(index)
+    if not by_page:
+        logger.info("[quick_proposal] notes phase — no notes/list regions found, skipping")
+        await _emit(queue, "phase_complete", phase="notes")
+        return
+
+    state, fallback_models_info = _build_gemini_state_for_phase(
+        "gemini_notes.txt", gemini_model, gemini_fallback_models, index
+    )
+
+    lines = []
+    for page_idx in sorted(by_page):
+        for rec in by_page[page_idx]:
+            lines.append(f"  {rec.id} (page {page_idx}): {rec.description}")
+    region_list = "\n".join(lines)
+
+    initial_ctx = (
+        f"Here are all {sum(len(v) for v in by_page.values())} notes/list regions found across "
+        f"the plan set:\n\n{region_list}\n\n"
+        "For each one: call enhance_region(bbox_id), then call write_note(bbox_id, text) with "
+        "the complete verbatim text you see. When every region above has been written, call "
+        "index_write(\"notes_extraction_complete\", true, null, \"high\") to finish."
+    )
+    await _run_gemini_with_tools(
+        initial_ctx,
+        state, index, queue,
+        retry_attempts=retry_attempts,
+        fallback_models_info=fallback_models_info,
+        tools=_GEMINI_NOTES_TOOLS,
+        stop_keys={"notes_extraction_complete"},
+    )
+    logger.info(f"[quick_proposal] notes phase complete — {len(index.extracted_data.get('notes_text', {}))} regions transcribed")
+    await _emit(queue, "phase_complete", phase="notes")
+
+
 def _kp_lookup(knowledge_pack: dict, query: str) -> str:
     """Fuzzy lookup for unit price distributions, price trends, item pair detail, or named KP sections."""
     import difflib
@@ -1434,6 +1791,288 @@ def _kp_lookup(knowledge_pack: dict, query: str) -> str:
 _THINK_TAG_RE = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL)
 
 
+def _anthropic_native_url(url: str) -> str:
+    """Force the native /v1/messages endpoint regardless of which URL form (native
+    or OpenAI-compat) the caller resolved."""
+    if url and url.endswith("/v1/chat/completions"):
+        return url[: -len("/v1/chat/completions")] + "/v1/messages"
+    return url
+
+
+def _openai_tools_to_anthropic(tools: list) -> list:
+    out = []
+    for t in (tools or []):
+        fn = t.get("function", t)
+        out.append({
+            "name":        fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+        })
+    return out
+
+
+def _openai_messages_to_anthropic(messages: list) -> tuple[str, list]:
+    """Convert the shared OpenAI-style mgr_messages list to Anthropic's native
+    {system, messages} shape.
+
+    Assistant turns tagged with `_anthropic_native_content` (the verbatim content
+    blocks Anthropic returned for that turn, including its thinking block) are
+    replayed as-is. This is required — Anthropic rejects a tool_use turn that's
+    immediately followed by tool_result if the original thinking block for that
+    turn is missing. Older/untagged assistant turns (e.g. resumed from DB, or
+    generated by a non-Anthropic model) are reconstructed from text + tool_calls;
+    Anthropic accepts that and trims any thinking requirement for non-immediate
+    turns automatically.
+    """
+    system = ""
+    out: list = []
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        role = m.get("role")
+        if role == "system":
+            system = m.get("content") or ""
+            i += 1
+        elif role == "user":
+            out.append({"role": "user", "content": m.get("content") or ""})
+            i += 1
+        elif role == "assistant":
+            native_blocks = m.get("_anthropic_native_content")
+            if native_blocks:
+                out.append({"role": "assistant", "content": native_blocks})
+            else:
+                blocks = []
+                text = m.get("content")
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                for tc in (m.get("tool_calls") or []):
+                    fn = tc.get("function", {})
+                    try:
+                        tool_input = json.loads(fn.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        tool_input = {}
+                    blocks.append({
+                        "type": "tool_use", "id": tc.get("id", ""),
+                        "name": fn.get("name", ""), "input": tool_input,
+                    })
+                if not blocks:
+                    blocks.append({"type": "text", "text": "(continuing)"})
+                out.append({"role": "assistant", "content": blocks})
+            i += 1
+        elif role == "tool":
+            # Anthropic requires every tool_result for a given assistant turn to
+            # land in a single user message, not one user message per result.
+            tool_blocks = []
+            while i < len(messages) and messages[i].get("role") == "tool":
+                tm = messages[i]
+                tool_blocks.append({
+                    "type":        "tool_result",
+                    "tool_use_id": tm.get("tool_call_id", ""),
+                    "content":     tm.get("content") or "",
+                })
+                i += 1
+            out.append({"role": "user", "content": tool_blocks})
+        else:
+            i += 1
+    return system, out
+
+
+async def _stream_anthropic_native(
+    url: str,
+    headers: dict,
+    payload: dict,
+    queue: asyncio.Queue,
+    mgr_model_id: str,
+    log_path: str,
+) -> dict:
+    """Stream a native Anthropic /v1/messages call with extended thinking enabled.
+
+    Anthropic's OpenAI-compat endpoint (/v1/chat/completions) does not surface
+    extended thinking as a separate field, which is why Claude manager thinking
+    chains were rendering as regular text bubbles instead of thinking bubbles
+    (Ollama/vLLM models populate `reasoning_content` natively; Claude needs the
+    native Messages API plus an explicit `thinking` request param). This emits
+    the same claude_thinking_start/delta QP SSE events Ollama runs already use,
+    so no frontend changes are needed.
+    """
+    url = _anthropic_native_url(url)
+    system, anth_messages = _openai_messages_to_anthropic(payload.get("messages") or [])
+    max_tokens    = payload.get("max_tokens", 8000)
+    budget_tokens = max(1024, min(8000, max_tokens - 2000))
+
+    body = {
+        "model":      mgr_model_id,
+        "max_tokens": max_tokens,
+        "system":     system,
+        "messages":   anth_messages,
+        "thinking":   {"type": "enabled", "budget_tokens": budget_tokens},
+        "stream":     True,
+    }
+    anth_tools = _openai_tools_to_anthropic(payload.get("tools") or [])
+    if anth_tools:
+        body["tools"] = anth_tools
+
+    req_headers = {**headers, "content-type": "application/json"}
+    req_headers.setdefault("anthropic-version", "2023-06-01")
+    if "x-api-key" not in req_headers and "authorization" not in {k.lower() for k in req_headers}:
+        env_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if env_key:
+            req_headers["x-api-key"] = env_key
+
+    timeout = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
+    thinking_id         = uuid.uuid4().hex[:8]
+    thinking_streaming  = False
+    text_streaming      = False
+    content_blocks: dict[int, dict] = {}
+    raw_blocks: list    = []
+    tool_calls_map: dict[int, dict] = {}
+    usage: dict         = {}
+    stop_reason: str | None = None
+    thinking_buf = ""
+    content_buf  = ""
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", url, headers=req_headers, json=body) as resp:
+                if not resp.is_success:
+                    body_text = await resp.aread()
+                    body_str  = body_text.decode("utf-8", errors="ignore")
+                    logger.error(f"[quick_proposal] anthropic native manager HTTP {resp.status_code}: {body_str}")
+                    return {"error": {"message": f"Model returned {resp.status_code}: {body_str}"}}
+                _line_iter = resp.aiter_lines().__aiter__()
+                while True:
+                    try:
+                        line = await asyncio.wait_for(_line_iter.__anext__(), timeout=120.0)
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        logger.warning("[quick_proposal] anthropic native stream idle >120s — model may have crashed")
+                        return {"error": {"message": "Model stopped responding (no tokens for 120 seconds). The model may have crashed or run out of memory."}}
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        data = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+
+                    etype = data.get("type")
+
+                    if etype == "message_start":
+                        u = (data.get("message") or {}).get("usage") or {}
+                        if u:
+                            usage["prompt_tokens"] = u.get("input_tokens", 0)
+
+                    elif etype == "content_block_start":
+                        idx   = data.get("index", 0)
+                        block = data.get("content_block") or {}
+                        btype = block.get("type")
+                        if btype == "tool_use":
+                            content_blocks[idx] = {"type": "tool_use", "id": block.get("id", ""),
+                                                    "name": block.get("name", ""), "json_buf": ""}
+                        elif btype == "redacted_thinking":
+                            content_blocks[idx] = {"type": "redacted_thinking", "data": block.get("data", "")}
+                        else:
+                            content_blocks[idx] = {"type": btype or "text", "text": "", "thinking": "", "signature": ""}
+
+                    elif etype == "content_block_delta":
+                        idx   = data.get("index", 0)
+                        delta = data.get("delta") or {}
+                        dtype = delta.get("type")
+                        block = content_blocks.setdefault(idx, {"type": "text", "text": ""})
+                        if dtype == "thinking_delta":
+                            chunk = delta.get("thinking", "")
+                            block["thinking"] = block.get("thinking", "") + chunk
+                            if not thinking_streaming:
+                                thinking_streaming = True
+                                await _emit(queue, "extraction_message",
+                                            role="claude_thinking_start", thinking_id=thinking_id, model=mgr_model_id)
+                            await _emit(queue, "extraction_message",
+                                        role="claude_thinking_delta", thinking_id=thinking_id,
+                                        text=chunk, model=mgr_model_id)
+                            thinking_buf += chunk
+                        elif dtype == "signature_delta":
+                            block["signature"] = block.get("signature", "") + delta.get("signature", "")
+                        elif dtype == "text_delta":
+                            chunk = delta.get("text", "")
+                            block["text"] = block.get("text", "") + chunk
+                            content_buf += chunk
+                            if not text_streaming:
+                                text_streaming = True
+                                await _emit(queue, "extraction_message", role="claude_text_start", model=mgr_model_id)
+                            await _emit(queue, "extraction_message",
+                                        role="claude_text_delta", text=chunk, model=mgr_model_id)
+                        elif dtype == "input_json_delta":
+                            block["json_buf"] = block.get("json_buf", "") + delta.get("partial_json", "")
+
+                    elif etype == "content_block_stop":
+                        idx   = data.get("index", 0)
+                        block = content_blocks.get(idx)
+                        if not block:
+                            continue
+                        if block["type"] == "thinking":
+                            raw_blocks.append({"type": "thinking", "thinking": block.get("thinking", ""),
+                                                "signature": block.get("signature", "")})
+                        elif block["type"] == "redacted_thinking":
+                            raw_blocks.append({"type": "redacted_thinking", "data": block.get("data", "")})
+                        elif block["type"] == "tool_use":
+                            try:
+                                tool_input = json.loads(block.get("json_buf") or "{}")
+                            except json.JSONDecodeError:
+                                tool_input = {}
+                            raw_blocks.append({"type": "tool_use", "id": block.get("id", ""),
+                                                "name": block.get("name", ""), "input": tool_input})
+                            tool_calls_map[idx] = {
+                                "id": block.get("id", ""), "type": "function",
+                                "function": {"name": block.get("name", ""),
+                                             "arguments": block.get("json_buf") or "{}"},
+                            }
+                        else:
+                            raw_blocks.append({"type": "text", "text": block.get("text", "")})
+
+                    elif etype == "message_delta":
+                        d = data.get("delta") or {}
+                        if d.get("stop_reason"):
+                            stop_reason = d["stop_reason"]
+                        u = data.get("usage") or {}
+                        if u.get("output_tokens") is not None:
+                            usage["completion_tokens"] = u.get("output_tokens", 0)
+
+                    elif etype == "message_stop":
+                        break
+
+                    elif etype == "error":
+                        err = data.get("error") or {}
+                        return {"error": {"message": err.get("message", "Anthropic stream error")}}
+
+    except httpx.HTTPStatusError as _http_err:
+        logger.error(f"[quick_proposal] Unexpected HTTPStatusError (anthropic native): {_http_err}")
+        return {"error": {"message": f"Model returned {_http_err.response.status_code}: (unexpected error)"}}
+    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as _conn_err:
+        logger.error(f"[quick_proposal] anthropic native stream connection error: {_conn_err}")
+        return {"error": {"message": f"Connection to model failed: {_conn_err}"}}
+
+    if thinking_buf.strip() and log_path:
+        _log_phase3_event(log_path, {
+            "type": "extraction_message", "role": "claude_thinking",
+            "text": thinking_buf.strip(), "model": mgr_model_id,
+        })
+
+    finish_reason   = {"max_tokens": "length", "tool_use": "tool_calls"}.get(stop_reason, "stop")
+    tool_calls_list = [tool_calls_map[i] for i in sorted(tool_calls_map)] if tool_calls_map else None
+
+    return {
+        "choices": [{
+            "finish_reason": finish_reason,
+            "message": {
+                "content":    content_buf.strip() or None,
+                "tool_calls": tool_calls_list,
+            },
+        }],
+        "usage": usage,
+        "_native_blocks": raw_blocks or None,
+    }
+
+
 async def _stream_manager_call(
     url: str,
     headers: dict,
@@ -1449,7 +2088,13 @@ async def _stream_manager_call(
 
     Using read=None means no per-chunk timeout — as long as thinking tokens keep
     arriving the connection stays alive, which is the whole point.
+
+    Anthropic models are routed to `_stream_anthropic_native` instead — its
+    OpenAI-compat endpoint doesn't surface extended thinking as a separate field.
     """
+    if "anthropic.com" in (url or "") or "anthropic-version" in (headers or {}):
+        return await _stream_anthropic_native(url, headers, payload, queue, mgr_model_id, log_path)
+
     stream_payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
     thinking_id  = uuid.uuid4().hex[:8]
     thinking_buf = ""
@@ -1571,7 +2216,7 @@ async def _stream_manager_call(
         # Fallback if somehow an HTTPStatusError still gets raised (shouldn't happen now)
         logger.error(f"[quick_proposal] Unexpected HTTPStatusError: {_http_err}")
         return {"error": {"message": f"Model returned {_http_err.response.status_code}: (unexpected error)"}}
-    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as _conn_err:
+    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as _conn_err:
         logger.error(f"[quick_proposal] manager stream connection error: {_conn_err}")
         return {"error": {"message": f"Connection to model failed: {_conn_err}"}}
 
@@ -1657,10 +2302,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
             mgr_model_id = _CLAUDE_MODEL
 
     if mgr_url is None:
-        await _emit(queue, "error",
-                    message="No manager endpoint found — add an endpoint in Settings",
-                    phase="phase5")
-        return
+        raise RuntimeError("No manager endpoint found — add an endpoint in Settings")
 
     mgr_context_window = await _fetch_context_window_async(mgr_url, mgr_model_id) or 200000
 
@@ -1780,12 +2422,23 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
         "function": {
             "name":        "read_index",
             "description": (
-                "Returns the current state of all extracted values in the shared index as JSON. "
-                "Call this before asking Gemini to re-read something — the value may already be extracted."
+                "Returns shared index state as JSON. With no arguments (or section='values'), "
+                "returns all extracted values — call this before asking Gemini to re-read "
+                "something, the value may already be extracted. With section='notes', returns "
+                "the full verbatim text of every general-notes/spec/list region, already "
+                "transcribed by Gemini in a one-time pass before extraction started — call this "
+                "ONCE near the start of Phase A and read it into context; you should rarely need "
+                "to call it again this run."
             ),
             "parameters": {
                 "type":       "object",
-                "properties": {},
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "enum": ["values", "notes"],
+                        "description": "Which store to read. Defaults to 'values'.",
+                    },
+                },
                 "required":   [],
             },
         },
@@ -1923,8 +2576,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
             if "error" in resp:
                 err_msg = resp.get("error", {}).get("message", str(resp))
                 logger.error(f"[quick_proposal] manager error in phase3: {err_msg}")
-                await _emit(queue, "error", message=f"Manager error: {err_msg}", phase="phase5")
-                return
+                raise RuntimeError(f"Manager error: {err_msg}")
 
             # ── Parse response ─────────────────────────────────────────────────
             usage         = resp.get("usage", {})
@@ -1935,11 +2587,12 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
             tool_calls    = msg.get("tool_calls") or []
 
             if usage:
-                await _emit(queue, "context_usage",
-                            role="claude", model=mgr_model_id,
-                            input_tokens=usage.get("prompt_tokens", 0),
-                            output_tokens=usage.get("completion_tokens", 0),
-                            context_window=mgr_context_window)
+                _ctx_payload = dict(role="claude", model=mgr_model_id,
+                                     input_tokens=usage.get("prompt_tokens", 0),
+                                     output_tokens=usage.get("completion_tokens", 0),
+                                     context_window=mgr_context_window)
+                await _emit(queue, "context_usage", **_ctx_payload)
+                _save_context_usage(index.run_id, "claude", _ctx_payload)
 
             if text_content.strip():
                 await _emit(queue, "extraction_message", role="claude", text=text_content, model=mgr_model_id)
@@ -1960,9 +2613,12 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                 assistant_msg["content"] = ""
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
+            _native_blocks = resp.get("_native_blocks")
+            if _native_blocks:
+                assistant_msg["_anthropic_native_content"] = _native_blocks
             mgr_messages.append(assistant_msg)
             _save_chat_message(session_id, "assistant", text_content or "",
-                               {"tool_calls": tool_calls} if tool_calls else None)
+                               {"model": mgr_model_id, **({"tool_calls": tool_calls} if tool_calls else {})})
 
             logger.info(f"[quick_proposal] manager finish_reason={finish_reason} output_tokens={usage.get('completion_tokens', '?')}")
 
@@ -2031,19 +2687,24 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     )
                     await _emit(queue, "extraction_message",
                                 role="tool_result", tool_id=tool_id, tool="send_to_gemini", model=mgr_model_id,
-                                result=gemini_resp or "(extraction complete)")
+                                result=gemini_resp or "(no response from Gemini)")
                     if gemini_resp.strip():
                         await _emit(queue, "extraction_message", role="gemini", text=gemini_resp)
                         if log_path:
                             _log_phase3_event(log_path, {"type": "extraction_message", "role": "gemini", "text": gemini_resp})
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id,
-                                         "content": gemini_resp or "(extraction complete)"})
-                    _save_chat_message(session_id, "tool", gemini_resp or "(extraction complete)",
+                                         "content": gemini_resp or "(no response from Gemini)"})
+                    _save_chat_message(session_id, "tool", gemini_resp or "(no response from Gemini)",
                                        {"tool_call_id": tool_id, "tool_name": "send_to_gemini"})
                 elif tool_name == "read_index":
-                    index_json = json.dumps(index.extracted_values, indent=2)
+                    section = tool_input.get("section", "values")
+                    if section == "notes":
+                        index_json = json.dumps(index.extracted_data.get("notes_text", {}), indent=2)
+                    else:
+                        index_json = json.dumps(index.extracted_values, indent=2)
                     await _emit(queue, "extraction_message",
-                                role="tool_call", tool_id=tool_id, tool="read_index", model=mgr_model_id, args="{}")
+                                role="tool_call", tool_id=tool_id, tool="read_index", model=mgr_model_id,
+                                args=json.dumps({"section": section}))
                     await _emit(queue, "extraction_message",
                                 role="tool_result", tool_id=tool_id, tool="read_index", model=mgr_model_id, result=index_json)
                     if log_path:
@@ -2296,6 +2957,14 @@ async def run_pipeline(
         await _emit(queue, "phase_start", phase="phase4", label="Building extraction index…")
         await _emit(queue, "phase_complete", phase="phase4")
 
+        # Step 4.5 — one-pass verbatim notes transcription (see phase_notes_extraction docstring)
+        await phase_notes_extraction(
+            index, queue,
+            gemini_model=gemini_model,
+            retry_attempts=gemini_retry_attempts,
+            gemini_fallback_models=gemini_fallback_models,
+        )
+
         # Gate before Phase 3
         await _wait_for_gate(run_id, queue, "phase3", "Extraction")
 
@@ -2317,12 +2986,13 @@ async def run_pipeline(
         if _success:
             _save_run_meta(run_id, status="complete")
             _save_run_results(run_id, index)
+            _save_generation_snapshot(run_id, session_id, manager_model, gemini_model, holdout_kp_path)
         queue.put_nowait(None)
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
-def _load_index_from_run(run_id: str):
+def _load_index_from_run(run_id: str, meta: dict):
     """Reconstruct a ChatIndex from a completed run's results.json for phase-6 chat."""
     from src.quick_proposal.index import ChatIndex, PageRecord, BboxRecord
     results_path = Path(RUNS_DIR) / run_id / "results.json"
@@ -2364,7 +3034,14 @@ def _load_index_from_run(run_id: str):
     index.bboxes = bboxes
     index.extracted_values = data.get("extracted_values", {})
     index.extracted_data = data.get("extracted_data", {})
-    index.knowledge_pack = _load_knowledge_pack(None)
+    index.knowledge_pack = _load_knowledge_pack(meta.get("holdout_kp_path") or None)
+    upload_id = meta.get("upload_id", "")
+    if upload_id:
+        try:
+            index.source_path = _resolve_upload_path(upload_id)
+            index.source_is_pdf = index.source_path.lower().endswith(".pdf")
+        except FileNotFoundError:
+            logger.warning(f"[qp_chat] source upload '{upload_id}' not found for run={run_id}; image tools will fail")
     return index
 
 
@@ -2424,12 +3101,19 @@ async def _qp_continuation_task(
         if row.role == "system":
             mgr_system = row.content
             continue
-        msg: dict = {"role": row.role, "content": row.content or None}
+        if row.role == "tool" and not meta_d.get("tool_call_id"):
+            # Gemini's own internal sub-tool calls (enhance_region, crop_page, etc.)
+            # get persisted as role="tool" rows with source=gemini_subtool for
+            # display/history purposes, but they're not part of the manager's own
+            # tool_use/tool_result pairing — replaying them with an empty
+            # tool_call_id/tool_use_id fails Anthropic's ID validation.
+            continue
+        msg: dict = {"role": row.role, "content": row.content or ""}
         if row.role == "assistant":
             raw_tc = meta_d.get("tool_calls")
             if raw_tc:
                 msg["tool_calls"] = raw_tc
-                msg["content"] = row.content or None
+                msg["content"] = row.content or ""
         elif row.role == "tool":
             msg["tool_call_id"] = meta_d.get("tool_call_id", "")
         mgr_messages.append(msg)
@@ -2439,7 +3123,7 @@ async def _qp_continuation_task(
     _save_chat_message(session_id, "user", user_message, {"name": "user"})
 
     # Reconstruct index + gemini_state for tool execution.
-    index = _load_index_from_run(run_id)
+    index = _load_index_from_run(run_id, meta)
     if index is None:
         await _emit(queue, "error", message="Run results not found — cannot continue chat.", phase="phase6")
         return
@@ -2489,8 +3173,18 @@ async def _qp_continuation_task(
             "type": "function",
             "function": {
                 "name": "read_index",
-                "description": "Returns the current state of all extracted values in the shared index as JSON.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
+                "description": (
+                    "Returns shared index state as JSON. With no arguments (or section='values'), "
+                    "returns all extracted values. With section='notes', returns the full verbatim "
+                    "text of every general-notes/spec/list region transcribed during extraction."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "section": {"type": "string", "enum": ["values", "notes"]},
+                    },
+                    "required": [],
+                },
             },
         },
         {
@@ -2521,12 +3215,15 @@ async def _qp_continuation_task(
         if text_content.strip():
             await _emit(queue, "extraction_message", role="claude", text=text_content, model=mgr_model_id)
 
-        assistant_msg: dict = {"role": "assistant", "content": text_content or None}
+        assistant_msg: dict = {"role": "assistant", "content": text_content}
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
+        _native_blocks = resp.get("_native_blocks")
+        if _native_blocks:
+            assistant_msg["_anthropic_native_content"] = _native_blocks
         mgr_messages.append(assistant_msg)
         _save_chat_message(session_id, "assistant", text_content or "",
-                           {"tool_calls": tool_calls} if tool_calls else None)
+                           {"model": mgr_model_id, **({"tool_calls": tool_calls} if tool_calls else {})})
 
         if not tool_calls:
             break
@@ -2554,7 +3251,11 @@ async def _qp_continuation_task(
                 result = gemini_resp or "(no response)"
                 _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "send_to_gemini"})
             elif tool_name == "read_index":
-                result = json.dumps(index.extracted_values, indent=2)
+                section = tool_input.get("section", "values")
+                if section == "notes":
+                    result = json.dumps(index.extracted_data.get("notes_text", {}), indent=2)
+                else:
+                    result = json.dumps(index.extracted_values, indent=2)
                 _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "read_index"})
             elif tool_name == "kp_lookup":
                 item_query = tool_input.get("item", "").strip()
@@ -2647,7 +3348,7 @@ def setup_quick_proposal_routes(session_manager=None):
         finally:
             db.close()
 
-        queue: asyncio.Queue = asyncio.Queue()
+        queue = _RunBroadcaster()
         _active_runs[run_id] = queue
 
         task = asyncio.create_task(run_pipeline(
@@ -2683,7 +3384,7 @@ def setup_quick_proposal_routes(session_manager=None):
             holdout_kp_path=req.holdout_kp_path or "",
         )
 
-        queue: asyncio.Queue = asyncio.Queue()
+        queue = _RunBroadcaster()
         _active_runs[run_id] = queue
 
         task = asyncio.create_task(run_pipeline(
@@ -2974,6 +3675,15 @@ def setup_quick_proposal_routes(session_manager=None):
                 if key in saved_ev:
                     index.extracted_values[key] = saved_ev[key]
 
+        # reuse_notes: carry over the prior run's verbatim notes transcription so
+        # phase_notes_extraction's own "already populated" check (see its docstring)
+        # skips re-transcribing every notes/list region — the plans haven't changed,
+        # so this is a pure API-call/time savings independent of `resume`.
+        if req.reuse_notes:
+            saved_notes = (results.get("extracted_data") or {}).get("notes_text")
+            if saved_notes:
+                index.extracted_data["notes_text"] = saved_notes
+
         # Write the starting extracted_values to disk immediately so the frontend
         # seed fetch (which runs right after this request returns) sees the correct
         # state rather than stale values from the previous run.
@@ -2981,6 +3691,16 @@ def setup_quick_proposal_routes(session_manager=None):
         results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
         session_id = meta.get("session_id", "")
+
+        # On a fresh rerun (not resume), truncate phase5_log.jsonl too — it's opened
+        # in append mode on every write, so without this a rerun's entries pile up
+        # on top of every prior attempt's (including ones made with a different
+        # manager_model), making the log look like one run mixed multiple models.
+        if not req.resume:
+            try:
+                (Path(RUNS_DIR) / run_id / "phase5_log.jsonl").write_text("", encoding="utf-8")
+            except Exception as _e:
+                logger.warning(f"[quick_proposal] failed to truncate phase5_log before rerun: {_e}")
 
         # On a fresh rerun (not resume), wipe the session's chat history so a
         # hard refresh shows only the new run's messages — not all prior runs'.
@@ -3003,7 +3723,7 @@ def setup_quick_proposal_routes(session_manager=None):
                 except Exception:
                     pass
 
-        queue: asyncio.Queue = asyncio.Queue()
+        queue = _RunBroadcaster()
         _active_runs[run_id] = queue
         _save_run_meta(run_id, status="running")
 
@@ -3160,20 +3880,28 @@ def setup_quick_proposal_routes(session_manager=None):
 
     @router.get("/stream/{run_id}")
     async def stream_run(run_id: str):
-        queue = _active_runs.get(run_id)
-        if queue is None:
+        broadcaster = _active_runs.get(run_id)
+        if broadcaster is None:
             raise HTTPException(404, f"Run {run_id} not found")
 
+        # Each connection gets its own queue subscribed to the run's broadcaster, so
+        # multiple tabs watching the same run each see the full event stream instead of
+        # splitting it (see _RunBroadcaster docstring).
+        my_queue = broadcaster.subscribe()
+
         async def sse_generator():
-            while True:
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    yield ":\n\n"
-                    continue
-                if item is None:
-                    break
-                yield f"event: {item['type']}\ndata: {json.dumps(item)}\n\n"
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(my_queue.get(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        yield ":\n\n"
+                        continue
+                    if item is None:
+                        break
+                    yield f"event: {item['type']}\ndata: {json.dumps(item)}\n\n"
+            finally:
+                broadcaster.unsubscribe(my_queue)
 
         return StreamingResponse(
             sse_generator(),
@@ -3207,6 +3935,11 @@ def setup_quick_proposal_routes(session_manager=None):
         if not session_id:
             raise HTTPException(400, "Run has no linked session — use /start-proposal-session")
 
+        # A prior follow-up on this run may still be generating (Stop only ever
+        # cancelled the client-side stream, never this task) — supersede it so
+        # the two turns can't interleave writes into the same session.
+        await _cancel_continuation(run_id)
+
         cont_queue: asyncio.Queue = asyncio.Queue()
 
         async def _run():
@@ -3219,13 +3952,18 @@ def setup_quick_proposal_routes(session_manager=None):
                     manager_model=req.manager_model,
                     queue=cont_queue,
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"[qp_chat] continuation error run={run_id}: {e}", exc_info=True)
                 await _emit(cont_queue, "error", message=str(e), phase="phase6")
             finally:
                 await cont_queue.put(None)
+                if _active_continuations.get(run_id) is task:
+                    _active_continuations.pop(run_id, None)
 
-        asyncio.create_task(_run())
+        task = asyncio.create_task(_run())
+        _active_continuations[run_id] = task
 
         async def sse_generator():
             while True:

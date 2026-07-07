@@ -68,8 +68,14 @@ docker compose up -d
 echo "⏳ Waiting for Odysseus to start..."
 sleep 5
 
+# Total budget: 5s initial sleep + HEALTH_CHECK_ATTEMPTS * HEALTH_CHECK_INTERVAL seconds.
+# Bumped from the old 10x2s=20s budget — with multiple docker containers competing for
+# resources on this machine, startup has been observed taking well past 20s.
+export HEALTH_CHECK_ATTEMPTS="${HEALTH_CHECK_ATTEMPTS:-45}"
+export HEALTH_CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL:-2}"
+
 # Check if Odysseus is responding
-for i in {1..10}; do
+for ((i=1; i<=HEALTH_CHECK_ATTEMPTS; i++)); do
     if curl -s "http://127.0.0.1:$APP_PORT/api/health" &>/dev/null; then
         echo "✅ Odysseus is running!"
         echo ""
@@ -86,11 +92,13 @@ for i in {1..10}; do
         docker logs -f odysseus-odysseus-1 2>&1 | grep -v '" 200 '
         exit 0
     fi
-    echo "   Waiting... ($i/10)"
-    sleep 2
+    if (( i % 5 == 0 )); then
+        echo "   Still waiting... ($((i * HEALTH_CHECK_INTERVAL + 5))s elapsed)"
+    fi
+    sleep "$HEALTH_CHECK_INTERVAL"
 done
 
 # log anything not a success.
 
-echo "❌ Odysseus failed to start. Check 'docker logs odysseus-odysseus-1' for errors"
+echo "❌ Odysseus failed to start after $((HEALTH_CHECK_ATTEMPTS * HEALTH_CHECK_INTERVAL + 5))s. Check 'docker logs odysseus-odysseus-1' for errors"
 exit 1

@@ -19,9 +19,15 @@ figures below (they update automatically as jobs are added).
    - lot_count_applicable = false + building_count present (commercial): qty = building_count.
    - lot_count_applicable = false + no building_count (rural): OMIT.
 3. SINGLE DRYWELLS (EA): Use this priority order:
-   (a) If `storm_drainage_basin_count` (from Gemini) is not null and > 0, use it directly as
-       the drywell count — one drywell per drainage basin is the engineering pattern. This is the
+   (a) If `storm_drainage_basin_count` (from Gemini) is not null and > 0, cross-check it against
+       the (b) lot-count formula as a sanity check. If they differ by 50% or less, use the
+       Gemini value directly — one drywell per drainage basin is the engineering pattern and the
        most reliable source when the drainage plan is readable.
+       If they differ by MORE than 50%: PLACEHOLDER interim threshold, not yet derived from data
+       (see TODO_B_NEW) — added because drainage-type/count misclassification has been a frequent,
+       large-magnitude miss. Use the average of the Gemini count and the (b) formula result,
+       rounded to the nearest whole drywell, and flag [DRYWELL COUNT: plan read vs. formula
+       diverge >50% — averaged, PLACEHOLDER THRESHOLD — verify drainage type/count with Brian].
    (b) Otherwise: qty = max(1, round(lot_count × 0.23)). Floor at 2 for small jobs.
        Check `item_scaling` for updated slope.
    RURAL OVERRIDE: If project_type = rural_access AND no culvert drainage mentioned in scope_notes:
@@ -60,11 +66,15 @@ figures below (they update automatically as jobs are added).
    if terrain is not readable from the plans.
    Accuracy: 9/10 within 25% on typical cul-de-sac layouts.
    SEWER MAIN LF — use this priority order:
-   (a) If `sewer_main_LF` (from Gemini) is not null and > 0, use it directly.
-       This is a direct measurement from the utility plan — trust it as the primary quantity.
-       Cross-check against the formula in (b) for a sanity check only. If they differ by >20%,
-       note the discrepancy but keep the plan-read value. Flag [SEWER MAIN: plan read differs
-       from formula by >20% — used plan read].
+   (a) If `sewer_main_LF` (from Gemini) is not null and > 0:
+       - If Gemini's confidence on this field is "high" (direct callout or full stationing sum —
+         see extraction rules), use the plan-read value directly regardless of how far it diverges
+         from the formula in (b). Divergence >20% is informational only: flag [SEWER MAIN: plan read
+         differs from formula by >20% — used plan read, high confidence] but do not change the value.
+       - If confidence is "medium" or "low" (Gemini inferred or interpolated the value) AND it
+         diverges from the formula by more than 50%, average the plan-read value with the (b) formula
+         result and flag [SEWER MAIN: low-confidence plan read vs. formula diverge >50% — averaged —
+         verify LF with Brian]. If divergence is ≤50%, use the plan-read value directly.
    (b) Otherwise (sewer_main_LF is null — no utility plan available): compute:
        sewer_main_LF = ROW_SF × qty_scale_correlations.correlations["8\" SEWER MAIN"].ROW_SF.median_ratio
        Read median_ratio from the knowledge pack at inference time — do not use a hardcoded value.
@@ -73,11 +83,15 @@ figures below (they update automatically as jobs are added).
        is arc_loop, apply a 1.15× multiplier to the formula result. Flag as [SEWER MAIN: formula
        fallback — no utility plan data].
 5. WATER MAIN LF: Use this priority order:
-   (a) If `water_main_LF` (from Gemini) is not null and > 0, use it directly.
-       This is a direct measurement from the utility plan — trust it as the primary quantity.
-       Cross-check against the formula in (b) for a sanity check only. If they differ by >20%,
-       note the discrepancy but keep the plan-read value. Flag [WATER MAIN: plan read differs
-       from formula by >20% — used plan read].
+   (a) If `water_main_LF` (from Gemini) is not null and > 0:
+       - If Gemini's confidence on this field is "high" (direct callout or full stationing sum —
+         see extraction rules), use the plan-read value directly regardless of how far it diverges
+         from the formula in (b). Divergence >20% is informational only: flag [WATER MAIN: plan read
+         differs from formula by >20% — used plan read, high confidence] but do not change the value.
+       - If confidence is "medium" or "low" (Gemini inferred or interpolated the value) AND it
+         diverges from the formula by more than 50%, average the plan-read value with the (b) formula
+         result and flag [WATER MAIN: low-confidence plan read vs. formula diverge >50% — averaged —
+         verify LF with Brian]. If divergence is ≤50%, use the plan-read value directly.
    (b) Otherwise (water_main_LF is null — no utility plan available): compute:
        water_main_LF = ROW_SF × qty_scale_correlations.correlations["8\" WATER MAIN PVC"].ROW_SF.median_ratio
        Read median_ratio from the knowledge pack at inference time — do not use a hardcoded value.
@@ -169,12 +183,16 @@ figures below (they update automatically as jobs are added).
 - SUBGRADE: SY = road_subgrade_SY (from qty sheet or analog). Price from paving_rates.
 - PAVING SY: If curb_to_curb_ft_hint is provided, use road_LF × curb_to_curb_ft_hint ÷ 9.
   Otherwise scale from closest analog's road_paving_SY ÷ road_LF ratio × road_LF.
-- BALLAST: Include ONLY if `ballast_is_separate_pay_item=true` from Gemini — this confirms the spec
-  has a distinct ballast bid item, not a base course bundled into the paving unit price. If false or
-  null, do not include (omitting when uncertain avoids the Solara-class false positive). When
-  included: SY = same footprint as paving SY. Price from `unit_price_distributions` in knowledge
-  pack; when N < 3 (thin data), use the MEAN of the available observations (not max — max
-  over-estimates by up to 66% based on validation). Use median when N ≥ 3. Flag thin data either way.
+- BALLAST: `ballast_is_separate_pay_item` is true / false / null.
+  - true (Gemini quoted bid-schedule/keynote evidence): include normally.
+  - false (Gemini quoted evidence it's bundled into paving): do not include.
+  - null (no explicit evidence either way — common when no bid schedule is in the plan set): DEFAULT
+    TO INCLUDE, flagged as unconfirmed. A wrongly-included line is a fast delete on review; a
+    wrongly-omitted one has cost $47K and $98K on two past test jobs before anyone caught it. Write
+    the line as: "BALLAST (UNCONFIRMED — no bid-schedule evidence found): $X,XXX. Confirm with
+    Brian." SY = same footprint as paving SY. Price from `unit_price_distributions`; when N < 3 (thin
+    data), use the MEAN of available observations (not max — over-estimates by up to 66%). Use
+    median when N ≥ 3. Flag thin data either way.
 
 When estimating LS items, read `ls_item_variance` from the knowledge pack:
 - CV < 0.3: scale confidently from analogs
@@ -269,7 +287,12 @@ LOT GRADING INCLUSION RULES
   Use the lower-bound and upper-bound of lot-prep analogs scaled by lot_count ratio to populate
   the $X–$Y range in that note.
 
-- `lot_grading_in_scope=false` → Omit lot grading. This is a confident Gemini exclusion.
+- `lot_grading_in_scope=false` → Omit lot grading with no flag, but ONLY if the manager's QC
+  step (manager_system.txt, Step 4) confirmed this via Gemini explicitly checking for a
+  grading/civil-site sheet — a confirmed false is a confident exclusion. If that QC check was
+  not run or did not get a clear confirmation, treat this the same as `lot_grading_in_scope=null`
+  above (add the Key Assumptions note + $X–$Y range) rather than silently omitting — an
+  unconfirmed false is not the same as a confirmed one.
 
 ## Large-Diameter Water Main
 
@@ -321,11 +344,20 @@ The knowledge pack `item_pairs` section lists pairs of items that strongly trave
 When you compute any line item, scan `item_pairs` for a partner where:
   - that item appears as item_a or item_b, AND
   - co_occurrence_rate >= 0.75
-If the partner is not already in your estimate and is not excluded by 2+ closest analogs,
-include it. Derive the partner quantity using:
-  partner_qty = computed_qty / median_ratio_a_to_b  (when computed item = item_a)
-  partner_qty = computed_qty * median_ratio_a_to_b  (when computed item = item_b)
-If the ratio is unstable or the units differ, fall back to analog ROW_SF scaling instead.
+This is a MANDATORY inclusion trigger, not an informational cross-check — do not note it and move on.
+A confirmed spec for the item you already have is NOT grounds to dismiss the partner (e.g. "the
+sidewalk spec says 4-inch" does not mean 6-inch sections are absent — the two commonly coexist at
+different locations on the same job, which is exactly what this statistic captures). Before excluding
+a co-occurring partner that isn't already in your estimate, you must do ONE of:
+  (a) Include it. Derive quantity as:
+      partner_qty = computed_qty / median_ratio_a_to_b  (when computed item = item_a)
+      partner_qty = computed_qty * median_ratio_a_to_b  (when computed item = item_b)
+      If the ratio is unstable or the units differ, fall back to analog ROW_SF scaling instead.
+  (b) Send Gemini a targeted follow-up asking it to positively confirm the partner's absence on the
+      plans — silence on a prior general-purpose pass does not count as confirmation. Only exclude
+      if Gemini returns an explicit negative.
+  (c) Exclude on analog grounds alone if the partner is excluded by 2+ of the closest analogs'
+      exclusions_text — no Gemini follow-up needed in this case.
 
 ## 6" Concrete Approach (Driveway Aprons)
 
@@ -369,6 +401,16 @@ explicitly calls it out. Items commonly excluded by Terra: traffic control, silt
 erosion control maintenance, bonds, fees, and permits.
 SIGNS & STRIPING: do NOT automatically exclude striping — check the closest analogs first. If any
 of the 3 closest analogs include signs & striping as a single combined line item, include it.
+PRICING METHOD: this item's CV is consistently high (>0.7) across the portfolio, and a high r² on a
+ROW_SF-scaled formula for this item has been misleading in practice — it's driven by a few very
+large jobs, not a genuine linear relationship. Default to the portfolio median, not the ROW_SF
+formula, regardless of the formula's r².
+EXCEPTION — arterial/collector frontage: if `existing_road_widening_present` is non-empty AND
+includes a road with `ROW_width_ft` >= 80 ft, this signals arterial/collector-frontage complexity
+(crosswalk striping, collector signage packages, multi-use path markings) that the flat median
+under-prices. In this case, move up from the median toward the analog cluster of jobs with
+comparable arterial/collector frontage rather than using the flat portfolio median. Flag [SIGNS &
+STRIPING: arterial-frontage escalation applied] when this exception fires.
 
 ## Price Trends (dynamic — read from knowledge pack)
 
@@ -383,9 +425,15 @@ you are pricing, check the `price_trends` section:
 - If `recency_weight=false` or the item is not in `price_trends`: use the median from
   `unit_price_distributions[item]`.
 
-For items not in `price_trends` at all: compare the mean of the most recent 2 observations against
-the overall median. If they differ by more than 15%, flag the discrepancy in your basis notes and
-use the mean of the 2 most recent observations rather than the median.
+For items not in `price_trends` at all: before comparing the recent-2 mean to the overall median,
+check whether the two recent observations agree with EACH OTHER:
+  - If they differ from each other by more than 40%, one of them is likely an outlier or special
+    case (small batch, unusual site condition, bundled pricing) rather than a genuine market trend.
+    Do NOT use the recent-2 mean — use the overall median instead, and flag [RECENT-2 DISAGREE >40%
+    — used median instead of recent-mean; verify the individual observations].
+  - Otherwise, if the recent-2 mean differs from the overall median by more than 15%, flag the
+    discrepancy in your basis notes and use the mean of the 2 most recent observations rather than
+    the median.
 
 SPECIAL CASE — 1\" WATER SERVICES: `recency_weight=true` in the KP. However, this item has a
 volume-discount pattern — large jobs (lot_count > 30) show lower unit prices than small jobs. When

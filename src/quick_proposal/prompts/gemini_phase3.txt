@@ -202,6 +202,8 @@ curb_type:
   "standard" — vertical curb & gutter on all roads
   "mixed"    — rolled on local streets AND C&G on collector or at major intersections
 
+curb_type_comments: Text to add additional information on the curb type selection. Additional information supplied to the manager could be greatly beneficial.
+
 sidewalk_sides — Write as a JSON array, one entry per road. Read from each road's typical section.
   Each object has:
     road_name          — name of the road
@@ -239,8 +241,21 @@ pathway_paving_roads — Write as a JSON array of road names where a paved multi
 
 stripping_depth_in — the numeric depth in inches (e.g. 6, 8, 12). Do NOT guess.
 
-ballast_is_separate_pay_item — true ONLY if ballast appears as a separate bid item with its own
-  quantity (not bundled into the paving spec as "/6" or "/4").
+ballast_is_separate_pay_item — This asks whether the BID prices ballast/base rock as its own line
+  item, NOT whether ballast physically exists (it always does — every road has a base course). A
+  typical-section callout like "2\" HMA / 6\" BASE / 6\" BALLAST" describes the cross-section
+  stack-up — it does NOT tell you how the bid schedule prices it. Do not infer true/false from the
+  typical section alone.
+  1. Look first for a bid schedule, quantity sheet, or engineer's estimate sheet — these resolve it
+     directly if present.
+  2. Otherwise look for an explicit keynote or spec note naming ballast/crushed aggregate base as its
+     own pay item (e.g. "AGGREGATE SUBBASE (BALLAST) SHALL CONFORM TO...", or "12\" BALLAST" called
+     out as a distinct line separate from the paving keynote).
+  3. Write true or false ONLY when you found language like step 1 or 2 — quote the exact phrase in
+     your summary text.
+  4. If you found neither — write NULL, not false. Say so explicitly: "ballast_is_separate_pay_item:
+     no bid-schedule or keynote evidence found — writing null." False is a claim you can't support
+     without evidence; null tells the manager this is genuinely undetermined.
 
 sewer_main_LF — Read the ACTUAL total length of sewer main from the utility plan. Do NOT estimate
   a percentage — measure or read the pipe LF directly:
@@ -249,9 +264,14 @@ sewer_main_LF — Read the ACTUAL total length of sewer main from the utility pl
   3. If labels are unclear, count the roads that have sewer and sum their construction LF
      (only the portion with pipe, not the full road length if pipe stops short)
   Write as a number (e.g. 802). If no public sewer is present, write 0.
+  CONFIDENCE: write confidence="high" ONLY if you used method 1 or 2 above (explicit LF callout, or
+  a complete stationing sum covering the full run). If you used method 3 (inferred/interpolated from
+  roads with sewer) or any portion of the run was unclear, write confidence="medium" — this tells the
+  manager whether your number is a direct measurement or an inference, which changes how it gets used
+  downstream.
 
-water_main_LF — Same approach as sewer_main_LF but for water main. Read actual pipe LF from
-  the utility plan labels or station ranges. Write as a number. If no public water main, write 0.
+water_main_LF — Same approach and the same CONFIDENCE rule as sewer_main_LF, applied to water main.
+  Write as a number. If no public water main, write 0.
 
 existing_road_widening_present — Write as a JSON array of road names where the scope includes
   widening or pavement addition to an already-built road (e.g. adding a turn lane, widening a
@@ -269,9 +289,9 @@ earthwork_balance:
   "roughly_balanced" — alternating cut and fill zones of comparable depth
   "unknown"          — profile not readable, or balance note says "coordinate with engineer"
 
-lot_grading_in_scope — true ONLY if a dedicated grading sheet shows contours into lot interiors,
-  OR plan notes use exact keywords: "strip lots", "lot grading", "rough grade lots", "place
-  topsoil on lots". False positive adds $70k–$150k to the estimate — be strict.
+grading_information: Text of information relating to grading images or notes you have seen in the images.
+It is best to NOT just write the raw notes sections but to summarize them. It is also best to provide numeric
+values along side descriptions for actual grading work presented in the plans.
 
 ---
 

@@ -22,9 +22,14 @@ send_to_gemini(message)
     the shared extraction index via index_read / index_write.
     Use this tool to start the extraction, review progress, and redirect Gemini when needed.
 
-read_index()
-  → Returns the current state of all extracted values as JSON.
+read_index(section)
+  → section="values" (default): Returns the current state of all extracted values as JSON.
     Call this after each Gemini response to review what was written.
+  → section="notes": Returns the full verbatim text of every general-notes/spec/list region,
+    already transcribed by Gemini in a one-time pass BEFORE extraction started. Call this ONCE
+    near the start of Phase A (see Step 0.5) and keep it in context — you should rarely need to
+    call it again this run. This is deliberately separate from the default read_index() dump so
+    that repeatedly reviewing extracted values doesn't also re-send this text every time.
 
 kp_lookup(item)
   → Five query forms:
@@ -52,7 +57,21 @@ STEP 0: Read project_type and plan_completeness from the index.
   If project_type is absent or null, default to "residential_subdivision" and
   lot_count_applicable = true.
 
-  Do NOT call send_to_gemini yet. Continue to Step 1.
+  Do NOT call send_to_gemini yet. Continue to Step 0.5.
+
+STEP 0.5: Call read_index({"section": "notes"}) ONCE and read the full result into context.
+  This is the verbatim text of every general-notes/spec/list region on the plan set, already
+  transcribed before this extraction session started. Use it to resolve any keyword-driven field
+  yourself — ballast_is_separate_pay_item, strip_haul_off_required, stripping_depth_in,
+  earthwork_balance (textual cut/fill/import/export/haul-off callouts only — this does NOT cover
+  visual-only signals like lot grading contour lines, which still require enhance_region on the
+  actual drawing), sidewalk_thickness_spec, curb_type, ROW_width_ft, and similar — WITHOUT sending
+  Gemini back to re-read a notes page for one keyword at a time. Only redirect Gemini to a live
+  region if this notes dump doesn't contain the answer, or if you need to confirm a VISUAL detail
+  (contours, pipe symbols, dimension callouts) that verbatim text transcription can't capture.
+  You should not need to call read_index(section="notes") again this run — if a genuinely new
+  field turns up later that might be notes-based, re-check this same result before asking Gemini
+  to re-read anything.
 
 STEP 1: Build the Gemini detection list using tier-based rules (below).
         Do NOT call send_to_gemini yet.
@@ -168,6 +187,25 @@ IMPORTANT (request if not present, but do not block Phase B if confirmed absent)
   19. existing_road_widening_present
   20. building_count        — IMPORTANT for commercial jobs (lot_count_applicable = false)
 
+### Recognizing Gemini Activity (read this before judging Gemini "non-functional")
+
+Gemini frequently executes real tool calls (enhance_region, index_write) in a turn but
+returns NO closing prose summary — this is normal tool-calling behavior, not malfunction.
+send_to_gemini's return text tells you which case you're in:
+
+  - A message like "(Gemini made 4 tool call(s) this turn but returned no closing summary
+    text: index_write x3, enhance_region x1. Call read_index() ...)" means Gemini DID work.
+    Always call read_index() next and judge progress from the index — never from the
+    presence or absence of prose in the response.
+  - A message like "(Gemini returned no text and made no tool calls this turn.)" means
+    Gemini genuinely did nothing. This is the only case that warrants concluding the
+    sub-agent isn't engaging, and it justifies a more forceful or differently-worded redirect.
+
+Never conclude Gemini is "not executing tool calls," "non-functional," or "only returning
+extraction_complete" without checking which of these two signals you actually received.
+A blank summary is not evidence of failure — the index is the source of truth for whether
+work happened, not the response text.
+
 ### Mandatory QC Loop (run after EVERY send_to_gemini response)
 
 CRITICAL: All QC feedback and redirects to Gemini MUST be sent via send_to_gemini.
@@ -213,38 +251,102 @@ Step 3 — Check for impossible values:
   For any impossible value found: send Gemini back to re-examine that specific region.
 
 Step 4 — Check suspicious combinations (flag, send Gemini back once):
+  Before sending Gemini back on any TEXT/KEYWORD-based check below (earthwork_balance,
+  ballast_is_separate_pay_item, strip_haul_off_required, stripping_depth_in, curb_type,
+  sidewalk_thickness_spec, or any other note-driven field) — re-check the notes text you already
+  pulled into context in Step 0.5 first. Only redirect Gemini live if that text doesn't resolve
+  it. Checks that depend on a VISUAL detail (grading contours, pipe symbols, dimension lines) are
+  not covered by the notes text and still require a live enhance_region redirect as described.
+
   - lot_count present but road_LF array empty → ask Gemini to check all plan_view pages
   - any sidewalk_sides = "both_sides" AND curb_type = "rolled" → confirm on typical section
   - large_diameter_water_main_present = true AND water_main_LF < 200 → verify pipe labels
   - lot_grading_in_scope = true → ask Gemini to quote the exact note or callout it found
+  - lot_grading_in_scope = false → this is NOT automatically a confident exclusion. Ask Gemini
+    to explicitly confirm one of: (a) no grading/civil-site sheet showing individual lot
+    contours or building pads exists anywhere in the plan set, or (b) such a sheet exists and
+    shows lots already at finished/matched road grade with no additional grading contours.
+    If Gemini's response does not clearly confirm (a) or (b) — e.g. it repeats the false value
+    without addressing either condition — treat lot_grading_in_scope as UNCONFIRMED for Phase B:
+    apply the null-value fallback rules in system_prompt.txt's Lot Grading section (add the
+    Key Assumptions note + $ range), not the silent no-flag omission that a confirmed false
+    gets. A false accepted without this check has previously caused a six-figure missed scope
+    item — see TODO_B_NEW in the session handoffs.
   - sewer_main_LF = water_main_LF exactly → ask Gemini to confirm these are truly equal
+  - earthwork_balance present (ANY confidence level, including "high") → call
+    kp_lookup('SECTION: earthwork_balance_prior') and check the entry for this job's
+    project_type. Do NOT skip this check just because confidence="high" — a wrong
+    high-confidence call is exactly what let a bad classification through unchallenged in a
+    past validated job. Ask Gemini to quote the exact cut/fill note, earthwork callout, or
+    import/export/haul-off language it found to support the classification. In the redirect,
+    cite the actual historical split for this project_type (e.g. "this portfolio's
+    subdivision_road jobs split roughly 5 import / 3 export / 2 balanced — there is no
+    dominant pattern to lean on, so confirm this job's classification against its own plan
+    notes rather than a portfolio default"). This field has proven unreliable across
+    confidence levels in past validated jobs — see TODO_B_NEW in the session handoffs.
 
 ### QC Round Limit and Acceptance Rules
 
-CONFIRMATION ACCEPTANCE RULE — when to stop pushing back on a value:
-  - If Gemini returns the same value on a re-check from the SAME source region: accept it.
-    Do not ask again from the same source. Mark it [CONFIRMED BY GEMINI] in Phase B basis.
-  - If the re-check was from the same source AND you believe a different region contains
-    better data: ask Gemini to check the new region ONCE. After that, accept whatever comes back.
-  - After 2 re-examination rounds total: accept all remaining values at their current
-    confidence levels. Apply Phase B fallback rules for null/low-confidence fields.
-    Proceed to Phase B immediately — do NOT send a third message.
-  - VERIFYING GEMINI EXTRACTED NEEDED FIELDS DOES NOT COUNT AS A QC ROUND! QC rounds are only when you are
-  pusing back against gemini's extracted values, not whether it extracted values for a field you told it to extract.
+The 2-round cap below applies ONLY to statistical re-checks: Step 3 (impossible values) and
+Step 4 (suspicious combinations) — cases where Gemini HAS already written a value and you are
+double-checking it because it looks implausible. It does NOT apply to Step 2a (pursuing a
+CRITICAL/IMPORTANT field that has never been extracted at all). These are different
+activities with different limits — do not collapse them into one shared counter.
 
-Keeping Phase A short is critical: context used in Phase A comes at the direct expense of
-Phase B output quality.
+MISSING-FIELD PURSUIT (Step 2a) — no fixed round cap:
+  - Keep redirecting Gemini toward a still-missing CRITICAL field across as many
+    send_to_gemini turns as it takes, as long as each redirect tries something genuinely new
+    (a different sheet type, a different page, a more specific instruction) rather than
+    repeating a request that already failed to produce a write.
+  - Stop pursuing a specific field only when either (a) it is present in the index, or
+    (b) Gemini has explicitly confirmed — after being asked to check the relevant sheet
+    types — that the field is not shown anywhere in the plan set.
+  - If you've made 4+ genuinely distinct attempts at one field with no progress and no
+    explicit "not present" confirmation, mark that field [LOW CONFIDENCE — extraction
+    stalled] and apply its Phase B fallback. This unblocks only that one field — it is not
+    a signal to abandon the rest of Phase A.
+  - A blank or tool-call-only Gemini response (see "Recognizing Gemini Activity" above) does
+    NOT count as a failed attempt by itself — check read_index() first; if the field is
+    still missing, that's when a redirect attempt counts.
+
+STATISTICAL RE-CHECK CAP (Step 3 / Step 4) — 2 rounds per flagged value:
+  CONFIRMATION ACCEPTANCE RULE — when to stop pushing back on a value:
+    - If Gemini returns the same value on a re-check from the SAME source region: accept it.
+      Do not ask again from the same source. Mark it [CONFIRMED BY GEMINI] in Phase B basis.
+    - If the re-check was from the same source AND you believe a different region contains
+      better data: ask Gemini to check the new region ONCE. After that, accept whatever
+      comes back.
+    - After 2 re-examination rounds on that SPECIFIC value: accept it at its current
+      confidence level and apply the Phase B fallback/flagging rules if still suspect. This
+      caps re-litigation of ONE value — it does not end Phase A and does not excuse skipping
+      a still-missing CRITICAL field elsewhere in the checklist.
+  VERIFYING GEMINI EXTRACTED NEEDED FIELDS DOES NOT COUNT TOWARD EITHER LIMIT — reading the
+  index, or asking Gemini to attempt a field for the first time, is not a "round." Only a
+  re-examination request against an already-written, suspect value counts toward the
+  statistical re-check cap.
+
+Keeping Phase A short is still important: context used in Phase A comes at the direct expense
+of Phase B output quality. Pursue missing critical fields methodically and efficiently, but
+never treat the statistical re-check cap as a reason to stop pursuing a field you haven't
+actually gotten yet.
 
 ### Gate: When You May Proceed to Phase B
 
 You may ONLY proceed to Phase B when ALL of the following are true:
-  1. All 6 CRITICAL fields are present in the index OR Gemini has explicitly confirmed
-     each missing one is not readable on any sheet.
-  2. No impossible values remain in the index.
-  3. You have completed at most 2 QC redirect rounds.
+  1. All 6 CRITICAL fields are present in the index OR Gemini has explicitly confirmed each
+     missing one is not readable on any sheet (or it has been marked [LOW CONFIDENCE —
+     extraction stalled] per the missing-field pursuit rule above after 4+ genuine attempts).
+     This condition is NEVER satisfied by round count alone — a CRITICAL field with no value,
+     no explicit "not present" confirmation, and fewer than 4 genuine attempts blocks Phase B
+     regardless of how many send_to_gemini turns have elapsed.
+  2. No impossible values remain in the index, or each has gone through the statistical
+     re-check cap above and been accepted at its current value.
 
-Do NOT proceed to Phase B because extraction_complete = true alone. That flag is written
-by Gemini — you must still verify the checklist above before accepting it.
+Do NOT proceed to Phase B because extraction_complete = true alone. That flag is written by
+Gemini — you must still verify the checklist above before accepting it.
+Do NOT proceed to Phase B merely because you've sent Gemini several messages — total message
+count is not a substitute for condition 1. Hitting the statistical re-check cap on one value
+only resolves that value; it does not authorize skipping unattempted CRITICAL fields.
 At that point, do NOT call send_to_gemini again. Proceed to Phase B.
 
 ---

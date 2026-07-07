@@ -2194,7 +2194,7 @@ function _updateRailNotifs() {
  * If the server is still streaming for this session, show a spinner
  * and poll until done, then reload the session.
  */
-async function _checkServerStream(sessionId) {
+async function _checkServerStream(sessionId, _isRetry = false) {
   try {
     // Skip if research is running — it has its own progress UI
     if (_researchingSessions.has(sessionId)) return;
@@ -2202,8 +2202,33 @@ async function _checkServerStream(sessionId) {
     // Skip if the SSE reader is still actively connected — it handles rendering
     if (window.chatModule && window.chatModule.hasActiveStream && window.chatModule.hasActiveStream(sessionId)) return;
 
-    const res = await fetch(`${API_BASE}/api/chat/stream_status/${sessionId}`);
-    if (!res.ok) return; // 404 = no active stream
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/api/chat/stream_status/${sessionId}`);
+    } catch (fetchErr) {
+      // Network hiccup (common right after a page load/refresh) — this is NOT
+      // the same as a confirmed 404, so don't silently treat it as "nothing
+      // running" forever. One retry catches the transient case; still failing
+      // after that genuinely means we can't tell, so give up quietly rather
+      // than looping.
+      if (!_isRetry) {
+        setTimeout(() => _checkServerStream(sessionId, true), 1500);
+      } else {
+        console.warn('[stream-resume] stream_status unreachable after retry:', fetchErr);
+      }
+      return;
+    }
+    if (res.status === 404) return; // confirmed: no active stream
+    if (!res.ok) {
+      // Non-404 failure (5xx, transient proxy error) is not a confirmed
+      // "not streaming" — retry once before giving up.
+      if (!_isRetry) {
+        setTimeout(() => _checkServerStream(sessionId, true), 1500);
+      } else {
+        console.warn('[stream-resume] stream_status returned', res.status, 'after retry');
+      }
+      return;
+    }
     const info = await res.json();
     if (info.status !== 'streaming') return;
 

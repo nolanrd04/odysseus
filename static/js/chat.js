@@ -873,23 +873,31 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       const _tState = Storage.loadToggleState();
       const _isAgent = (_tState.mode || 'chat') === 'agent';
 
-      // Timeout: 6 min for research and agent mode, 3 min otherwise
+      // Timeout: 6 min for research and agent mode, 3 min otherwise.
+      // Proposal-mode continuation gets NO wall-clock timeout — a single manager
+      // turn can involve many manager<->Gemini tool round trips and legitimately
+      // run for 30+ minutes (the live pipeline watchdog was removed for the same
+      // reason). Genuine hangs are covered by the server-side stall detector and
+      // the Stop button, which aborts via currentAbort.
+      const _isProposalContinuation = !!(_proposalRunId && sessionModule.getCurrentSessionId() === _proposalSessionId);
       const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
-      timeoutId = setTimeout(() => {
-        if (!abortCtrl.signal.aborted) {
-          timedOut = true;
-          abortCtrl._reason = 'timeout';
-          try {
-            if (streamSessionId) {
-              fetch(`/api/chat/stop/${encodeURIComponent(streamSessionId)}`, {
-                method: 'POST',
-                credentials: 'same-origin',
-              }).catch(() => {});
-            }
-          } catch (_) {}
-          abortCtrl.abort();
-        }
-      }, timeoutMs);
+      if (!_isProposalContinuation) {
+        timeoutId = setTimeout(() => {
+          if (!abortCtrl.signal.aborted) {
+            timedOut = true;
+            abortCtrl._reason = 'timeout';
+            try {
+              if (streamSessionId) {
+                fetch(`/api/chat/stop/${encodeURIComponent(streamSessionId)}`, {
+                  method: 'POST',
+                  credentials: 'same-origin',
+                }).catch(() => {});
+              }
+            } catch (_) {}
+            abortCtrl.abort();
+          }
+        }, timeoutMs);
+      }
       clearResponseTimeout = () => {
         if (responseTimeoutCleared) return;
         responseTimeoutCleared = true;
@@ -985,26 +993,31 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const _bodyDiv = holder ? holder.querySelector('.body') : null;
         if (_bodyDiv) _bodyDiv.innerHTML = '';
 
-        const _qpThread = document.createElement('div');
-        _qpThread.className = 'agent-thread qp-proposal-thread';
-        if (holder) box.insertBefore(_qpThread, holder);
-        const _qpToolNodes = new Map();
-        let _qpAccumulated = '';
-        let _qpHasNodes = false;
-        const _esc = uiModule.esc;
-
+        // Rendering is delegated entirely to _appendQpMessage — the same
+        // per-round-bubble renderer the live pipeline SSE panel already uses
+        // successfully for phases 1-5 (fresh bubble per manager round, own
+        // accumulators reset between rounds). The old renderer here instead
+        // kept one shared bodyDiv/accumulator across an entire multi-round
+        // manager loop with no reset between rounds, so multiple rounds'
+        // text silently concatenated into a single bubble — this is what
+        // was happening during phase-6 continuation chat while phase 1-5
+        // (which never went through this code path) rendered fine. See
+        // TODO_GG. `holder` is kept alive only so the Stop button's existing
+        // currentHolder/_renderCancelledBubble path keeps working; real
+        // content lives entirely in _appendQpMessage's own bubbles, so
+        // `holder` is discarded once the turn ends.
         try {
           const _qpRes = await fetch(`${API_BASE}/api/quick_proposal/runs/${_qpRunId}/chat-stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: _finalMsgWithInject, manager_model: '' }),
+            body: JSON.stringify({ message: _finalMsgWithInject, manager_model: modelName || '' }),
             signal: abortCtrl.signal
           });
 
           if (!_qpRes.ok) {
             clearResponseTimeout();
-            if (_bodyDiv) _bodyDiv.textContent = `Error ${_qpRes.status}`;
-            _qpThread.remove();
+            chatRenderer.addMessage('assistant', `*Error ${_qpRes.status}*`, modelName || null, {});
+            uiModule.scrollHistory();
             return;
           }
 
@@ -1016,6 +1029,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
           while (!_qpDone) {
             const { done, value } = await _qpReader.read();
+            // QP continuation turns legitimately run 30+ minutes across many
+            // manager<->Gemini tool round trips. Without this, the shared
+            // stall watchdog/tab-recovery machinery (which both poll
+            // _lastReaderActivity) never sees this reader as alive and
+            // false-triggers on every long turn — see TODO_GG.
+            _lastReaderActivity = Date.now();
             if (done) break;
             _qpBuf += _qpDec.decode(value, { stream: true });
             const _qpLines = _qpBuf.split('\n');
@@ -1030,52 +1049,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (_qpEvt === 'phase_complete') { _qpDone = true; break; }
                 const _qpRaw = _qpLine.slice(6);
                 if (_qpRaw === '[DONE]') { _qpDone = true; break; }
+                if (_qpEvt === 'error') {
+                  let errText = 'the manager request failed.';
+                  try { errText = JSON.parse(_qpRaw).message || errText; } catch {}
+                  chatRenderer.addMessage('assistant', `*Error: ${errText}*`, modelName || null, {});
+                  uiModule.scrollHistory();
+                  _qpDone = true;
+                  break;
+                }
                 if (_qpEvt === 'extraction_message') {
-                  try {
-                    const d = JSON.parse(_qpRaw);
-                    if (d.role === 'claude') {
-                      _qpAccumulated += d.text || '';
-                      if (_bodyDiv) {
-                        _bodyDiv.innerHTML = markdownModule.processWithThinking(
-                          markdownModule.squashOutsideCode(_qpAccumulated)
-                        );
-                      }
-                      uiModule.scrollHistory();
-                    } else if (d.role === 'tool_call') {
-                      _qpHasNodes = true;
-                      const _qpNode = document.createElement('div');
-                      _qpNode.className = 'agent-thread-node running';
-                      const _tid = d.tool_id || '';
-                      _qpNode.innerHTML = `<div class="agent-thread-dot"></div>
-                        <div class="agent-thread-header">
-                          <span class="agent-thread-icon">⚙</span>
-                          <span class="agent-thread-tool">${_esc(d.tool || '')}</span>
-                          <span class="agent-thread-wave">▱▲△</span>
-                        </div>
-                        <div class="agent-thread-content">
-                          <details class="agent-tool-output"><summary>Input</summary><pre>${_esc(d.args || '{}')}</pre></details>
-                        </div>`;
-                      _qpThread.appendChild(_qpNode);
-                      if (_tid) _qpToolNodes.set(_tid, _qpNode);
-                    } else if (d.role === 'tool_result') {
-                      const _qpNode = d.tool_id ? _qpToolNodes.get(d.tool_id) : null;
-                      if (_qpNode) {
-                        const _inHtml = _qpNode.querySelector('.agent-tool-output')?.outerHTML || '';
-                        _qpNode.className = 'agent-thread-node';
-                        _qpNode.innerHTML = `<div class="agent-thread-dot"></div>
-                          <div class="agent-thread-header">
-                            <span class="agent-thread-icon">✓</span>
-                            <span class="agent-thread-tool">${_esc(d.tool || '')}</span>
-                            <span class="agent-thread-status">done</span>
-                            <span class="agent-thread-chevron">▶</span>
-                          </div>
-                          <div class="agent-thread-content">
-                            ${_inHtml}
-                            <details class="agent-tool-output"><summary>Output</summary><pre>${_esc(d.result || '(no output)')}</pre></details>
-                          </div>`;
-                      }
-                    }
-                  } catch {}
+                  try { _appendQpMessage(JSON.parse(_qpRaw)); } catch {}
                 }
               }
             }
@@ -1087,22 +1070,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
 
         clearResponseTimeout();
-        if (_qpHasNodes) {
-          if (_qpAccumulated) _qpThread.classList.add('has-bottom');
-        } else {
-          _qpThread.remove();
-        }
-        if (_qpAccumulated && _bodyDiv) {
-          _bodyDiv.innerHTML = markdownModule.processWithThinking(
-            markdownModule.squashOutsideCode(_qpAccumulated)
-          );
-          if (window.hljs) _bodyDiv.querySelectorAll('pre code').forEach(b => window.hljs.highlightElement(b));
-        } else if (!_qpAccumulated && holder) {
-          holder.remove();
-          holder = null;
-          currentHolder = null;
-        }
-        if (holder) holder.classList.remove('streaming');
+        if (holder) { holder.remove(); holder = null; }
         currentHolder = null;
         uiModule.scrollHistory();
         return; // finally block handles isStreaming=false and button/input reset
@@ -1433,8 +1401,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
             // (thinking spinner removal is handled in agent_step / tool_start / content handlers)
 
-            // Background detection: are we on a different session?
-            const _isBg = (sessionModule.getCurrentSessionId() !== streamSessionId);
+            // Background detection: are we on a different session? Also treat
+            // a same-session DOM rebuild (e.g. a redundant selectSession()
+            // reload while we're still "current") as background — our
+            // roundHolder/contentDiv refs get detached from #chat-history
+            // when history re-renders, so writing into them afterward is a
+            // silent no-op: tokens keep arriving (this loop keeps running,
+            // reader.read() keeps ticking) but nothing shows on screen.
+            // Detecting the detach and folding it into the existing
+            // background path self-heals via the same spinner+poll+reload
+            // flow real backgrounding already uses.
+            const _domDetached = !!(roundHolder && !roundHolder.isConnected);
+            const _isBg = (sessionModule.getCurrentSessionId() !== streamSessionId) || _domDetached;
 
             // On first transition to background, store state in map
             if (_isBg && !_backgroundStreams.has(streamSessionId)) {
@@ -1449,6 +1427,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               });
               if (sessionModule && sessionModule.markStreaming) {
                 sessionModule.markStreaming(streamSessionId);
+              }
+              // A plain session-switch relies on the next selectSession() call
+              // to invoke checkBackgroundStream() and show the spinner. A
+              // detach-while-still-current won't get that call for free, so
+              // surface it immediately instead of leaving the user staring at
+              // a frozen bubble with no feedback.
+              if (_domDetached && sessionModule.getCurrentSessionId() === streamSessionId) {
+                checkBackgroundStream(streamSessionId);
               }
             }
 
@@ -3382,11 +3368,26 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (uiModule.scrollHistory) uiModule.scrollHistory();
   }
   function _startStallWatchdog() {
-    // Disabled: the server-side stall detector / auto-continue (agent
-    // loop-breaker) handles quiet/stalled streams now, so the manual
-    // "Quiet for Nm — still working?" banner is redundant (and annoying).
+    // The server-side loop-breaker (src/agent_loop.py) only exists for agent
+    // mode's tool-calling loop. Plain chat mode (stream_llm_with_fallback,
+    // no tools) has no equivalent, and a dead-but-not-erroring connection
+    // (e.g. a silently dropped fetch/SSE stream — the reader's promise never
+    // resolves or rejects, it just never settles again) leaves nothing to
+    // ever surface that to a user who never leaves the tab: the only other
+    // watchdog is the visibilitychange-triggered tab-recovery, which needs a
+    // focus transition to fire at all. Poll _lastReaderActivity continuously
+    // so a genuinely silent stream gets a visible "still working?" banner
+    // with a manual Nudge/Stop, instead of looking cut off forever.
     if (_stallWatchdog) { clearInterval(_stallWatchdog); _stallWatchdog = null; }
     _removeStallBanner();
+    _lastReaderActivity = Date.now();
+    _stallWatchdog = setInterval(() => {
+      if (!isStreaming) return;
+      const quietMs = Date.now() - _lastReaderActivity;
+      if (quietMs >= STALL_THRESHOLD_MS) {
+        _showStallBanner(Math.round(quietMs / 1000));
+      }
+    }, 5000);
   }
   function _stopStallWatchdog() {
     if (_stallWatchdog) { clearInterval(_stallWatchdog); _stallWatchdog = null; }
@@ -3888,7 +3889,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
         console.warn('[tab-recovery] Stream confirmed dead. Aborting and reloading session.');
 
-        // Abort the frozen stream, but preserve the visible bubble.
+        // Abort the frozen stream, but preserve the visible bubble. This only
+        // drops OUR subscription to the run — it does not call /api/chat/stop,
+        // so the detached server-side generation (agent_runs) keeps going and
+        // will still save the finished reply. Without reattaching below, the
+        // user's left staring at an idle input with zero indication anything
+        // is still happening, until they think to refresh themselves.
+        const _recoverSid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
         if (currentAbort) {
           currentAbort._reason = 'recovery';
           currentAbort.abort();
@@ -3906,6 +3913,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         updateSubmitButton('idle', _submitBtn);
         var _msgInput = document.getElementById('message');
         if (_msgInput) _msgInput.disabled = false;
+
+        // Reattach: reload the session so _checkServerStream can find the
+        // still-running detached job and either live-resume it or show a
+        // "streaming in background" spinner that polls to completion —
+        // same recovery the wasDiscarded handler below already does.
+        if (_recoverSid && sessionModule.getCurrentSessionId() === _recoverSid) {
+          sessionModule.selectSession(_recoverSid);
+        }
       }, 2000); // 2 second grace period
     });
 
@@ -5116,6 +5131,73 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }
   }
 
+  // Panel chrome (header, collapse toggle, drag-resize handle, expand strip)
+  // for the docked #qp-pipeline-panel. Re-created after every populate since
+  // the populate paths wipe the panel with innerHTML = ''. Mirrors the main
+  // sidebar: drag edge to resize (collapse if dragged small), persisted
+  // width + collapsed state.
+  function _ensureQpPanelChrome(panel) {
+    if (!panel || panel.querySelector('.qp-panel-header')) return;
+    const MIN_WIDTH = 200, MAX_WIDTH = 700, COLLAPSE_THRESHOLD = 150;
+
+    const header = document.createElement('div');
+    header.className = 'qp-panel-header';
+    header.innerHTML = `
+      <span class="qp-panel-title">Proposal</span>
+      <button class="qp-panel-toggle-btn" title="Collapse panel" aria-label="Collapse proposal panel"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>`;
+    panel.prepend(header);
+
+    const handle = document.createElement('div');
+    handle.className = 'qp-panel-resize-handle';
+    panel.appendChild(handle);
+
+    const strip = document.createElement('button');
+    strip.className = 'qp-panel-expand-strip';
+    strip.title = 'Expand proposal panel';
+    strip.setAttribute('aria-label', 'Expand proposal panel');
+    strip.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+    panel.appendChild(strip);
+
+    // Restore persisted width + collapsed state
+    const savedW = parseInt(localStorage.getItem('qp_panel_width') || '', 10);
+    if (savedW >= MIN_WIDTH && savedW <= MAX_WIDTH) panel.style.width = savedW + 'px';
+    panel.classList.toggle('collapsed', localStorage.getItem('qp_panel_collapsed') === 'true');
+
+    const setCollapsed = (c) => {
+      panel.classList.toggle('collapsed', c);
+      try { localStorage.setItem('qp_panel_collapsed', c ? 'true' : 'false'); } catch {}
+    };
+    header.querySelector('.qp-panel-toggle-btn').addEventListener('click', () => setCollapsed(true));
+    strip.addEventListener('click', () => setCollapsed(false));
+
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = panel.getBoundingClientRect().width;
+      panel.classList.add('resizing');
+      handle.classList.add('dragging');
+      const onDrag = (ev) => {
+        // Panel is docked on the RIGHT — dragging its left edge leftward grows it.
+        const w = startWidth - (ev.clientX - startX);
+        if (w < COLLAPSE_THRESHOLD) { if (!panel.classList.contains('collapsed')) setCollapsed(true); return; }
+        if (panel.classList.contains('collapsed')) setCollapsed(false);
+        panel.style.width = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, w)) + 'px';
+      };
+      const stopDrag = () => {
+        panel.classList.remove('resizing');
+        handle.classList.remove('dragging');
+        document.removeEventListener('mousemove', onDrag);
+        document.removeEventListener('mouseup', stopDrag);
+        if (!panel.classList.contains('collapsed')) {
+          const w = Math.round(panel.getBoundingClientRect().width);
+          if (w >= MIN_WIDTH && w <= MAX_WIDTH) try { localStorage.setItem('qp_panel_width', String(w)); } catch {}
+        }
+      };
+      document.addEventListener('mousemove', onDrag);
+      document.addEventListener('mouseup', stopDrag);
+    });
+  }
+
   function _buildChatPipelineRoot() {
     const root = document.createElement('div');
     root.className = 'qp-chat-pipeline-root';
@@ -5296,6 +5378,47 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     else grid.appendChild(card);
   }
 
+  // Renders the per-role context-usage meter into a `.qp-ctx-window-status` div, given
+  // ctxWindows shaped { claude?: {pct, window, model}, gemini?: {pct, window, model} }.
+  // Shared by the live SSE listener and both hard-refresh restore paths (seed + reconstruct)
+  // so a role's last-known value survives disconnects instead of only showing while a live
+  // context_usage event happens to arrive during the current connection (see TODO_L/TODO_S).
+  function _renderCtxWindowStatus(ctxDiv, ctxWindows) {
+    if (!ctxDiv || !ctxWindows) return;
+    const _fmtCtx = (info) => {
+      if (!info) return null;
+      const pctStr = info.pct != null ? `${info.pct.toFixed(1)}%` : '?%';
+      const winStr = info.window ? (info.window >= 1000000
+        ? `${(info.window / 1000000).toFixed(1)}M` : `${Math.round(info.window / 1000)}k`) : '';
+      const color = info.pct >= 85 ? 'var(--red,#e06c75)' : info.pct >= 70 ? '#ff9900' : 'inherit';
+      return `<span style="color:${color}">${pctStr}${winStr ? ' of ' + winStr : ''}</span>`;
+    };
+    const parts = [];
+    if (ctxWindows.claude) parts.push(`Manager: ${_fmtCtx(ctxWindows.claude)}`);
+    if (ctxWindows.gemini) parts.push(`Gemini: ${_fmtCtx(ctxWindows.gemini)}`);
+    if (parts.length) {
+      ctxDiv.innerHTML = parts.join(' &nbsp;|&nbsp; ');
+      ctxDiv.style.display = 'flex';
+    }
+  }
+
+  // Converts a persisted results.context_usage record { claude?: {...}, gemini?: {...} }
+  // (raw SSE-event-shaped payloads from the backend) into the { pct, window, model } shape
+  // _renderCtxWindowStatus expects.
+  function _ctxUsageToWindows(contextUsage) {
+    const out = {};
+    for (const role of ['claude', 'gemini']) {
+      const u = contextUsage?.[role];
+      if (!u) continue;
+      out[role] = {
+        pct: u.context_window ? (u.input_tokens / u.context_window * 100) : null,
+        window: u.context_window,
+        model: u.model,
+      };
+    }
+    return out;
+  }
+
   function _rebuildFromServerResults(root, results, runId) {
     _chatClassifyRunId = runId;
     const _ALL_PHASES = [
@@ -5374,6 +5497,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       indexCount++;
     }
     if (indexCount > 0) panel.style.display = '';
+
+    // Context-usage meter — restored from the persisted per-role snapshot (see TODO_L/TODO_S)
+    _renderCtxWindowStatus(root.querySelector('.qp-ctx-window-status'), _ctxUsageToWindows(results.context_usage));
   }
 
   // Delegated handlers — set up once so restored sessionStorage HTML stays interactive
@@ -5409,6 +5535,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Extraction model</span><select class="qp-model-select qp-chat-rerun-select" data-role="gemini"><option>Loading…</option></select></div>
           <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Manager model</span><select class="qp-model-select qp-chat-rerun-select" data-role="manager"><option>Loading…</option></select></div>
           <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Resume prior values</span><input type="checkbox" class="qp-chat-rerun-resume"></div>
+          <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Reuse existing notes (skip re-transcription)</span><input type="checkbox" class="qp-chat-rerun-reuse-notes"></div>
           <div class="qp-chat-rerun-actions"><button class="qp-chat-rerun-go">Run</button><button class="qp-chat-rerun-cancel">Cancel</button></div>
         `;
         rerunTrigger.replaceWith(form);
@@ -5441,6 +5568,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 gemini_fallback_models: [],
                 holdout_kp_path: '',
                 resume: form.querySelector('.qp-chat-rerun-resume').checked,
+                reuse_notes: form.querySelector('.qp-chat-rerun-reuse-notes').checked,
                 completeness_only: false,
               }),
             });
@@ -5760,6 +5888,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // Clear stale per-session maps from any previous proposal session
     const _chatBox = document.getElementById('chat-history');
     if (_chatBox) { _chatBox._qpToolNodes = new Map(); _chatBox._qpPendingMetrics = {}; _chatBox._qpCtxWindows = {}; _chatBox._qpLiveBubble = null; _chatBox._qpLiveText = ''; }
+    // Prune stale qp_pipeline_html_* snapshots from other runs so sessionStorage
+    // doesn't accumulate unbounded across a browser session (see TODO_P) — keep
+    // only the entry for the run we're about to enter.
+    try {
+      const _keepKey = `qp_pipeline_html_${runId}`;
+      for (let i = sessionStorage.length - 1; i >= 0; i--) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith('qp_pipeline_html_') && k !== _keepKey) sessionStorage.removeItem(k);
+      }
+    } catch {}
     const messageInput = uiModule.el('message');
     try {
       const statusRes = await fetch(`${API_BASE}/api/quick_proposal/runs/${runId}/status`);
@@ -5778,57 +5916,52 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         if (_panel) {
           _panel.innerHTML = '';
 
-          // Use sessionStorage only if it has both index values AND the classification grid.
-          // A cache without the grid means the grid failed to render during the live run — bypass it.
+          // The sessionStorage HTML snapshot can be stale relative to the DB record — it's only
+          // ever overwritten opportunistically during the live run (per phase_complete / on close),
+          // so a snapshot taken before the last context_usage event or the last extracted value
+          // landed still looks "complete" (has an index item + a classify grid) but is missing
+          // newer data that's already correctly on disk. Do NOT use it as a substitute for
+          // index-values/context/phase state — /runs/{run_id} is the source of truth for those.
+          // The cache is only still useful for the Extraction-tab conversation bubbles, which have
+          // no DB reconstruction path (see TODO_K/TODO_L follow-up).
           const cached = sessionStorage.getItem(`qp_pipeline_html_${runId}`);
-          const _probe = cached ? (() => { const d = document.createElement('div'); d.innerHTML = cached; return d; })() : null;
-          const _cacheComplete = _probe?.querySelector('.qp-index-item') != null && _probe?.querySelector('.qp-chat-classify-grid') != null;
-
-          if (_cacheComplete) {
-            const restored = document.createElement('div');
-            restored.className = 'qp-chat-pipeline-root';
-            restored.innerHTML = cached;
-            // Inject rerun button if the cache predates this feature
-            const _cList = restored.querySelector('.qp-chat-phases-list');
-            if (_cList && _cList.querySelector('.qp-chat-export-btn') && !_cList.querySelector('.qp-chat-rerun-btn, .qp-chat-rerun-form')) {
-              const _cRerun = document.createElement('button');
-              _cRerun.className = 'qp-chat-rerun-btn';
-              _cRerun.dataset.runId = runId;
-              _cRerun.textContent = 'Re-run extraction';
-              _cList.appendChild(_cRerun);
-            }
-            _panel.appendChild(restored);
-            _panel.style.display = '';
-          } else {
-            // Reconstruct from server run record — always populated regardless of run status
+          if (sessionModule.getCurrentSessionId() !== sessionId) return;
+          try {
+            const res = await fetch(`${API_BASE}/api/quick_proposal/runs/${runId}`);
             if (sessionModule.getCurrentSessionId() !== sessionId) return;
-            try {
-              const res = await fetch(`${API_BASE}/api/quick_proposal/runs/${runId}`);
-              if (sessionModule.getCurrentSessionId() !== sessionId) return;
-              if (res.ok) {
-                const results = await res.json();
-                const root = _buildChatPipelineRoot();
-                _rebuildFromServerResults(root, results, runId);
-                _panel.appendChild(root);
-                _panel.style.display = '';
-                sessionStorage.setItem(`qp_pipeline_html_${runId}`, root.innerHTML);
-              } else if (cached) {
-                // 404 / server error — fall back to partial cache rather than blank
-                const restored = document.createElement('div');
-                restored.className = 'qp-chat-pipeline-root';
-                restored.innerHTML = cached;
-                _panel.appendChild(restored);
-                _panel.style.display = '';
-              }
-            } catch (e) {
-              console.warn('[proposal-mode] server reconstruct failed:', e);
+            if (res.ok) {
+              const results = await res.json();
+              const root = _buildChatPipelineRoot();
+              _rebuildFromServerResults(root, results, runId);
               if (cached) {
-                const restored = document.createElement('div');
-                restored.className = 'qp-chat-pipeline-root';
-                restored.innerHTML = cached;
-                _panel.appendChild(restored);
-                _panel.style.display = '';
+                const _probe = document.createElement('div');
+                _probe.innerHTML = cached;
+                const _cachedMsgs = _probe.querySelector('#qp-extraction-messages');
+                const _freshMsgs = root.querySelector('#qp-extraction-messages');
+                if (_cachedMsgs && _freshMsgs) _freshMsgs.innerHTML = _cachedMsgs.innerHTML;
               }
+              _panel.appendChild(root);
+              _panel.style.display = '';
+              _ensureQpPanelChrome(_panel);
+              try { sessionStorage.setItem(`qp_pipeline_html_${runId}`, root.innerHTML); } catch {}
+            } else if (cached) {
+              // 404 / server error — fall back to cache rather than blank
+              const restored = document.createElement('div');
+              restored.className = 'qp-chat-pipeline-root';
+              restored.innerHTML = cached;
+              _panel.appendChild(restored);
+              _panel.style.display = '';
+              _ensureQpPanelChrome(_panel);
+            }
+          } catch (e) {
+            console.warn('[proposal-mode] server reconstruct failed:', e);
+            if (cached) {
+              const restored = document.createElement('div');
+              restored.className = 'qp-chat-pipeline-root';
+              restored.innerHTML = cached;
+              _panel.appendChild(restored);
+              _panel.style.display = '';
+              _ensureQpPanelChrome(_panel);
             }
           }
           // Ensure export + rerun buttons are present regardless of which populate path ran
@@ -5873,6 +6006,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           load: 'Rendering pages…', index: 'Loading knowledge base…',
           phase1: 'Detecting job type…', phase2: 'Classifying pages…',
           phase3: 'Scoring completeness…', phase4: 'Building extraction index…',
+          notes: 'Extracting plan notes…',
           phase5: 'Extracting values…', phase6: 'Finalizing…',
         };
         const _phaseRows = new Map();     // phase key → row DOM element
@@ -5903,11 +6037,20 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               const _allClassified = _pages.length > 0 && _pages.every(p => p.sheet_type);
               const _someClassified = !_allClassified && _pages.some(p => p.sheet_type);
               const _phase3Done = _ev.plan_completeness != null;
-              const _phase45Done = Object.keys(_ev).some(k => !['project_type', 'plan_completeness', 'completeness_notes', 'extraction_complete'].includes(k));
+              // Whether phase5 (extraction) has actually finished — NOT the same as "has produced
+              // at least one value". Phase5 can run up to 60 tool-call turns after its first value
+              // lands, so using Object.keys(extracted_values).length as a done-proxy (the old bug,
+              // TODO_R) falsely marks the phase ✓ complete while the backend is still mid-loop.
+              // This whole branch only runs when the top-level run status !== 'complete' (see the
+              // `if (status !== 'complete')` guard above), so phase5 must never be seeded ✓ here —
+              // only "not started" (no row) or "running" (spinner) are valid states in this branch.
+              const _phase45Done = _run.status === 'complete';
+              const _phase5Running = _phase3Done && !_phase45Done;
               const _seedPhaseLabels = {
                 load: 'Rendering pages…', index: 'Loading knowledge base…',
                 phase1: 'Detecting job type…', phase2: 'Classifying pages…',
                 phase3: 'Scoring completeness…', phase4: 'Building extraction index…',
+                notes: 'Extracting plan notes…',
                 phase5: 'Extracting values…',
               };
               const _seedDonePhases = [];
@@ -5915,7 +6058,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               if (_ev.project_type != null) _seedDonePhases.push('phase1');
               if (_allClassified) _seedDonePhases.push('phase2');
               if (_phase3Done) _seedDonePhases.push('phase3');
-              if (_phase45Done) _seedDonePhases.push('phase4', 'phase5');
+              // phase4 (building the extraction index) reliably finishes near-instantly once phase3
+              // is done and before phase5 starts (see _run_phase5_only) — safe to seed done from _phase3Done.
+              // notes (one-pass verbatim transcription) runs right after phase4 and always completes
+              // before phase5 starts too — bundled into the same seed assumption for the same reason.
+              if (_phase3Done) _seedDonePhases.push('phase4', 'notes');
+              if (_phase45Done) _seedDonePhases.push('phase5');
               for (const ph of _seedDonePhases) {
                 const r = document.createElement('div');
                 r.className = 'qp-chat-phase-row done';
@@ -5929,6 +6077,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 r.className = 'qp-chat-phase-row running';
                 r.innerHTML = `<span class="qp-chat-phase-spinner"></span><span class="qp-chat-phase-label">Classifying pages…</span>`;
                 _phaseRows.set('phase2', r);
+                _seedList.appendChild(r);
+              }
+              // If extraction is mid-flight (past the phase4 gate, run not yet complete), add a
+              // running spinner for phase5 too — same pattern as phase2 above. Registered in
+              // _phaseRows (not _seededPhases) so the live phase_complete handler can still flip
+              // it to ✓ if this tab's connection happens to receive that event.
+              if (_phase5Running) {
+                const r = document.createElement('div');
+                r.className = 'qp-chat-phase-row running';
+                r.innerHTML = `<span class="qp-chat-phase-spinner"></span><span class="qp-chat-phase-label">${_seedPhaseLabels.phase5}</span>`;
+                _phaseRows.set('phase5', r);
                 _seedList.appendChild(r);
               }
 
@@ -6019,9 +6178,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 _idxCount++;
               }
               if (_idxCount > 0 && _panel) _panel.style.display = '';
+
+              // Context-usage meter — seed from the persisted per-role snapshot so it survives
+              // a hard refresh / reconnect instead of only reflecting events received during the
+              // current connection (see TODO_L/TODO_S). Store on the element (not a local var) so
+              // the live 'context_usage' listener (which reads/writes box._qpCtxWindows) merges
+              // new events into this seed instead of starting from an empty object.
+              box._qpCtxWindows = _ctxUsageToWindows(_run.context_usage);
+              _renderCtxWindowStatus(_liveMain.querySelector('.qp-ctx-window-status'), box._qpCtxWindows);
             }
           } catch (_e) {}
-          if (_livePanel) { _livePanel.innerHTML = ''; _livePanel.appendChild(_liveMain); _livePanel.style.display = ''; }
+          if (_livePanel) { _livePanel.innerHTML = ''; _livePanel.appendChild(_liveMain); _livePanel.style.display = ''; _ensureQpPanelChrome(_livePanel); }
           hideWelcomeScreen();
           uiModule.scrollHistory();
         }
@@ -6038,7 +6205,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           _liveMain?.querySelectorAll('.qp-chat-phase-row.running').forEach(row => {
             row.classList.remove('running');
             row.classList.add('error');
-            row.querySelector('.qp-chat-phase-spinner')?.remove();
+            row.querySelector('.qp-chat-phase-spinner')?.replaceWith(Object.assign(document.createElement('span'), { className: 'qp-chat-phase-x', textContent: '✗' }));
           });
           const _phasesList = _liveMain?.querySelector('.qp-chat-phases-list');
           if (_phasesList && runId) {
@@ -6072,7 +6239,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             _liveMain?.querySelectorAll('.qp-chat-phase-row.running').forEach(row => {
               row.classList.remove('running');
               row.classList.add('error');
-              row.querySelector('.qp-chat-phase-spinner')?.remove();
+              row.querySelector('.qp-chat-phase-spinner')?.replaceWith(Object.assign(document.createElement('span'), { className: 'qp-chat-phase-x', textContent: '✗' }));
             });
           };
           const _close = () => {
@@ -6092,8 +6259,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               _cb._qpLiveBubble = null;
               _cb._qpLiveText = '';
             }
-            // Save final state — captures index values and mid-phase content on any close
-            if (_liveMain) sessionStorage.setItem(`qp_pipeline_html_${runId}`, _liveMain.innerHTML);
+            // Save final state — captures index values and mid-phase content on any close.
+            // Swallow QuotaExceededError — a failed cache write must never block resolve()
+            // below, or the awaited promise in enterProposalMode() hangs forever and the
+            // chat input stays disabled (see TODO_J/TODO_P).
+            if (_liveMain) {
+              try { sessionStorage.setItem(`qp_pipeline_html_${runId}`, _liveMain.innerHTML); } catch {}
+            }
             _proposalCloseStream = null;
             resolve();
           };
@@ -6105,8 +6277,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               const d = JSON.parse(e.data);
               // Skip phases already shown as ✓ by the server seed (avoid duplicate rows)
               if (_seededPhases.has(d.phase)) return;
-              // Skip phase2 if seed already added a running spinner for it
-              if (d.phase === 'phase2' && _phaseRows.has('phase2')) return;
+              // Skip phase2/phase5 if seed already added a running spinner for it
+              if (_phaseRows.has(d.phase)) return;
               const label = _phaseLabels[d.phase] || d.label || d.phase;
               const list = _liveMain?.querySelector('.qp-chat-phases-list');
               if (!list) return;
@@ -6188,9 +6360,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   list.appendChild(_rerunBtn);
                 }
               }
-              // Cache AFTER all visual updates so grid/export-btn are included
+              // Cache AFTER all visual updates so grid/export-btn are included.
+              // Swallow QuotaExceededError so a full sessionStorage doesn't fall through
+              // to the catch below and re-crash inside _close()'s own setItem call.
               if (_liveMain) {
-                sessionStorage.setItem(`qp_pipeline_html_${runId}`, _liveMain.innerHTML);
+                try { sessionStorage.setItem(`qp_pipeline_html_${runId}`, _liveMain.innerHTML); } catch {}
               }
               if (d.phase === 'phase5' || d.phase === 'phase6') {
                 _close();
@@ -6270,21 +6444,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               if (_ctxDiv) {
                 _cb._qpCtxWindows = _cb._qpCtxWindows || {};
                 _cb._qpCtxWindows[d.role] = { pct: _ctxPct, window: d.context_window, model: d.model };
-                const _fmtCtx = (info) => {
-                  if (!info) return null;
-                  const pctStr = info.pct != null ? `${info.pct.toFixed(1)}%` : '?%';
-                  const winStr = info.window ? (info.window >= 1000000
-                    ? `${(info.window / 1000000).toFixed(1)}M` : `${Math.round(info.window / 1000)}k`) : '';
-                  const color = info.pct >= 85 ? 'var(--red,#e06c75)' : info.pct >= 70 ? '#ff9900' : 'inherit';
-                  return `<span style="color:${color}">${pctStr}${winStr ? ' of ' + winStr : ''}</span>`;
-                };
-                const parts = [];
-                if (_cb._qpCtxWindows.claude) parts.push(`Manager: ${_fmtCtx(_cb._qpCtxWindows.claude)}`);
-                if (_cb._qpCtxWindows.gemini) parts.push(`Gemini: ${_fmtCtx(_cb._qpCtxWindows.gemini)}`);
-                if (parts.length) {
-                  _ctxDiv.innerHTML = parts.join(' &nbsp;|&nbsp; ');
-                  _ctxDiv.style.display = 'flex';
-                }
+                _renderCtxWindowStatus(_ctxDiv, _cb._qpCtxWindows);
               }
             } catch {}
           });
@@ -6381,7 +6541,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             }
             _close();
           });
-          setTimeout(_close, 30 * 60 * 1000);
+          // No wall-clock timeout: long extraction runs routinely exceed 30 min.
+          // Every termination path already closes the stream — terminal
+          // phase_complete, the error handler (fires on any transport drop),
+          // session-switch guards, and _proposalCloseStream/Stop button.
         });
 
         // Post-stream refresh: fill any pages/classifications the EventSource missed
