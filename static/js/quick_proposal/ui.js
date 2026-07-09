@@ -526,6 +526,30 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                         <div class="qp-import-run-label" id="qp-import-run-label"></div>
                     </div>
                 </div>
+                <div class="qp-import-section" id="qp-import-notes-section">
+                    <label class="qp-import-toggle">
+                        <input type="checkbox" id="qp-import-notes-toggle"> Import Notes
+                        <span class="qp-import-hint">Skip notes extraction — reuse transcribed notes from a previous run</span>
+                    </label>
+                    <div class="qp-import-picker" id="qp-import-notes-picker" style="display:none">
+                        <select class="qp-model-select" id="qp-import-notes-run-select">
+                            <option value="">Loading runs…</option>
+                        </select>
+                        <div class="qp-import-run-label" id="qp-import-notes-run-label"></div>
+                    </div>
+                </div>
+                <div class="qp-import-section" id="qp-import-scope-section">
+                    <label class="qp-import-toggle">
+                        <input type="checkbox" id="qp-import-scope-toggle"> Import Scope Analysis
+                        <span class="qp-import-hint">Skip scope analysis — reuse a previous run's scope determination</span>
+                    </label>
+                    <div class="qp-import-picker" id="qp-import-scope-picker" style="display:none">
+                        <select class="qp-model-select" id="qp-import-scope-run-select">
+                            <option value="">Loading runs…</option>
+                        </select>
+                        <div class="qp-import-run-label" id="qp-import-scope-run-label"></div>
+                    </div>
+                </div>
                 <button class="qp-run-btn" id="qp-run-btn" disabled>Start</button>
             </div>
             <div class="qp-status" id="qp-status" style="display:none"></div>
@@ -672,6 +696,66 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
         importLabel.textContent = opt.value ? `Will import from: ${opt.textContent.trim()}` : '';
     });
 
+    // Import notes toggle
+    const importNotesToggle = overlay.querySelector('#qp-import-notes-toggle');
+    const importNotesPicker = overlay.querySelector('#qp-import-notes-picker');
+    const importNotesSelect = overlay.querySelector('#qp-import-notes-run-select');
+    const importNotesLabel  = overlay.querySelector('#qp-import-notes-run-label');
+
+    importNotesToggle.addEventListener('change', () => {
+        importNotesPicker.style.display = importNotesToggle.checked ? 'block' : 'none';
+        if (importNotesToggle.checked && importNotesSelect.options.length <= 1) {
+            fetch('/api/quick_proposal/runs', { credentials: 'same-origin' })
+                .then(r => r.ok ? r.json() : [])
+                .then(runs => {
+                    importNotesSelect.innerHTML = '<option value="">— select a previous run —</option>';
+                    runs.forEach(run => {
+                        const opt = document.createElement('option');
+                        opt.value = run.id;
+                        const ts = run.timestamp ? new Date(run.timestamp * 1000).toLocaleDateString() : '';
+                        opt.textContent = `${run.filename || run.id}${ts ? '  (' + ts + ')' : ''}`;
+                        importNotesSelect.appendChild(opt);
+                    });
+                })
+                .catch(() => { importNotesSelect.innerHTML = '<option value="">Could not load runs</option>'; });
+        }
+    });
+
+    importNotesSelect.addEventListener('change', () => {
+        const opt = importNotesSelect.options[importNotesSelect.selectedIndex];
+        importNotesLabel.textContent = opt.value ? `Will import from: ${opt.textContent.trim()}` : '';
+    });
+
+    // Import scope analysis toggle
+    const importScopeToggle = overlay.querySelector('#qp-import-scope-toggle');
+    const importScopePicker = overlay.querySelector('#qp-import-scope-picker');
+    const importScopeSelect = overlay.querySelector('#qp-import-scope-run-select');
+    const importScopeLabel  = overlay.querySelector('#qp-import-scope-run-label');
+
+    importScopeToggle.addEventListener('change', () => {
+        importScopePicker.style.display = importScopeToggle.checked ? 'block' : 'none';
+        if (importScopeToggle.checked && importScopeSelect.options.length <= 1) {
+            fetch('/api/quick_proposal/runs', { credentials: 'same-origin' })
+                .then(r => r.ok ? r.json() : [])
+                .then(runs => {
+                    importScopeSelect.innerHTML = '<option value="">— select a previous run —</option>';
+                    runs.forEach(run => {
+                        const opt = document.createElement('option');
+                        opt.value = run.id;
+                        const ts = run.timestamp ? new Date(run.timestamp * 1000).toLocaleDateString() : '';
+                        opt.textContent = `${run.filename || run.id}${ts ? '  (' + ts + ')' : ''}`;
+                        importScopeSelect.appendChild(opt);
+                    });
+                })
+                .catch(() => { importScopeSelect.innerHTML = '<option value="">Could not load runs</option>'; });
+        }
+    });
+
+    importScopeSelect.addEventListener('change', () => {
+        const opt = importScopeSelect.options[importScopeSelect.selectedIndex];
+        importScopeLabel.textContent = opt.value ? `Will import from: ${opt.textContent.trim()}` : '';
+    });
+
     // Pre-fill from an existing upload (Proposal Runs → Re-run flow)
     if (prefillUploadId) {
         fileChosen.textContent = `↩ ${prefillFilename || prefillUploadId}`;
@@ -700,7 +784,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
         onFileSelected(e.dataTransfer.files[0]);
     });
 
-    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename, parseInt(retryInput.value, 10) || 3, [...fallbackModels], importToggle.checked ? importSelect.value : '', projectTypeSelect.value, autoModeToggle.checked));
+    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename, parseInt(retryInput.value, 10) || 3, [...fallbackModels], importToggle.checked ? importSelect.value : '', projectTypeSelect.value, autoModeToggle.checked, importNotesToggle.checked ? importNotesSelect.value : '', importScopeToggle.checked ? importScopeSelect.value : ''));
 
     return overlay;
 }
@@ -746,7 +830,7 @@ export async function loadModels(select, { preferClaude = false } = {}) {
     }
 }
 
-async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '', geminiRetryAttempts = 3, geminiFallbackModels = [], importFromRunId = '', projectType = '', autoMode = true) {
+async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '', geminiRetryAttempts = 3, geminiFallbackModels = [], importFromRunId = '', projectType = '', autoMode = true, importNotesFromRunId = '', importScopeFromRunId = '') {
     const runMetaState = {};
     const runBtn       = overlay.querySelector('#qp-run-btn');
     const cancelBtn    = overlay.querySelector('#qp-cancel-btn');
@@ -822,7 +906,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         const res = await fetch('/api/quick_proposal/start-proposal-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId, project_type: projectType }),
+            body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId, import_notes_from_run_id: importNotesFromRunId, import_scope_from_run_id: importScopeFromRunId, project_type: projectType }),
             credentials: 'same-origin',
         });
         if (!res.ok) throw new Error(`Run failed: ${res.status}`);

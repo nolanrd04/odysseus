@@ -238,6 +238,8 @@ class RunRequest(BaseModel):
     gemini_fallback_models: List[str] = []
     holdout_kp_path: str = ""
     import_from_run_id: str = ""
+    import_notes_from_run_id: str = ""
+    import_scope_from_run_id: str = ""
     project_type: str = ""  # "" = auto-detect via Phase 1; else: residential_subdivision | commercial_development | rural_access | mixed
 
 
@@ -412,6 +414,19 @@ def _save_notes_text(run_id: str, notes_text: dict) -> None:
         logger.warning(f"[quick_proposal] notes_text save failed run={run_id}: {e}")
 
 
+def _save_scope_analysis(run_id: str, scope_analysis: str) -> None:
+    """Patch extracted_data.scope_analysis into results.json without touching other keys."""
+    results_path = Path(RUNS_DIR) / run_id / "results.json"
+    try:
+        existing: dict = {}
+        if results_path.is_file():
+            existing = json.loads(results_path.read_text(encoding="utf-8"))
+        existing.setdefault("extracted_data", {})["scope_analysis"] = scope_analysis
+        results_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[quick_proposal] scope_analysis save failed run={run_id}: {e}")
+
+
 def _save_context_usage(run_id: str, role: str, payload: dict) -> None:
     """Patch the latest per-role context-usage snapshot into results.json without touching other keys.
 
@@ -438,6 +453,13 @@ async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_mod
         await _emit(queue, "phase_complete", phase="phase4")
 
         await phase_notes_extraction(
+            index, queue,
+            gemini_model=gemini_model,
+            retry_attempts=retry_attempts,
+            gemini_fallback_models=gemini_fallback_models,
+        )
+
+        await phase_scope_analysis(
             index, queue,
             gemini_model=gemini_model,
             retry_attempts=retry_attempts,
@@ -1052,6 +1074,20 @@ _GEMINI_PHASE3_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_scope_analysis",
+            "description": "Writes your complete scope-boundary analysis to the shared scope store. This is separate from index_write and is only used during the scope-analysis phase — see that phase's prompt for what to cover.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The complete scope analysis write-up"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
 ]
 
 
@@ -1068,6 +1104,11 @@ _GEMINI_COMPLETENESS_TOOLS = [
 _GEMINI_NOTES_TOOLS = [
     t for t in _GEMINI_PHASE3_TOOLS
     if t["function"]["name"] in {"enhance_region", "crop_page", "get_image", "list_images", "write_note", "index_write"}
+]
+
+_GEMINI_SCOPE_TOOLS = [
+    t for t in _GEMINI_PHASE3_TOOLS
+    if t["function"]["name"] in {"enhance_region", "crop_page", "enhance_subregion", "get_image", "list_images", "write_scope_analysis", "index_write"}
 ]
 
 # run_id → asyncio.Event set by /advance-phase to unblock a waiting pipeline gate
@@ -1277,6 +1318,16 @@ async def _tool_write_note(args: dict, index, queue: asyncio.Queue) -> list:
     return [{"type": "text", "text": f"Wrote note for {bbox_id} ({len(text)} chars)"}]
 
 
+async def _tool_write_scope_analysis(args: dict, index, queue: asyncio.Queue) -> list:
+    """Writes the scope-boundary analysis to a store separate from extracted_values, so the
+    manager's default read_index() doesn't balloon with it — see read_index(section='scope')."""
+    text = args.get("text", "")
+    index.extracted_data["scope_analysis"] = text
+    await _emit(queue, "scope_update", chars=len(text))
+    _save_scope_analysis(index.run_id, text)
+    return [{"type": "text", "text": f"Wrote scope analysis ({len(text)} chars)"}]
+
+
 async def _execute_gemini_tool(
     name: str, args: dict, index, queue: asyncio.Queue, image_store: dict
 ) -> list:
@@ -1297,11 +1348,27 @@ async def _execute_gemini_tool(
         return await _tool_index_write(args, index, queue)
     elif name == "write_note":
         return await _tool_write_note(args, index, queue)
+    elif name == "write_scope_analysis":
+        return await _tool_write_scope_analysis(args, index, queue)
     else:
         return [{"type": "text", "text": f"Unknown tool: {name}"}]
 
 
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+def _is_retryable_manager_error(err_msg: str) -> bool:
+    """True for transient manager-call failures worth retrying (Anthropic's mid-stream
+    `overloaded_error`, rate limits, 5xx, and connection drops) — as opposed to fatal
+    errors (bad request, auth, context length) that will fail identically on retry."""
+    msg = (err_msg or "").lower()
+    if "overloaded" in msg or "rate_limit" in msg or "rate limit" in msg:
+        return True
+    if "connection to model failed" in msg:
+        return True
+    for code in (429, 500, 502, 503, 504, 529):
+        if f"model returned {code}" in msg:
+            return True
+    return False
 
 
 async def _gemini_call_with_retry(
@@ -1703,6 +1770,56 @@ async def phase_notes_extraction(
     await _emit(queue, "phase_complete", phase="notes")
 
 
+async def phase_scope_analysis(
+    index,
+    queue: asyncio.Queue,
+    gemini_model: str = "",
+    retry_attempts: int = 3,
+    gemini_fallback_models: list | None = None,
+) -> None:
+    """Determine the project's actual contracted scope — which roads/areas/lots are actually
+    being built vs. shown for context only, phasing boundaries, expansions of existing
+    infrastructure, etc. — via a dedicated Gemini pass, run once before extraction begins.
+
+    Runs in its own isolated context (fresh Gemini call, own prompt file), the same way Phase 2
+    (classification) and phase_notes_extraction do. Does NOT build off the notes-extraction
+    phase's context, and its result is NOT force-fed into Phase 5's initial prompt — it is simply
+    available for the manager to pull via read_index(section='scope') on demand, exactly like
+    notes_text already is. This exists so a project's scope boundary is established up front
+    instead of the manager inferring it ad hoc mid-extraction (see TODO_PP).
+    """
+    await _emit(queue, "phase_start", phase="scope", label="Analyzing project scope…")
+
+    if index.extracted_data.get("scope_analysis"):
+        # Already populated (e.g. resuming an interrupted run) — don't re-spend API calls.
+        await _emit(queue, "phase_complete", phase="scope")
+        return
+
+    state, fallback_models_info = _build_gemini_state_for_phase(
+        "gemini_scope.txt", gemini_model, gemini_fallback_models, index
+    )
+
+    project_type = index.extracted_values.get("project_type", {}).get("value", "unknown")
+    initial_ctx = (
+        f"Project type: {project_type}\n\n"
+        "Call list_images() to see all page thumbnails, then examine the cover sheet, "
+        "overall/key sheet, and any phase-limit, project-limit, or \"not in contract\" callouts "
+        "to determine the actual contracted scope of this project. When you have a clear "
+        "picture, call write_scope_analysis(text) with your findings, then call "
+        "index_write(\"scope_analysis_complete\", true, null, \"high\") to finish."
+    )
+    await _run_gemini_with_tools(
+        initial_ctx,
+        state, index, queue,
+        retry_attempts=retry_attempts,
+        fallback_models_info=fallback_models_info,
+        tools=_GEMINI_SCOPE_TOOLS,
+        stop_keys={"scope_analysis_complete"},
+    )
+    logger.info(f"[quick_proposal] scope phase complete — {len(index.extracted_data.get('scope_analysis', ''))} chars written")
+    await _emit(queue, "phase_complete", phase="scope")
+
+
 def _kp_lookup(knowledge_pack: dict, query: str) -> str:
     """Fuzzy lookup for unit price distributions, price trends, item pair detail, or named KP sections."""
     import difflib
@@ -1712,6 +1829,14 @@ def _kp_lookup(knowledge_pack: dict, query: str) -> str:
     pairs         = knowledge_pack.get("item_pairs", {}).get("pairs", [])
 
     q = query.strip()
+    # Tool-call query strings containing an inch-mark (e.g. `4" SIDEWALKS`) sometimes
+    # round-trip through the manager's JSON tool-call arguments with a stray backslash
+    # before the quote (`4\" SIDEWALKS`). The fuzzy distributions match below tolerates
+    # this by luck (difflib similarity), but the item_pairs exact-substring match does
+    # not — it silently returns "no pairs found" even when the pair exists. Normalize
+    # any run of backslashes immediately before a quote down to a plain quote so every
+    # branch below sees the same clean string.
+    q = re.sub(r'\\+"', '"', q)
 
     # Named section lookup — "SECTION: <section_name>"
     if q.lower().startswith("section:"):
@@ -2428,14 +2553,17 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                 "the full verbatim text of every general-notes/spec/list region, already "
                 "transcribed by Gemini in a one-time pass before extraction started — call this "
                 "ONCE near the start of Phase A and read it into context; you should rarely need "
-                "to call it again this run."
+                "to call it again this run. With section='scope', returns a dedicated scope-"
+                "boundary analysis (which roads/areas/lots are actually in contract, phasing, "
+                "expansions of existing infrastructure, etc.), also written in a one-time pass "
+                "before extraction started — call this ONCE alongside section='notes'."
             ),
             "parameters": {
                 "type":       "object",
                 "properties": {
                     "section": {
                         "type": "string",
-                        "enum": ["values", "notes"],
+                        "enum": ["values", "notes", "scope"],
                         "description": "Which store to read. Defaults to 'values'.",
                     },
                 },
@@ -2575,6 +2703,23 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
 
             if "error" in resp:
                 err_msg = resp.get("error", {}).get("message", str(resp))
+                for attempt in range(1, 4):
+                    if not _is_retryable_manager_error(err_msg):
+                        break
+                    wait_s = 2 ** (attempt + 1)  # 4, 8, 16
+                    notice = f"Manager overloaded — retrying in {wait_s}s (attempt {attempt}/3)…"
+                    logger.warning(f"[quick_proposal] {notice} err={err_msg}")
+                    await _emit(queue, "extraction_message", role="retry_notice", text=notice)
+                    await asyncio.sleep(wait_s)
+                    resp = await _stream_manager_call(
+                        mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path
+                    )
+                    if "error" not in resp:
+                        break
+                    err_msg = resp.get("error", {}).get("message", str(resp))
+
+            if "error" in resp:
+                err_msg = resp.get("error", {}).get("message", str(resp))
                 logger.error(f"[quick_proposal] manager error in phase3: {err_msg}")
                 raise RuntimeError(f"Manager error: {err_msg}")
 
@@ -2586,6 +2731,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
             text_content  = msg.get("content") or ""
             tool_calls    = msg.get("tool_calls") or []
 
+            _msg_metrics: dict = {}
             if usage:
                 _ctx_payload = dict(role="claude", model=mgr_model_id,
                                      input_tokens=usage.get("prompt_tokens", 0),
@@ -2593,6 +2739,18 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                                      context_window=mgr_context_window)
                 await _emit(queue, "context_usage", **_ctx_payload)
                 _save_context_usage(index.run_id, "claude", _ctx_payload)
+                _ctx_pct = (round(_ctx_payload["input_tokens"] / mgr_context_window * 100, 1)
+                            if mgr_context_window else None)
+                # Persisted alongside the message (not just the run-level context_usage
+                # store) so the per-message stats footer survives a hard refresh instead
+                # of only showing live during the original stream.
+                _msg_metrics = {
+                    "input_tokens": _ctx_payload["input_tokens"],
+                    "output_tokens": _ctx_payload["output_tokens"],
+                    "context_percent": _ctx_pct,
+                    "context_length": mgr_context_window,
+                    "usage_source": "real",
+                }
 
             if text_content.strip():
                 await _emit(queue, "extraction_message", role="claude", text=text_content, model=mgr_model_id)
@@ -2618,7 +2776,8 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                 assistant_msg["_anthropic_native_content"] = _native_blocks
             mgr_messages.append(assistant_msg)
             _save_chat_message(session_id, "assistant", text_content or "",
-                               {"model": mgr_model_id, **({"tool_calls": tool_calls} if tool_calls else {})})
+                               {"model": mgr_model_id, **_msg_metrics,
+                                **({"tool_calls": tool_calls} if tool_calls else {})})
 
             logger.info(f"[quick_proposal] manager finish_reason={finish_reason} output_tokens={usage.get('completion_tokens', '?')}")
 
@@ -2700,6 +2859,8 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     section = tool_input.get("section", "values")
                     if section == "notes":
                         index_json = json.dumps(index.extracted_data.get("notes_text", {}), indent=2)
+                    elif section == "scope":
+                        index_json = json.dumps(index.extracted_data.get("scope_analysis", ""), indent=2)
                     else:
                         index_json = json.dumps(index.extracted_values, indent=2)
                     await _emit(queue, "extraction_message",
@@ -2820,6 +2981,8 @@ async def run_pipeline(
     gemini_fallback_models: list | None = None,
     holdout_kp_path: str = "",
     import_from_run_id: str = "",
+    import_notes_from_run_id: str = "",
+    import_scope_from_run_id: str = "",
     project_type: str = "",
     session_id: str = "",
 ) -> None:
@@ -2957,13 +3120,45 @@ async def run_pipeline(
         await _emit(queue, "phase_start", phase="phase4", label="Building extraction index…")
         await _emit(queue, "phase_complete", phase="phase4")
 
-        # Step 4.5 — one-pass verbatim notes transcription (see phase_notes_extraction docstring)
-        await phase_notes_extraction(
-            index, queue,
-            gemini_model=gemini_model,
-            retry_attempts=gemini_retry_attempts,
-            gemini_fallback_models=gemini_fallback_models,
-        )
+        # Step 4.5 — one-pass verbatim notes transcription (or import from a previous run)
+        if import_notes_from_run_id:
+            src_notes_path = Path(RUNS_DIR) / import_notes_from_run_id / "results.json"
+            if not src_notes_path.is_file():
+                raise RuntimeError(f"Import run {import_notes_from_run_id} has no saved results")
+            src_notes = json.loads(src_notes_path.read_text(encoding="utf-8"))
+            notes_text = (src_notes.get("extracted_data") or {}).get("notes_text") or {}
+            index.extracted_data["notes_text"] = notes_text
+            _save_notes_text(run_id, notes_text)
+            await _emit(queue, "phase_start", phase="notes", label="Importing notes…", cached=False)
+            await _emit(queue, "phase_complete", phase="notes")
+            logger.info(f"[quick_proposal] imported {len(notes_text)} notes from run {import_notes_from_run_id}")
+        else:
+            await phase_notes_extraction(
+                index, queue,
+                gemini_model=gemini_model,
+                retry_attempts=gemini_retry_attempts,
+                gemini_fallback_models=gemini_fallback_models,
+            )
+
+        # Step 4.6 — scope analysis (or import from a previous run)
+        if import_scope_from_run_id:
+            src_scope_path = Path(RUNS_DIR) / import_scope_from_run_id / "results.json"
+            if not src_scope_path.is_file():
+                raise RuntimeError(f"Import run {import_scope_from_run_id} has no saved results")
+            src_scope = json.loads(src_scope_path.read_text(encoding="utf-8"))
+            scope_text = (src_scope.get("extracted_data") or {}).get("scope_analysis") or ""
+            index.extracted_data["scope_analysis"] = scope_text
+            _save_scope_analysis(run_id, scope_text)
+            await _emit(queue, "phase_start", phase="scope", label="Importing scope analysis…", cached=False)
+            await _emit(queue, "phase_complete", phase="scope")
+            logger.info(f"[quick_proposal] imported scope analysis ({len(scope_text)} chars) from run {import_scope_from_run_id}")
+        else:
+            await phase_scope_analysis(
+                index, queue,
+                gemini_model=gemini_model,
+                retry_attempts=gemini_retry_attempts,
+                gemini_fallback_models=gemini_fallback_models,
+            )
 
         # Gate before Phase 3
         await _wait_for_gate(run_id, queue, "phase3", "Extraction")
@@ -3084,6 +3279,7 @@ async def _qp_continuation_task(
             logger.warning(f"[qp_chat] could not load manager endpoint: {e}")
     mgr_url      = mgr_url      or "https://api.anthropic.com/v1/chat/completions"
     mgr_model_id = mgr_model_id or _CLAUDE_MODEL
+    mgr_context_window = await _fetch_context_window_async(mgr_url, mgr_model_id) or 200000
 
     # Load chat history from DB.
     db = _SL()
@@ -3176,12 +3372,14 @@ async def _qp_continuation_task(
                 "description": (
                     "Returns shared index state as JSON. With no arguments (or section='values'), "
                     "returns all extracted values. With section='notes', returns the full verbatim "
-                    "text of every general-notes/spec/list region transcribed during extraction."
+                    "text of every general-notes/spec/list region transcribed during extraction. "
+                    "With section='scope', returns the scope-boundary analysis written before "
+                    "extraction started."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "section": {"type": "string", "enum": ["values", "notes"]},
+                        "section": {"type": "string", "enum": ["values", "notes", "scope"]},
                     },
                     "required": [],
                 },
@@ -3208,9 +3406,33 @@ async def _qp_continuation_task(
             return
 
         choice        = resp.get("choices", [{}])[0]
+        finish_reason = choice.get("finish_reason")
         msg           = choice.get("message", {})
         text_content  = msg.get("content") or ""
         tool_calls    = msg.get("tool_calls") or []
+        usage         = resp.get("usage", {})
+
+        # Emit + persist token/context usage the same way phase5_extraction_loop does,
+        # so the message footer shows live stats AND they survive a hard refresh
+        # (previously phase-6 continuation chat never tracked this at all — the
+        # per-message metadata only ever had "model").
+        _msg_metrics: dict = {}
+        if usage:
+            _ctx_payload = dict(role="claude", model=mgr_model_id,
+                                 input_tokens=usage.get("prompt_tokens", 0),
+                                 output_tokens=usage.get("completion_tokens", 0),
+                                 context_window=mgr_context_window)
+            await _emit(queue, "context_usage", **_ctx_payload)
+            _save_context_usage(run_id, "claude", _ctx_payload)
+            _ctx_pct = (round(_ctx_payload["input_tokens"] / mgr_context_window * 100, 1)
+                        if mgr_context_window else None)
+            _msg_metrics = {
+                "input_tokens": _ctx_payload["input_tokens"],
+                "output_tokens": _ctx_payload["output_tokens"],
+                "context_percent": _ctx_pct,
+                "context_length": mgr_context_window,
+                "usage_source": "real",
+            }
 
         if text_content.strip():
             await _emit(queue, "extraction_message", role="claude", text=text_content, model=mgr_model_id)
@@ -3223,7 +3445,22 @@ async def _qp_continuation_task(
             assistant_msg["_anthropic_native_content"] = _native_blocks
         mgr_messages.append(assistant_msg)
         _save_chat_message(session_id, "assistant", text_content or "",
-                           {"model": mgr_model_id, **({"tool_calls": tool_calls} if tool_calls else {})})
+                           {"model": mgr_model_id, **_msg_metrics,
+                            **({"tool_calls": tool_calls} if tool_calls else {})})
+
+        # A long answer (e.g. a full actuals-vs-predicted reconciliation) can hit the
+        # 16000-token output cap mid-sentence with no tool call requested — `not tool_calls`
+        # below would treat that as "the manager is done" and silently truncate the reply.
+        # Mirrors phase5_extraction_loop's identical handling of finish_reason == "length".
+        if finish_reason == "length":
+            logger.warning("[qp_chat] manager output truncated (finish_reason=length) — sending continuation")
+            await _emit(queue, "extraction_message", role="claude",
+                        text="*(output truncated — continuing…)*", model=mgr_model_id)
+            _nudge = ("Your reply was cut off mid-generation. Continue exactly where you left off — "
+                      "do not repeat anything already written.")
+            mgr_messages.append({"role": "user", "content": _nudge})
+            _save_chat_message(session_id, "user", _nudge, {"source": "pipeline_nudge"})
+            continue
 
         if not tool_calls:
             break
@@ -3254,6 +3491,8 @@ async def _qp_continuation_task(
                 section = tool_input.get("section", "values")
                 if section == "notes":
                     result = json.dumps(index.extracted_data.get("notes_text", {}), indent=2)
+                elif section == "scope":
+                    result = json.dumps(index.extracted_data.get("scope_analysis", ""), indent=2)
                 else:
                     result = json.dumps(index.extracted_values, indent=2)
                 _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "read_index"})
@@ -3361,6 +3600,8 @@ def setup_quick_proposal_routes(session_manager=None):
             gemini_fallback_models=req.gemini_fallback_models or None,
             holdout_kp_path=req.holdout_kp_path,
             import_from_run_id=req.import_from_run_id,
+            import_notes_from_run_id=req.import_notes_from_run_id,
+            import_scope_from_run_id=req.import_scope_from_run_id,
             project_type=req.project_type,
             session_id=session_id,
         ))
@@ -3397,6 +3638,8 @@ def setup_quick_proposal_routes(session_manager=None):
             gemini_fallback_models=req.gemini_fallback_models or None,
             holdout_kp_path=req.holdout_kp_path,
             import_from_run_id=req.import_from_run_id,
+            import_notes_from_run_id=req.import_notes_from_run_id,
+            import_scope_from_run_id=req.import_scope_from_run_id,
             project_type=req.project_type,
         ))
         _active_tasks[run_id] = task
@@ -3683,6 +3926,13 @@ def setup_quick_proposal_routes(session_manager=None):
             saved_notes = (results.get("extracted_data") or {}).get("notes_text")
             if saved_notes:
                 index.extracted_data["notes_text"] = saved_notes
+
+        # Scope analysis describes a static property of this same plan set (unlike notes,
+        # it doesn't need an opt-in toggle) — always carry it forward so phase_scope_analysis's
+        # "already populated" check skips re-running Gemini on every phase5-only rerun.
+        saved_scope = (results.get("extracted_data") or {}).get("scope_analysis")
+        if saved_scope:
+            index.extracted_data["scope_analysis"] = saved_scope
 
         # Write the starting extracted_values to disk immediately so the frontend
         # seed fetch (which runs right after this request returns) sees the correct

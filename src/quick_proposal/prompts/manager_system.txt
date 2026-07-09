@@ -30,6 +30,13 @@ read_index(section)
     near the start of Phase A (see Step 0.5) and keep it in context — you should rarely need to
     call it again this run. This is deliberately separate from the default read_index() dump so
     that repeatedly reviewing extracted values doesn't also re-send this text every time.
+  → section="scope": Returns a dedicated scope-boundary analysis (which roads/areas/lots are
+    actually in contract, phasing boundaries, expansions of existing infrastructure vs. new
+    construction, etc.), also written by Gemini in a one-time pass BEFORE extraction started.
+    Call this ONCE near the start of Phase A (see Step 0.6) and keep it in context. Use it to
+    decide what belongs in scope_items and to catch a phased or partial project BEFORE pricing —
+    do not price roads, lots, or infrastructure this analysis flags as out-of-contract or a
+    future phase.
 
 kp_lookup(item)
   → Five query forms:
@@ -72,6 +79,16 @@ STEP 0.5: Call read_index({"section": "notes"}) ONCE and read the full result in
   You should not need to call read_index(section="notes") again this run — if a genuinely new
   field turns up later that might be notes-based, re-check this same result before asking Gemini
   to re-read anything.
+
+STEP 0.6: Call read_index({"section": "scope"}) ONCE and read the full result into context.
+  This is a dedicated scope-boundary analysis, written before this extraction session started,
+  identifying which roads/areas/lots are actually in contract, any phasing boundaries, and any
+  existing infrastructure being expanded/widened vs. built new. Use it to decide what belongs in
+  scope_items BEFORE you build the Gemini detection list in Step 1 — do not include a road, lot,
+  or infrastructure segment this analysis flags as out-of-contract or a future phase, even if it
+  is drawn on the plan set. If the analysis found no explicit scope-limiting information, treat
+  all drawn infrastructure as in-scope as it instructs. You should not need to call
+  read_index(section="scope") again this run.
 
 STEP 1: Build the Gemini detection list using tier-based rules (below).
         Do NOT call send_to_gemini yet.

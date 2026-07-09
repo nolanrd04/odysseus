@@ -12,12 +12,11 @@ zoom into the plan pages and read the values precisely.
 
 enhance_region(bbox_id, dpi=300)
   → Renders a cropped region of the source plan at high DPI. Returns the image inline.
-    Use this to read specific values — stationing labels, dimension callouts, pipe labels,
-    lot count tables, pavement specs. Always zoom in before committing a value.
+    Use this to read specific values — stationing labels, dimension callouts, pipe labels, lot count tables, pavement specs. Always zoom in before committing a value.
+    IT IS POSSIBLE AN ENHANCEMENT IS NOT GOOD ENOUGH. If you want to zoom in more use crop_page where the x1, y1, x2, and y2 paramters should create a zoom box inside the enhance region you are zooming in on.
 
 index_read()
-  → Returns ALL currently extracted values as JSON. Call this at the start of each new area
-    of extraction to see what has already been written — avoid overwriting high-confidence values.
+  → Returns ALL currently extracted values as JSON. Call this at the start of each new area of extraction to see what has already been written — avoid overwriting high-confidence values.
 
 crop_page(page_idx, x1, y1, x2, y2, dpi=200)
   → Renders a free-form crop of any page area directly from the source PDF at high DPI.
@@ -28,9 +27,7 @@ crop_page(page_idx, x1, y1, x2, y2, dpi=200)
     0, 0, 100, 100 will just be the full image.
     Instead of generating the same image again, use get_image() to get an existing image.
     (3.33, 12.30, 45.60, 55.43) is an example of a far more focused image.
-    Another highly valuable use case is to move existing bounding boxes. For example, if you
-    enhanhance an image with bounding box 25, 50, 45, 50 but the text you need goes off to the right,
-    you could just crop to 10, 50, 30, 50 to move the image right.
+    Another highly valuable use case is to move existing bounding boxes. For example, if you enhanhance an image with bounding box 25, 50, 45, 50 but the text you need goes off to the right, you could just crop to 10, 50, 30, 50 to move the image right.
 
 enhance_subregion(parent_bbox_id, x1, y1, x2, y2, dpi=300)
   → Zooms into a sub-area of an existing Phase 1 bbox. Supply coordinates relative to
@@ -248,12 +245,24 @@ ballast_is_separate_pay_item — This asks whether the BID prices ballast/base r
   typical section alone.
   1. Look first for a bid schedule, quantity sheet, or engineer's estimate sheet — these resolve it
      directly if present.
-  2. Otherwise look for an explicit keynote or spec note naming ballast/crushed aggregate base as its
-     own pay item (e.g. "AGGREGATE SUBBASE (BALLAST) SHALL CONFORM TO...", or "12\" BALLAST" called
-     out as a distinct line separate from the paving keynote).
-  3. Write true or false ONLY when you found language like step 1 or 2 — quote the exact phrase in
-     your summary text.
-  4. If you found neither — write NULL, not false. Say so explicitly: "ballast_is_separate_pay_item:
+  2. Otherwise look for an explicit keynote or spec note that assigns ballast its OWN itemized callout,
+     separate from the paving/base keynote — e.g. a numbered keynote list where asphalt, base, and
+     ballast each get their own line (like "1. HOT MIX ASPHALT... 2. CRUSHED AGGREGATE BASE...
+     3. AGGREGATE SUBBASE (BALLAST) SHALL CONFORM TO..."). That kind of independently-itemized layer
+     is real evidence.
+  3. DOES NOT COUNT as evidence, no matter how confident it sounds: general notes about ballast
+     MATERIAL QUALITY, TESTING, or SUBMITTAL requirements — e.g. "SUBMIT BALLAST GRADATION FOR CITY
+     REVIEW", "AGGREGATE SUBBASE SHALL CONFORM TO ISPWC SECTION 802", "COMPACT TO 95% RELATIVE
+     DENSITY". Every job has clauses like this regardless of how ballast is billed — they are
+     construction-quality requirements, not bid-schedule structure. Do not write true based on this
+     kind of language, even if it's the only mention of "ballast" you can find.
+  4. If the paving spec is written in "X/Y" shorthand (e.g. "2/4\" PAVING", "3/6\" PAVING") and you
+     find no independent ballast keynote or bid line, treat that as a signal TOWARD false/bundled —
+     this portfolio prices "X/Y PAVING" as one bundled SY rate by convention.
+  5. Write true or false ONLY when you found language like step 1 or 2 — quote the exact phrase in
+     your summary text. If your quote is actually a materials-QC clause (step 3), you have not met
+     the bar — write null instead.
+  6. If you found neither — write NULL, not false. Say so explicitly: "ballast_is_separate_pay_item:
      no bid-schedule or keynote evidence found — writing null." False is a claim you can't support
      without evidence; null tells the manager this is genuinely undetermined.
 

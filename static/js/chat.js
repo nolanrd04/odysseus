@@ -1059,6 +1059,30 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 }
                 if (_qpEvt === 'extraction_message') {
                   try { _appendQpMessage(JSON.parse(_qpRaw)); } catch {}
+                } else if (_qpEvt === 'context_usage') {
+                  // Mirrors the EventSource context_usage handler used by the live
+                  // pipeline (enterProposalMode) — this reader loop is a separate
+                  // consumer (POST body, not EventSource) for phase-6 continuation
+                  // chat and previously dropped this event type entirely, so the
+                  // message footer never got token/context stats for a phase-6 turn.
+                  try {
+                    const _d = JSON.parse(_qpRaw);
+                    const _cb = document.getElementById('chat-history');
+                    if (_cb) {
+                      if (!_cb._qpPendingMetrics) _cb._qpPendingMetrics = {};
+                      const _ctxPct = _d.context_window ? (_d.input_tokens / _d.context_window * 100) : null;
+                      _cb._qpPendingMetrics[_d.role] = {
+                        input_tokens: _d.input_tokens || 0,
+                        output_tokens: _d.output_tokens || 0,
+                        context_percent: _ctxPct != null ? Math.round(_ctxPct * 10) / 10 : undefined,
+                        context_length: _d.context_window || 0,
+                        model: _d.model || '',
+                        usage_source: 'real',
+                      };
+                      _cb._qpCtxWindows = _cb._qpCtxWindows || {};
+                      _cb._qpCtxWindows[_d.role] = { pct: _ctxPct, window: _d.context_window, model: _d.model };
+                    }
+                  } catch {}
                 }
               }
             }
@@ -5789,11 +5813,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         _el = box._qpLiveBubble;
         box._qpLiveBubble = null;
         box._qpLiveText = '';
+        // This bubble was hand-built at claude_text_start (not via chatRenderer.addMessage),
+        // so it never got a footer — add one now so copy/edit/delete/more-actions show up.
+        if (!_el.querySelector('.msg-footer')) {
+          _el.appendChild(chatRenderer.createMsgFooter(_el));
+        }
       } else {
         _el = chatRenderer.addMessage('assistant', data.text || '', data.model || null, {});
       }
       if (_el) {
-        _el.querySelector('.msg-footer')?.remove();
         if (box._qpPendingMetrics.claude) {
           chatRenderer.displayMetrics(_el, box._qpPendingMetrics.claude);
           delete box._qpPendingMetrics.claude;
@@ -5803,7 +5831,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     } else if (data.role === 'gemini') {
       const _el = chatRenderer.addMessage('assistant', data.text || '', null, { character_name: 'Gemini' });
       if (_el) {
-        _el.querySelector('.msg-footer')?.remove();
         if (box._qpPendingMetrics.gemini) {
           chatRenderer.displayMetrics(_el, box._qpPendingMetrics.gemini);
           delete box._qpPendingMetrics.gemini;
@@ -5885,6 +5912,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // Close any previous EventSource immediately so it can't compete for SSE events
     if (_proposalCloseStream) { _proposalCloseStream(); _proposalCloseStream = null; }
     if (sessionModule.getCurrentSessionId() !== sessionId) return;
+    // Mark this session as a live proposal session immediately, not after the
+    // (potentially slow) status fetch + panel-reconstruction below finishes.
+    // Previously this was only set at the very end of the function, which left
+    // a window where a follow-up message sent mid-reconstruction would fall
+    // through to the ordinary chat-send path instead of POST /runs/{runId}/chat-stream
+    // (see _isProposalContinuation, ~L882) — causing it to skip the QP-specific
+    // manager context entirely and land on a resettable / low-context reply.
+    _proposalRunId = runId;
+    _proposalSessionId = sessionId;
     // Clear stale per-session maps from any previous proposal session
     const _chatBox = document.getElementById('chat-history');
     if (_chatBox) { _chatBox._qpToolNodes = new Map(); _chatBox._qpPendingMetrics = {}; _chatBox._qpCtxWindows = {}; _chatBox._qpLiveBubble = null; _chatBox._qpLiveText = ''; }
@@ -6006,7 +6042,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           load: 'Rendering pages…', index: 'Loading knowledge base…',
           phase1: 'Detecting job type…', phase2: 'Classifying pages…',
           phase3: 'Scoring completeness…', phase4: 'Building extraction index…',
-          notes: 'Extracting plan notes…',
+          notes: 'Extracting plan notes…', scope: 'Analyzing project scope…',
           phase5: 'Extracting values…', phase6: 'Finalizing…',
         };
         const _phaseRows = new Map();     // phase key → row DOM element
@@ -6050,7 +6086,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 load: 'Rendering pages…', index: 'Loading knowledge base…',
                 phase1: 'Detecting job type…', phase2: 'Classifying pages…',
                 phase3: 'Scoring completeness…', phase4: 'Building extraction index…',
-                notes: 'Extracting plan notes…',
+                notes: 'Extracting plan notes…', scope: 'Analyzing project scope…',
                 phase5: 'Extracting values…',
               };
               const _seedDonePhases = [];
@@ -6060,9 +6096,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               if (_phase3Done) _seedDonePhases.push('phase3');
               // phase4 (building the extraction index) reliably finishes near-instantly once phase3
               // is done and before phase5 starts (see _run_phase5_only) — safe to seed done from _phase3Done.
-              // notes (one-pass verbatim transcription) runs right after phase4 and always completes
-              // before phase5 starts too — bundled into the same seed assumption for the same reason.
-              if (_phase3Done) _seedDonePhases.push('phase4', 'notes');
+              // notes (one-pass verbatim transcription) and scope (scope-boundary analysis) both
+              // run right after phase4 and always complete before phase5 starts too — bundled
+              // into the same seed assumption for the same reason.
+              if (_phase3Done) _seedDonePhases.push('phase4', 'notes', 'scope');
               if (_phase45Done) _seedDonePhases.push('phase5');
               for (const ph of _seedDonePhases) {
                 const r = document.createElement('div');
@@ -6608,9 +6645,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (messageInput) { messageInput.disabled = false; messageInput.placeholder = ''; }
       return;
     }
-    if (sessionModule.getCurrentSessionId() !== sessionId) return;
-    _proposalRunId = runId;
-    _proposalSessionId = sessionId;
   }
 
   // Public API

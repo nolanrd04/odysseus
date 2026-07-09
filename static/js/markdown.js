@@ -650,8 +650,13 @@ export function mdToHtml(src, opts) {
         return placeholder;
       } catch (e) { return match; }
     });
-    // Inline math: $...$  (not preceded/followed by $ or digit, not spanning multiple lines)
-    s = s.replace(/(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)/g, (match, math) => {
+    // Inline math: $...$  (not preceded/followed by $ or digit, not spanning multiple lines).
+    // The digit guard on the opening delimiter is what actually matters in practice: without
+    // it, two unrelated dollar amounts on the same line/paragraph (e.g. "$21,000 ... $24,000")
+    // get treated as one giant math span from the first $ to the second, and KaTeX renders the
+    // English prose in between as garbled math soup. Currency always has a digit right after
+    // the $, real inline math essentially never starts a bare number that way in this app's usage.
+    s = s.replace(/(?<!\$)\$(?![\$\d])([^\$\n]+?)\$(?!\$)/g, (match, math) => {
       try {
         const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
         const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
