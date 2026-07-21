@@ -1,0 +1,430 @@
+/* qp_jobs.css — Job selection list (QP init form) + Jobs tab (brain window).
+   Actively loaded via <link> in index.html (same pattern as memory.css).
+   TODO_WW: searchable job selection + case-library CRUD UI. */
+
+/* ── Shared searchable job list ─────────────────────────────────────────── */
+
+.qp-jobs-toolbar {
+    display: flex; gap: 6px; align-items: center;
+}
+.qp-jobs-search {
+    flex: 1; min-width: 0;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 5px 8px; font-size: 12px;
+    font-family: inherit;
+}
+.qp-jobs-search:focus { outline: none; border-color: var(--accent, #0af); }
+.qp-jobs-bulk-btn {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 5px 10px; font-size: 11px;
+    cursor: pointer; flex-shrink: 0;
+}
+.qp-jobs-bulk-btn:hover { border-color: var(--accent, #0af); }
+.qp-jobs-count { opacity: 0.55; font-size: 11px; font-weight: normal; }
+
+.qp-jobs-list {
+    display: flex; flex-direction: column;
+    max-height: 180px; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 3px;
+}
+.qp-job-row {
+    display: flex; align-items: center; gap: 7px;
+    padding: 4px 8px; border-radius: 4px;
+    font-size: 12px; cursor: pointer; user-select: none;
+}
+.qp-job-row:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+.qp-job-row input[type=checkbox] { accent-color: var(--accent, #0af); margin: 0; flex-shrink: 0; }
+.qp-job-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* QP header button that deep-links to the brain window's Jobs tab */
+.qp-jobs-btn {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 4px 12px; font-size: 12px;
+    cursor: pointer; flex-shrink: 0;
+}
+.qp-jobs-btn:hover { border-color: var(--accent, #0af); }
+
+/* ── Brain window: Jobs tab ─────────────────────────────────────────────── */
+
+/* The codebase has no global `.hidden{display:none}` (it scopes it per element),
+   so scope it for the Jobs-tab elements the JS toggles. */
+#qp-jobs-tab-list.hidden,
+#qp-jobs-tab-editor.hidden,
+.qp-jobs-tab-toolbar.hidden { display: none; }
+
+/* Make the modal a bounded flex column when the Jobs tab is active, mirroring
+   the built-in `browse` treatment (style.css ~:10346). Without this the modal
+   only becomes a flex column for browse, so the Jobs panel's flex:1 chain has
+   no definite parent height to fill and collapses to content height — leaving
+   the bottom half of the window blank. */
+#memory-modal .memory-modal-content:has(
+  .memory-tab-panel[data-memory-panel="jobs"]:not(.hidden)
+) {
+  display: flex;
+  flex-direction: column;
+  max-height: 78vh;
+  height: min(78vh, max-content);
+  overflow: hidden;
+}
+#memory-modal .memory-modal-content:has(
+  .memory-tab-panel[data-memory-panel="jobs"]:not(.hidden)
+) .modal-header,
+#memory-modal .memory-modal-content:has(
+  .memory-tab-panel[data-memory-panel="jobs"]:not(.hidden)
+) .memory-tabs {
+  flex: 0 0 auto;
+}
+/* Fill the flex chain body → panel → admin-card → list so the job list gets the
+   remaining height (and scrolls) instead of collapsing to content height and
+   leaving the bottom of the window blank. Mirrors the browse-tab rules
+   (style.css ~:10363-10394). */
+#memory-modal .memory-modal-content:has(
+  .memory-tab-panel[data-memory-panel="jobs"]:not(.hidden)
+) .memory-modal-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+#memory-modal .memory-tab-panel[data-memory-panel="jobs"] {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+#memory-modal .memory-tab-panel[data-memory-panel="jobs"] > .admin-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+/* Pin every card child except the scrolling list so only the list grows. */
+#memory-modal .memory-tab-panel[data-memory-panel="jobs"] > .admin-card > *:not(#qp-jobs-tab-list):not(#qp-jobs-tab-editor) {
+  flex: 0 0 auto;
+}
+#memory-modal .memory-tab-panel[data-memory-panel="jobs"] #qp-jobs-tab-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* When the editor is open it's the growing element instead of the list. */
+#memory-modal .memory-tab-panel[data-memory-panel="jobs"] #qp-jobs-tab-editor:not(.hidden) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.qp-jobs-tab-toolbar {
+    display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
+}
+.qp-jobs-tab-list {
+    flex: 1; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 6px;
+}
+.qp-jobs-tab-card {
+    display: flex; align-items: center; gap: 10px;
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px;
+}
+.qp-jobs-tab-card:hover { border-color: var(--accent, #0af); }
+.qp-jobs-tab-card-main { flex: 1; min-width: 0; }
+.qp-jobs-tab-card-name { font-size: 13px; font-weight: 600; }
+.qp-jobs-tab-card-meta {
+    font-size: 11px; opacity: 0.6; margin-top: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qp-jobs-tab-card-error { color: #e5534b; font-size: 11px; }
+.qp-jobs-tab-card button {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 4px 10px; font-size: 11px;
+    cursor: pointer; flex-shrink: 0;
+}
+.qp-jobs-tab-card button:hover { border-color: var(--accent, #0af); }
+.qp-jobs-tab-card button.qp-jobs-danger:hover { border-color: #e5534b; color: #e5534b; }
+
+/* Inline editor (add / edit) */
+.qp-jobs-editor { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+.qp-jobs-editor-head { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; }
+.qp-jobs-editor-title { font-size: 14px; font-weight: 600; }
+.qp-jobs-editor-row { display: flex; gap: 8px; align-items: center; }
+.qp-jobs-editor-row label { font-size: 12px; opacity: 0.7; width: 90px; flex-shrink: 0; }
+.qp-jobs-editor-row input {
+    flex: 1; min-width: 0;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 5px 8px; font-size: 12px; font-family: inherit;
+}
+.qp-jobs-editor-row input:focus { outline: none; border-color: var(--accent, #0af); }
+
+/* Scrollable form body (between the fixed head and the pinned action row) */
+.qp-jobs-form-host { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
+
+/* ── Friendly job form (qp_job_form.js) ─────────────────────────────────── */
+.qp-jf-section {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px 12px; margin: 0 0 12px;
+}
+.qp-jf-legend { font-size: 12px; font-weight: 600; padding: 0 6px; opacity: 0.85; }
+.qp-jf-count { opacity: 0.5; font-weight: normal; }
+.qp-jf-hint { font-size: 11px; opacity: 0.55; margin: 0 0 8px; }
+.qp-jf-grid {
+    display: grid; gap: 8px 12px;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+/* gap is uniform across all fields so the dropdown fields' "+" button gets
+   vertical clearance above the control without dropping select inputs below
+   their row-mates (which would undo the fixed-label-height alignment). */
+.qp-jf-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+/* Fixed height (not min-height) so a label with the "+" button is exactly as
+   tall as a plain text label — keeps every field's control on the same y. */
+.qp-jf-label { font-size: 11px; opacity: 0.65; display: flex; align-items: center; gap: 5px; height: 18px; line-height: 1; }
+/* Info cue on a label with hover help (`tip`) — the whole label carries the
+   title too, so hovering the name shows the explanation. */
+.qp-jf-info {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; opacity: 0.6; cursor: help; flex-shrink: 0;
+}
+.qp-jf-info:hover { opacity: 1; color: var(--accent, #0af); }
+.qp-jf-input {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 5px 8px; font-size: 12px; font-family: inherit;
+    min-width: 0;
+}
+.qp-jf-input:focus { outline: none; border-color: var(--accent, #0af); }
+/* Calculated field (Grand Total): derived from line items, fully inert. */
+.qp-jf-calc {
+    background: color-mix(in srgb, var(--fg) 6%, var(--bg));
+    cursor: default; opacity: 0.85;
+    pointer-events: none; user-select: none; -webkit-user-select: none;
+}
+
+/* Dropdown field (Job Type): a small "+" by the label + a custom inline add box */
+.qp-jf-select { cursor: pointer; }
+.qp-jf-select.hidden { display: none; }
+.qp-jf-add-opt {
+    flex-shrink: 0; box-sizing: border-box;
+    width: 15px; height: 15px; padding: 0; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    border: 1px solid var(--border); border-radius: 4px;
+    color: var(--fg); font-size: 12px; cursor: pointer;
+}
+.qp-jf-add-opt:hover { border-color: var(--accent, #0af); color: var(--accent, #0af); }
+.qp-jf-add-box { display: flex; gap: 4px; align-items: center; }
+.qp-jf-add-box.hidden { display: none; }
+.qp-jf-add-input {
+    flex: 1; min-width: 0;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--accent, #0af); border-radius: 6px;
+    color: var(--fg); padding: 5px 8px; font-size: 12px; font-family: inherit;
+}
+.qp-jf-add-input:focus { outline: none; }
+.qp-jf-add-confirm, .qp-jf-add-cancel {
+    flex-shrink: 0; width: 27px; height: 27px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); font-size: 12px; cursor: pointer;
+}
+.qp-jf-add-confirm:hover { border-color: var(--accent, #0af); color: var(--accent, #0af); }
+.qp-jf-add-cancel:hover { border-color: #e5534b; color: #e5534b; }
+
+/* ── Proposal-revision selector bar (multi-proposal editing) ─────────────── */
+.qp-jf-prop-bar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+.qp-jf-prop-pick { display: flex; flex-direction: column; gap: 3px; min-width: 170px; }
+.qp-jf-prop-pick-label { font-size: 11px; opacity: 0.65; line-height: 1; }
+.qp-jf-prop-select-input { cursor: pointer; }
+.qp-jf-set-primary, .qp-jf-prop-btn {
+    height: 29px; padding: 0 11px; box-sizing: border-box;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); font-size: 12px; font-family: inherit; cursor: pointer; white-space: nowrap;
+}
+.qp-jf-set-primary:hover:not(:disabled),
+.qp-jf-prop-btn:hover:not(:disabled) { border-color: var(--accent, #0af); color: var(--accent, #0af); }
+.qp-jf-set-primary.is-primary {
+    color: #e6b800; border-color: color-mix(in srgb, #e6b800 45%, var(--border));
+    cursor: default; opacity: 0.95;
+}
+.qp-jf-set-primary:disabled { cursor: default; }
+.qp-jf-prop-btn:disabled { opacity: 0.4; cursor: default; }
+.qp-jf-prop-del:hover:not(:disabled) { border-color: #e5534b; color: #e5534b; }
+
+.qp-jf-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+.qp-jf-items-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.qp-jf-items-table th {
+    text-align: left; font-weight: 600; opacity: 0.6; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.03em;
+    padding: 6px 6px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.qp-jf-items-table td { padding: 2px 4px; border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); }
+.qp-jf-items-table tr:last-child td { border-bottom: none; }
+.qp-jf-items-table input[type=text],
+.qp-jf-items-table input:not([type=checkbox]) {
+    width: 100%; min-width: 60px; box-sizing: border-box;
+    background: transparent; border: 1px solid transparent; border-radius: 4px;
+    color: var(--fg); padding: 4px 5px; font-size: 12px; font-family: inherit;
+}
+.qp-jf-items-table input:focus { outline: none; border-color: var(--accent, #0af); background: color-mix(in srgb, var(--fg) 5%, var(--bg)); }
+.qp-jf-items-table .qp-jf-desc { min-width: 160px; }
+.qp-jf-items-table .qp-jf-cat  { min-width: 110px; }
+.qp-jf-items-table .qp-jf-qty,
+.qp-jf-items-table .qp-jf-up,
+.qp-jf-items-table .qp-jf-ext,
+.qp-jf-items-table .qp-jf-tax,
+.qp-jf-items-table .qp-jf-unit { min-width: 56px; text-align: right; }
+.qp-jf-items-table .qp-jf-tax { min-width: 48px; }
+/* Total $ is calculated, not entered — signal read-only and make it fully
+   inert (no caret, no text selection, no click focus). Still a real <input>
+   so the collect/recalc code can read & set its .value. */
+.qp-jf-items-table .qp-jf-ext {
+    background: color-mix(in srgb, var(--fg) 6%, var(--bg));
+    cursor: default; opacity: 0.85;
+    pointer-events: none; user-select: none; -webkit-user-select: none;
+}
+.qp-jf-items-table .qp-jf-unit { text-align: left; }
+.qp-jf-opt-cell { text-align: center; }
+.qp-jf-opt { accent-color: var(--accent, #0af); }
+.qp-jf-sel-cell { text-align: center; width: 20px; }
+.qp-jf-sel, .qp-jf-sel-all { accent-color: var(--accent, #0af); }
+
+.qp-jf-li-bulk-tax {
+    display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 11px; opacity: 0.85;
+}
+.qp-jf-li-bulk-tax-label { white-space: nowrap; }
+.qp-jf-bulk-tax-input {
+    width: 64px; box-sizing: border-box;
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 4px;
+    color: var(--fg); padding: 4px 6px; font-size: 12px; font-family: inherit;
+}
+.qp-jf-bulk-tax-input:focus { outline: none; border-color: var(--accent, #0af); }
+.qp-jf-bulk-tax-apply {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 5px 12px; font-size: 12px; cursor: pointer;
+}
+.qp-jf-bulk-tax-apply:hover { border-color: var(--accent, #0af); }
+.qp-jf-row-del {
+    background: none; border: none; color: var(--fg); opacity: 0.4;
+    cursor: pointer; font-size: 13px; padding: 2px 6px; line-height: 1;
+}
+.qp-jf-row-del:hover { opacity: 1; color: #e5534b; }
+/* Category / Unit are constrained pickers: a value button that opens the in-app
+   overlay picker (matching "Add a line item"), NOT a native <select>. The button
+   is styled to read like the inline table inputs, with a small ▾ affordance. */
+.qp-jf-combo { width: 100%; }
+.qp-jf-items-table .qp-jf-combo-desc { min-width: 160px; }
+.qp-jf-items-table .qp-jf-combo-cat  { min-width: 110px; }
+.qp-jf-items-table .qp-jf-combo-unit { min-width: 56px; }
+.qp-jf-combo-btn {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    width: 100%; box-sizing: border-box;
+    background: transparent; border: 1px solid transparent; border-radius: 4px;
+    color: var(--fg); padding: 4px 5px; font-size: 12px; font-family: inherit;
+    cursor: pointer; text-align: left;
+}
+.qp-jf-combo-btn::after { content: "▾"; opacity: 0.5; font-size: 10px; flex-shrink: 0; }
+.qp-jf-combo-btn:hover { border-color: var(--border); background: color-mix(in srgb, var(--fg) 4%, var(--bg)); }
+.qp-jf-combo-btn:focus { outline: none; border-color: var(--accent, #0af); background: color-mix(in srgb, var(--fg) 5%, var(--bg)); }
+.qp-jf-combo-btn.is-empty .qp-jf-combo-val { opacity: 0.4; }
+.qp-jf-combo-val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Empty-state line shown when a proposal has no line items yet (no placeholder
+   row is rendered — items are added via the "+ Add line item" picker). */
+.qp-jf-items-empty td {
+    text-align: center; opacity: 0.55; font-style: italic; padding: 14px 6px;
+}
+/* ── "Add line item" library picker overlay ─────────────────────────────── */
+.qp-jf-li-section { position: relative; }
+/* The picker is a viewport-centered modal so it stays visible no matter how far
+   the (possibly long) line-item list is scrolled — opening it never moves the
+   form's scroll position. Both the "Add line item" and Category/Unit pickers
+   share this class. */
+.qp-jf-li-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px; box-sizing: border-box;
+    background: color-mix(in srgb, #000 45%, transparent);
+    backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+}
+.qp-jf-li-overlay.hidden { display: none; }
+.qp-jf-li-panel {
+    display: flex; flex-direction: column; gap: 8px;
+    width: min(520px, 94vw); max-height: min(72vh, 560px);
+    padding: 14px; box-sizing: border-box; min-height: 0;
+    background: var(--bg);
+    border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
+}
+.qp-jf-li-head { display: flex; align-items: center; justify-content: space-between; }
+.qp-jf-li-title { font-size: 13px; font-weight: 600; }
+.qp-jf-li-close {
+    background: none; border: none; color: var(--fg); opacity: 0.55;
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 6px;
+}
+.qp-jf-li-close:hover { opacity: 1; }
+.qp-jf-li-search, .qp-jf-li-new {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px; color: var(--fg);
+    padding: 6px 9px; font-size: 12px; font-family: inherit;
+    width: 100%; box-sizing: border-box;
+}
+.qp-jf-li-search:focus, .qp-jf-li-new:focus { outline: none; border-color: var(--accent, #0af); }
+.qp-jf-li-list {
+    flex: 1; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 3px; padding: 2px;
+}
+.qp-jf-li-row {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px; color: var(--fg);
+    padding: 6px 9px; font-size: 12px; cursor: pointer; font-family: inherit;
+}
+.qp-jf-li-row:hover { border-color: var(--accent, #0af); background: color-mix(in srgb, var(--fg) 9%, var(--bg)); }
+.qp-jf-li-row-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qp-jf-li-row-meta { opacity: 0.6; font-size: 11px; white-space: nowrap; }
+.qp-jf-li-row-count {
+    flex-shrink: 0; min-width: 16px; text-align: center; font-size: 10px; opacity: 0.75;
+    background: color-mix(in srgb, var(--fg) 12%, var(--bg)); border-radius: 8px; padding: 1px 6px;
+}
+.qp-jf-li-empty { opacity: 0.55; font-size: 12px; padding: 16px; text-align: center; }
+.qp-jf-li-create { display: flex; gap: 6px; align-items: stretch; }
+.qp-jf-li-create .qp-jf-li-new { flex: 1; }
+.qp-jf-li-create-btn {
+    flex-shrink: 0; background: var(--accent, #0af); border: 1px solid var(--accent, #0af);
+    color: #fff; border-radius: 6px; padding: 6px 14px; font-size: 12px; cursor: pointer;
+}
+.qp-jf-li-create-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.qp-jf-li-create-hint { font-size: 11px; min-height: 14px; }
+.qp-jf-li-create-hint.is-block { color: #e5534b; }
+.qp-jf-li-create-hint.is-ok { opacity: 0.7; }
+
+/* Line-items action row: "Copy as table" anchored left, "+ Add line item" right. */
+.qp-jf-li-actions {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-top: 8px;
+}
+.qp-jf-add-item, .qp-jf-copy-table {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 6px 12px; font-size: 12px; cursor: pointer;
+}
+.qp-jf-add-item:hover, .qp-jf-copy-table:hover { border-color: var(--accent, #0af); }
+
+.qp-jobs-editor-status { flex: 0 0 auto; font-size: 11px; min-height: 14px; }
+.qp-jobs-editor-status.error { color: #e5534b; }
+.qp-jobs-editor-actions { display: flex; gap: 8px; }
+.qp-jobs-editor-actions button {
+    background: color-mix(in srgb, var(--fg) 5%, var(--bg));
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); padding: 6px 14px; font-size: 12px; cursor: pointer;
+}
+.qp-jobs-editor-actions button.primary {
+    border-color: var(--accent, #0af);
+    color: var(--accent, #0af);
+}
+.qp-jobs-editor-actions button:hover { border-color: var(--accent, #0af); }

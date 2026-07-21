@@ -220,6 +220,10 @@
     })();
   </script>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/css/memory.css">
+  <link rel="stylesheet" href="/static/css/tasks_run_status.css">
+  <link rel="stylesheet" href="/static/css/qp_generations.css">
+  <link rel="stylesheet" href="/static/css/qp_jobs.css">
   <link rel="modulepreload" href="/static/app.js">
   <link rel="modulepreload" href="/static/js/chat.js">
   <link rel="modulepreload" href="/static/js/ui.js">
@@ -256,6 +260,8 @@
       <div class="modal-body memory-modal-body">
         <div class="memory-tabs">
           <button class="memory-tab active" data-memory-tab="browse"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>Memories <span id="memory-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
+          <button class="memory-tab" data-memory-tab="global"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Global Memories</button>
+          <button class="memory-tab" data-memory-tab="jobs"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>Jobs <span id="qp-jobs-tab-count-badge" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
           <button class="memory-tab" data-memory-tab="skills"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Skills <span id="skills-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
           <button class="memory-tab" data-memory-tab="add"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>Add</button>
           <button class="memory-tab" data-memory-tab="settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>
@@ -301,6 +307,35 @@
             </div>
             <div id="memory-list" class="memory-list"></div>
             <div id="memory-suggestions-body" class="memory-suggestions hidden"></div>
+          </div>
+        </div>
+        <!-- ── Global memory tab ── -->
+        <div class="memory-tab-panel hidden" data-memory-panel="global">
+          <div class="admin-card" style="display:flex;flex-direction:column;overflow:hidden;flex:1;min-height:0;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
+              <h2 style="display:flex;align-items:center;gap:6px;margin:0;padding:0;line-height:1;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Global Memories</h2>
+              <span style="flex:1"></span>
+              <span id="memory-global-updated" class="memory-global-updated"></span>
+            </div>
+            <p class="memory-desc doclib-desc" style="margin-top:6px;">A condensed profile the AI maintains about you, rebuilt automatically from your saved memories and injected into every chat and proposal. Read-only — edits would be overwritten on the next update.</p>
+            <div id="memory-global-doc" class="memory-global-doc"></div>
+          </div>
+        </div>
+        <!-- ── Jobs (case library) tab ── -->
+        <div class="memory-tab-panel hidden" data-memory-panel="jobs">
+          <div class="admin-card" style="display:flex;flex-direction:column;overflow:hidden;flex:1;min-height:0;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
+              <h2 style="display:flex;align-items:center;gap:6px;margin:0;padding:0;line-height:1;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>Jobs</h2>
+              <span style="flex:1"></span>
+              <button id="qp-jobs-tab-add" class="memory-toolbar-btn" title="Add a job to the case library">+ Add Job</button>
+            </div>
+            <p class="memory-desc doclib-desc" style="margin-top:6px;">The case library of past jobs that knowledge packs are derived from. Jobs checked when starting a proposal become that run's knowledge pack.</p>
+            <div class="qp-jobs-tab-toolbar">
+              <input type="text" id="qp-jobs-tab-search" class="qp-jobs-search" placeholder="Search jobs…" autocomplete="off">
+              <span id="qp-jobs-tab-count" class="qp-jobs-count"></span>
+            </div>
+            <div id="qp-jobs-tab-list" class="qp-jobs-tab-list"></div>
+            <div id="qp-jobs-tab-editor" class="qp-jobs-editor hidden"></div>
           </div>
         </div>
         <!-- ── Add tab ── -->
@@ -953,6 +988,19 @@
         <div class="list-item" id="qp-prompts-btn" tabindex="0" role="button" data-a11y-enhanced="1" data-a11y-activatable="1">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           <span class="grow">Prompts</span>
+        </div>
+        <div class="list-item" id="qp-jobs-btn" tabindex="0" role="button" data-a11y-enhanced="1" data-a11y-activatable="1">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+          <span class="grow">Jobs</span>
+        </div>
+        <div class="list-item" id="qp-generations-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M9 11l3 3L22 4"/>
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+          </svg>
+          <span class="grow">Generations</span>
         </div>
       </div>
 

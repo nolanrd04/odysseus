@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import functools
 import io
 import json
 import logging
@@ -9,7 +10,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -17,7 +18,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from src.constants import DATA_DIR, UPLOAD_DIR
-from core.database import SessionLocal, ModelEndpoint, Session as DbSession
+from core.database import SessionLocal, ModelEndpoint, Session as DbSession, QpGeneration, QpActual, QpJobData
+from src.quick_proposal import case_store
+from src.quick_proposal import actuals_matcher
 from src.endpoint_resolver import resolve_endpoint_runtime, build_chat_url, build_headers
 
 logger = logging.getLogger(__name__)
@@ -30,14 +33,25 @@ RUNS_DIR = os.path.join(DATA_DIR, "quick_proposal_runs")
 
 _QP_DIR            = Path(__file__).resolve().parent.parent / "src" / "quick_proposal"
 _PROMPTS_DIR       = _QP_DIR / "prompts"
-_CASE_LIBRARY_DIR  = _QP_DIR / "case_library"
 _KP_PATH           = _QP_DIR / "knowledge_pack" / "knowledge_pack.json"
 
 # ── Gemini ─────────────────────────────────────────────────────────────────────
 
 _GEMINI_COMPLETIONS = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 _GEMINI_CACHES      = "https://generativelanguage.googleapis.com/v1beta/cachedContents"
-GEMINI_MODEL        = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL        = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
+
+
+def _is_local_endpoint(url: str) -> bool:
+    """True if `url` points at a private/tailnet host (self-hosted Ollama/vLLM etc).
+    Local models are typically far slower than hosted APIs, so callers use this
+    to widen timeouts instead of failing runs that are simply still generating.
+    """
+    try:
+        from routes.model_routes import _classify_endpoint
+        return _classify_endpoint(url) == "local"
+    except Exception:
+        return False
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -140,10 +154,25 @@ class _RunBroadcaster:
 
     def __init__(self) -> None:
         self._subscribers: list[asyncio.Queue] = []
+        # The most recent phase_start whose phase_complete hasn't arrived yet. Replayed to any
+        # client that connects mid-phase (hard refresh, resume, or the connect race) so the
+        # currently-executing phase always renders its spinner — the frontend seed can only
+        # reconstruct COMPLETED phases from saved data, never the in-flight one.
+        self._active_phase: dict | None = None
+        # The current open gate (a phase_gate the pipeline is paused on, waiting for /advance-phase).
+        # Also consume-once, so replay it to a client that reconnects while paused (e.g. auto-advance
+        # OFF) — otherwise the "Continue →" button never reappears and the run looks stuck.
+        self._active_gate: dict | None = None
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
         self._subscribers.append(q)
+        # Replay the in-flight phase / open gate so a late/reconnecting client immediately shows the
+        # current spinner or the pending "Continue →" gate button.
+        if self._active_phase is not None:
+            q.put_nowait(self._active_phase)
+        if self._active_gate is not None:
+            q.put_nowait(self._active_gate)
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
@@ -153,6 +182,17 @@ class _RunBroadcaster:
             pass
 
     async def put(self, item) -> None:
+        # Track the current in-flight phase / open gate for replay to late subscribers (subscribe()).
+        if isinstance(item, dict):
+            _t = item.get("type")
+            if _t == "phase_start":
+                self._active_phase = item
+                self._active_gate = None   # a new phase means we advanced past any prior gate
+            elif _t == "phase_complete" and self._active_phase is not None \
+                    and item.get("phase") == self._active_phase.get("phase"):
+                self._active_phase = None
+            elif _t == "phase_gate":
+                self._active_gate = item
         for q in list(self._subscribers):
             await q.put(item)
 
@@ -215,6 +255,7 @@ class Phase3OnlyRequest(BaseModel):
     resume: bool = False
     completeness_only: bool = False
     reuse_notes: bool = False
+    memory_recall_count: int = 12  # how many Tier-2 memories to recall into the manager's system prompt
 
 
 class ReclassifyPageRequest(BaseModel):
@@ -225,6 +266,10 @@ class ClassificationsUpdate(BaseModel):
     pages: List[dict] = []
 
 
+class PromptUpdate(BaseModel):
+    content: str
+
+
 class RunRequest(BaseModel):
     upload_id: str
     job_type: str = ""
@@ -233,6 +278,10 @@ class RunRequest(BaseModel):
     selected_jobs: List[str] = []
     gemini_model: str = ""
     manager_model: str = ""
+    # Advanced mode: per-phase model overrides, keyed by "phase1"/"phase2"/"phase3"/
+    # "notes"/"scope"/"phase5_gemini"/"phase5_manager". A key missing or blank falls
+    # back to gemini_model/manager_model above (i.e. regular mode is unaffected).
+    phase_models: Dict[str, str] = {}
     filename: str = ""
     gemini_retry_attempts: int = 3
     gemini_fallback_models: List[str] = []
@@ -241,6 +290,8 @@ class RunRequest(BaseModel):
     import_notes_from_run_id: str = ""
     import_scope_from_run_id: str = ""
     project_type: str = ""  # "" = auto-detect via Phase 1; else: residential_subdivision | commercial_development | rural_access | mixed
+    auto_memory: bool = False  # write a provisional memory snapshot at run end (TODO_D)
+    memory_recall_count: int = 12  # how many Tier-2 memories to recall into the manager's system prompt
 
 
 class AdvancePhaseRequest(BaseModel):
@@ -261,6 +312,16 @@ class QPChatRequest(BaseModel):
 class QPContinuationRequest(BaseModel):
     message: str
     manager_model: str = ""
+
+
+class CompactContextRequest(BaseModel):
+    apply: bool = True  # True = actually compact; False = record a decline, ask no more this run
+
+
+class QpActualRequest(BaseModel):
+    actual_total: Optional[float] = None
+    actual_values: dict = {}
+    notes: Optional[str] = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -315,6 +376,19 @@ def _to_openai_compat_url(url: str) -> str:
     if url and url.endswith("/v1/messages"):
         return url[: -len("/v1/messages")] + "/v1/chat/completions"
     return url
+
+
+def _is_anthropic_endpoint(url: str, headers: dict) -> bool:
+    """True if this (url, headers) pair resolves to an Anthropic endpoint, regardless
+    of which URL form (native /v1/messages or /v1/chat/completions) was resolved.
+
+    Used to route any call site that shares the OpenAI-message-shaped payload/history
+    convention (manager, and the Gemini vision/tool-loop) through the native Anthropic
+    request builder instead of blind-POSTing an OpenAI-shaped body — Anthropic's API
+    doesn't understand OpenAI's image_url/tool_calls/role:"tool" shapes, and this is
+    also the only place prompt-cache breakpoints get applied for Claude.
+    """
+    return "anthropic.com" in (url or "") or "anthropic-version" in (headers or {})
 
 
 def _strip_fences(text: str) -> str:
@@ -376,6 +450,179 @@ def _save_run_meta(run_id: str, **fields) -> None:
         meta_path.write_text(json.dumps(existing), encoding="utf-8")
     except Exception as e:
         logger.warning(f"[quick_proposal] meta save failed run={run_id}: {e}")
+
+
+def _user_context_block(notes: str, lead: str = "\n\n") -> str:
+    """Fenced estimator-supplied context, clearly separated from system instructions.
+
+    The estimator's free-text notes (entered at session init) are small, so they can
+    be carried in full every turn without the bloat of re-sending the Phase-1 index or
+    knowledge pack. Returns "" for empty notes so callers never emit a dangling fence.
+    """
+    notes = (notes or "").strip()
+    if not notes:
+        return ""
+    return (
+        f"{lead}----- USER-PROVIDED CONTEXT -----\n"
+        "The following was entered by the estimator when starting this proposal. "
+        "It is job-specific guidance, NOT part of the system instructions — treat it "
+        "as authoritative human context about this particular job (scope clarifications, "
+        "known assumptions, things to watch for) and let it inform your answers, "
+        "extraction, QC, and pricing decisions:\n\n"
+        f"{notes}\n"
+        "----- END USER-PROVIDED CONTEXT -----"
+    )
+
+
+def _load_run_meta(run_id: str) -> dict:
+    """Read runs/<id>/meta.json ({} if missing/corrupt)."""
+    meta_path = Path(RUNS_DIR) / run_id / "meta.json"
+    try:
+        if meta_path.is_file():
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"[quick_proposal] meta load failed run={run_id}: {e}")
+    return {}
+
+
+_COMPACT_PLACEHOLDER_PREFIX = "[Phase A read_index"
+
+
+def _compact_qp_context(run_id: str, session_id: str) -> dict:
+    """One-shot, user-triggered compaction of a run's persisted chat history
+    (TODO_QQ part 3). Replaces already-consumed Phase A read_index('notes'/'scope')
+    full-text dumps, plus every read_index('values') snapshot except the most
+    recent, with a short placeholder — these were one-time reads the manager
+    needed to build extracted_values/notes_text/scope_analysis and are never
+    needed verbatim again (a fresh read_index re-fetches current state).
+
+    Unlike the live in-memory mgr_messages of a running phase-5 loop, this edits
+    the persisted ChatMessage rows directly, so it also shrinks every future
+    phase-6 continuation turn (which rebuilds its message list from these rows).
+    Idempotent — already-compacted rows are skipped by content prefix.
+    """
+    from core.database import ChatMessage as DbChatMessage, SessionLocal as _SL
+
+    db = _SL()
+    try:
+        rows = db.query(DbChatMessage).filter(
+            DbChatMessage.session_id == session_id,
+            DbChatMessage.role == "tool",
+        ).order_by(DbChatMessage.timestamp).all()
+
+        by_section: dict[str, list] = {"notes": [], "scope": [], "values": []}
+        for row in rows:
+            try:
+                meta_d = json.loads(row.meta_data) if row.meta_data else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if meta_d.get("tool_name") != "read_index":
+                continue
+            section = meta_d.get("section")
+            if section not in by_section:
+                continue  # untagged (older) row — leave alone, can't verify what it is
+            by_section[section].append(row)
+
+        compacted_n  = 0
+        chars_saved  = 0
+        for section, section_rows in by_section.items():
+            to_compact = section_rows[:-1] if section == "values" else section_rows
+            for row in to_compact:
+                content = row.content or ""
+                if content.startswith(_COMPACT_PLACEHOLDER_PREFIX):
+                    continue  # already compacted
+                chars_saved += len(content)
+                row.content = (
+                    f"{_COMPACT_PLACEHOLDER_PREFIX}('{section}') snapshot — {len(content)} chars — "
+                    "compacted by estimator request; call read_index again if you need current state]"
+                )
+                compacted_n += 1
+        db.commit()
+    finally:
+        db.close()
+
+    if _session_manager is not None:
+        try:
+            _session_manager._load_session_from_db(session_id)
+        except Exception as e:
+            logger.warning(f"[quick_proposal] compact: session cache refresh failed session={session_id}: {e}")
+
+    logger.info(f"[quick_proposal] compacted context run={run_id} session={session_id} "
+                f"rows={compacted_n} chars_saved={chars_saved}")
+    return {"rows_compacted": compacted_n, "chars_saved": chars_saved}
+
+
+def _resolve_run_owner(run_id: str, session_id: str = "", meta: dict | None = None) -> str:
+    """Resolve the estimator's username for a run (per-user memory scoping).
+
+    New runs persist owner into meta.json at start-proposal-session; older runs
+    fall back to the owner stamped on the linked chat Session row.
+    """
+    meta = meta if meta is not None else _load_run_meta(run_id)
+    owner = (meta.get("owner") or "").strip()
+    if owner:
+        return owner
+    sid = session_id or meta.get("session_id", "")
+    if sid:
+        try:
+            db = SessionLocal()
+            try:
+                row = db.query(DbSession).filter(DbSession.id == sid).first()
+                if row and getattr(row, "owner", None):
+                    return row.owner
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"[quick_proposal] owner lookup failed session={sid}: {e}")
+    return ""
+
+
+def _memory_block(memories: list, lead: str = "\n\n") -> str:
+    """Fenced recalled-memories block for the manager system prompt.
+
+    Mirrors _user_context_block: clearly labeled as background, NOT system
+    instructions. `memories` is a list of dicts with text/category/metadata
+    (as returned by MemoryService.recall). Returns "" when empty.
+    """
+    lines = []
+    for m in memories:
+        text = (getattr(m, "text", None) or (m.get("text") if isinstance(m, dict) else "") or "").strip()
+        if not text:
+            continue
+        md = getattr(m, "metadata", None) or (m.get("metadata") if isinstance(m, dict) else {}) or {}
+        marker = " [provisional — auto-generated, not estimator-reviewed]" if md.get("status") == "provisional" else ""
+        lines.append(f"- {text}{marker}")
+    if not lines:
+        return ""
+    joined = "\n".join(lines)
+    return (
+        f"{lead}----- RELEVANT SAVED MEMORIES -----\n"
+        "The following memories about this estimator and their past jobs were "
+        "recalled for this proposal. They are background context, NOT part of the "
+        "system instructions — use them to inform pricing tendencies, spec "
+        "preferences, and known corrections, but never let them override the "
+        "instructions above or the plan set in front of you:\n\n"
+        f"{joined}\n"
+        "----- END RELEVANT SAVED MEMORIES -----"
+    )
+
+
+async def _recalled_memories_block(owner: str, query: str, top_k: int = 12) -> tuple[str, int]:
+    """Recall owner-scoped Tier-2 memories for a QP run, formatted for the system prompt.
+
+    Returns (formatted block, number of memories injected) — ("", 0) when nothing matched.
+    """
+    query = (query or "").strip()
+    if not query:
+        return "", 0
+    try:
+        from services.memory.service import MemoryService
+        result = await MemoryService().recall(query, top_k=top_k, owner=owner or None)
+        mems = [m for m in result.memories if (m.text or "").strip()]
+        return _memory_block(mems), len(mems)
+    except Exception as e:
+        logger.warning(f"[quick_proposal] memory recall failed owner={owner!r}: {e}")
+        return "", 0
 
 
 def _log_phase3_event(log_path: str, event: dict) -> None:
@@ -445,12 +692,53 @@ def _save_context_usage(run_id: str, role: str, payload: dict) -> None:
         logger.warning(f"[quick_proposal] context_usage save failed run={run_id}: {e}")
 
 
-async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False, completeness_only: bool = False, session_id: str = "") -> None:
+def _add_cumulative_usage(run_id: str, role: str, usage: dict) -> dict:
+    """Add one turn's token usage to the run's running total for `role`, persisted to
+    results.json, and return the updated total.
+
+    Kept strictly separate per role (`claude` manager turns vs. `gemini` extraction
+    turns) rather than combined — their per-call costs are very different and the
+    manager side is the one with the caching gap (see TODO_QQ), so conflating them
+    would hide which side is actually driving spend.
+
+    Unlike _save_context_usage (a last-write-wins snapshot of the single latest call,
+    used for the context-window-% display), this is a true running sum read-modify-
+    written against whatever is already on disk, so it stays correct across phases/
+    resumes without requiring any in-memory total to survive between calls.
+    """
+    results_path = Path(RUNS_DIR) / run_id / "results.json"
+    try:
+        existing: dict = {}
+        if results_path.is_file():
+            existing = json.loads(results_path.read_text(encoding="utf-8"))
+        totals = existing.setdefault("cumulative_usage", {}).setdefault(role, {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+            "calls": 0,
+        })
+        totals["input_tokens"]  += usage.get("prompt_tokens", 0) or 0
+        totals["output_tokens"] += usage.get("completion_tokens", 0) or 0
+        totals["cache_creation_input_tokens"] += usage.get("cache_creation_input_tokens", 0) or 0
+        totals["cache_read_input_tokens"]      += usage.get("cache_read_input_tokens", 0) or 0
+        totals["calls"] += 1
+        results_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        return totals
+    except Exception as e:
+        logger.warning(f"[quick_proposal] cumulative_usage save failed run={run_id} role={role}: {e}")
+        return {}
+
+
+async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False, completeness_only: bool = False, session_id: str = "", memory_recall_count: int = 12) -> None:
     """Re-run phase2 index build + phase3 extraction loop using saved page classifications."""
     try:
         await _emit(queue, "phase_start", phase="phase4", label="Building extraction index…")
         index.extracted_data["phase1_summary"] = _build_phase1_summary(index)
         await _emit(queue, "phase_complete", phase="phase4")
+
+        # Order matches the fresh pipeline (completeness → notes → scope) so the "Continue:
+        # Completeness Scoring →" button actually runs completeness first, not notes.
+        if completeness_only or "plan_completeness" not in index.extracted_values:
+            await phase3_completeness_score(index, queue, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models)
 
         await phase_notes_extraction(
             index, queue,
@@ -466,14 +754,18 @@ async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_mod
             gemini_fallback_models=gemini_fallback_models,
         )
 
-        if completeness_only or "plan_completeness" not in index.extracted_values:
-            await phase3_completeness_score(index, queue, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models)
-
         if not completeness_only:
-            await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume, session_id=session_id)
+            # Respect auto-advance on resume: pause before the (expensive) extraction phase, exactly
+            # like the fresh pipeline does (see phase2_classify_pages caller's "phase3"/"Extraction"
+            # gate). When auto-mode is ON the frontend calls /advance-phase immediately; when OFF the
+            # user clicks "Continue: Extraction →". Without this the resume path blasted straight into
+            # extraction regardless of the auto-advance checkbox.
+            await _wait_for_gate(run_id, queue, "phase3", "Extraction")
+            await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, resume=resume, session_id=session_id, memory_recall_count=memory_recall_count)
         _save_run_results(run_id, index)
         if not completeness_only:
             _save_generation_snapshot(run_id, session_id, manager_model, gemini_model, holdout_kp_path)
+            await _write_qp_auto_memory(run_id, session_id, index)
         _save_run_meta(run_id, status="complete")
     except Exception as e:
         logger.error(f"[quick_proposal] phase3-only error run={run_id}: {e}", exc_info=True)
@@ -483,14 +775,463 @@ async def _run_phase5_only(index, queue: asyncio.Queue, run_id: str, manager_mod
         await queue.put(None)
 
 
+def _run_grand_total(run_id: str):
+    """Pull the final grand_total from the run's phase5 log (None if absent)."""
+    log_path = Path(RUNS_DIR) / run_id / "phase5_log.jsonl"
+    grand_total = None
+    if log_path.is_file():
+        try:
+            for line in log_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                if entry.get("type") == "grand_total":
+                    grand_total = entry.get("amount")
+        except Exception:
+            pass
+    return grand_total
+
+
+def _qp_memory_provenance(run_id: str, meta: dict | None = None) -> dict:
+    """Provenance metadata stamped on every QP-produced memory (TODO_D)."""
+    meta = meta if meta is not None else _load_run_meta(run_id)
+    project_type = ""
+    results_path = Path(RUNS_DIR) / run_id / "results.json"
+    try:
+        if results_path.is_file():
+            results = json.loads(results_path.read_text(encoding="utf-8"))
+            project_type = (results.get("extracted_values", {})
+                            .get("project_type", {}).get("value", "")) or ""
+    except Exception:
+        pass
+    return {
+        "qp_run_id":    run_id,
+        "job_name":     meta.get("run_name") or meta.get("filename", ""),
+        "date":         time.strftime("%Y-%m-%d"),
+        "project_type": project_type,
+    }
+
+
+def _find_run_snapshot_memory(entries: list, owner: str, run_id: str) -> dict | None:
+    """Locate the auto-snapshot memory for a run among raw memory entries."""
+    owner_key = (owner or "").strip() or None
+    for entry in entries:
+        md = entry.get("metadata") or {}
+        if md.get("qp_run_id") == run_id and md.get("snapshot"):
+            if ((entry.get("owner") or "").strip() or None) == owner_key:
+                return entry
+    return None
+
+
+async def _write_qp_auto_memory(run_id: str, session_id: str, index) -> None:
+    """Write (or refresh) the provisional structured snapshot memory for a run.
+
+    Only fires when the estimator checked auto-memory at session init
+    (meta.json auto_memory). Upserts on rerun so one run never accumulates
+    multiple snapshots; the manager's create_memory(confirms_run=true) later
+    flips it to confirmed. Never raises — memory is best-effort side output.
+    """
+    try:
+        meta = _load_run_meta(run_id)
+        if not meta.get("auto_memory"):
+            return
+        owner = _resolve_run_owner(run_id, session_id, meta)
+        grand_total = _run_grand_total(run_id)
+        line_items = (index.extracted_data.get("final_line_items") or [])[:8]
+
+        parts = [f"Quick Proposal snapshot — job \"{meta.get('run_name') or meta.get('filename', run_id)}\""]
+        provenance = _qp_memory_provenance(run_id, meta)
+        if provenance.get("project_type"):
+            parts.append(f"({provenance['project_type']})")
+        parts.append(f"estimated {provenance['date']}.")
+        if grand_total is not None:
+            try:
+                parts.append(f"Grand total: ${float(grand_total):,.2f}.")
+            except (TypeError, ValueError):
+                parts.append(f"Grand total: {grand_total}.")
+        if line_items:
+            item_bits = []
+            for li in line_items:
+                if isinstance(li, dict):
+                    name = li.get("item") or li.get("name") or li.get("description") or ""
+                    total = li.get("total") or li.get("price") or li.get("amount")
+                    try:
+                        item_bits.append(f"{name} (${float(total):,.0f})" if total is not None else name)
+                    except (TypeError, ValueError):
+                        item_bits.append(str(name))
+                else:
+                    item_bits.append(str(li))
+            item_bits = [b for b in item_bits if b]
+            if item_bits:
+                parts.append("Key line items: " + "; ".join(item_bits) + ".")
+        parts.append(
+            "[PROVISIONAL — programmatically generated; the estimator has not "
+            "reviewed or corrected this run.]"
+        )
+        text = " ".join(parts)
+        metadata = {**provenance, "snapshot": True, "status": "provisional", "followed_up": False}
+
+        from services.memory.service import MemoryService
+        service = MemoryService(DATA_DIR)
+        entries = service.manager.load_all()
+        existing = _find_run_snapshot_memory(entries, owner, run_id)
+        if existing:
+            existing["text"] = text
+            existing["metadata"] = {**(existing.get("metadata") or {}), **metadata}
+            existing["timestamp"] = int(time.time())
+            service.manager.save(entries)
+            if service.vector_store and service.vector_store.healthy:
+                service.vector_store.add(existing["id"], text)
+            logger.info(f"[quick_proposal] refreshed provisional memory snapshot run={run_id}")
+        else:
+            await service.remember(
+                text,
+                owner=owner or None,
+                category="project",
+                source="quick_proposal",
+                metadata=metadata,
+            )
+            logger.info(f"[quick_proposal] wrote provisional memory snapshot run={run_id}")
+    except Exception as e:
+        logger.warning(f"[quick_proposal] auto memory snapshot failed run={run_id}: {e}")
+
+
+async def _qp_create_memory(run_id: str, tool_input: dict) -> str:
+    """Handle the manager's create_memory tool (phase-5 and phase-6).
+
+    Default: store a new confirmed memory with run provenance. With
+    confirms_run=true: upsert into this run's provisional snapshot — replace
+    its text with the corrected version, strip the caveat, and flip it to
+    status=confirmed / followed_up=true (LOCKED decision 7: the flip happens
+    only on an explicit estimator correction).
+    """
+    text = (tool_input.get("text") or "").strip()
+    if not text:
+        return "Error: create_memory requires non-empty `text`."
+    confirms_run = bool(tool_input.get("confirms_run"))
+
+    try:
+        meta = _load_run_meta(run_id)
+        owner = _resolve_run_owner(run_id, meta.get("session_id", ""), meta)
+        provenance = _qp_memory_provenance(run_id, meta)
+
+        from services.memory.service import MemoryService
+        service = MemoryService(DATA_DIR)
+
+        if confirms_run:
+            entries = service.manager.load_all()
+            existing = _find_run_snapshot_memory(entries, owner, run_id)
+            if existing:
+                existing["text"] = text
+                existing["metadata"] = {
+                    **(existing.get("metadata") or {}), **provenance,
+                    "status": "confirmed", "followed_up": True,
+                }
+                existing["timestamp"] = int(time.time())
+                service.manager.save(entries)
+                if service.vector_store and service.vector_store.healthy:
+                    service.vector_store.add(existing["id"], text)
+                return ("Memory saved: this run's snapshot was updated with the correction "
+                        "and marked estimator-confirmed.")
+
+        metadata = {**provenance, "status": "confirmed",
+                    **({"snapshot": True, "followed_up": True} if confirms_run else {})}
+        await service.remember(
+            text,
+            owner=owner or None,
+            category="project",
+            source="quick_proposal",
+            metadata=metadata,
+        )
+        return "Memory saved."
+    except Exception as e:
+        logger.warning(f"[quick_proposal] create_memory failed run={run_id}: {e}")
+        return f"Error saving memory: {e}"
+
+
+def _qp_line_category_defaults() -> dict:
+    """Most-common historical category per normalized line-item description,
+    aggregated across the case library (same aggregation as the
+    /case_library/categories catalog) — lets create_job auto-fill a line
+    item's category from history instead of asking the manager to supply
+    one for every single line."""
+    from collections import Counter
+    agg: dict = {}
+    for data in _load_case_library_records():
+        for proposal in (data.get("proposals") or []):
+            if not isinstance(proposal, dict):
+                continue
+            for item in (proposal.get("line_items") or []):
+                if not isinstance(item, dict):
+                    continue
+                desc = (item.get("description") or "").strip()
+                cat = (item.get("category") or "").strip()
+                if not desc or not cat:
+                    continue
+                agg.setdefault(_norm_line_item_desc(desc), Counter())[cat] += 1
+    return {norm: counter.most_common(1)[0][0] for norm, counter in agg.items()}
+
+
+def _qp_compute_row_sf(road_lf_value, row_width_value) -> tuple:
+    """Deterministic ROW_SF = sum over roads of (road length x typical-section width),
+    matching each road_LF entry's road_name against the ROW_width_ft group that lists
+    it (`{"roads": [...], "width": N}`, per gemini_phase3.txt). Halves a road's
+    contribution when its road_type is "improvement_to_existing"/"fronting_existing" —
+    the same 'Fronting Road Adjustments' rule system_prompt.txt applies during Phase B
+    pricing ("Terra only works the near half of the ROW ... use halved ROW_SF ... for
+    all KP formula scaling and analog matching") — so a manager-created job's ROW_SF
+    stays on the same convention the KP's dollar_per_ROW_SF/qty_scale_correlations
+    already assume, rather than silently double-counting fronting roads.
+
+    Returns (row_sf_or_None, [road_names with no matching width group])."""
+    if not isinstance(road_lf_value, list) or not isinstance(row_width_value, list):
+        return None, []
+
+    width_by_road = {}
+    for group in row_width_value:
+        if not isinstance(group, dict):
+            continue
+        width = group.get("width")
+        if not isinstance(width, (int, float)):
+            continue
+        for road_name in (group.get("roads") or []):
+            if isinstance(road_name, str) and road_name.strip():
+                width_by_road[road_name.strip().lower()] = width
+
+    total = 0.0
+    found_any = False
+    unmatched = []
+    for road in road_lf_value:
+        if not isinstance(road, dict):
+            continue
+        name = (road.get("road_name") or "").strip()
+        length = road.get("length")
+        if not name or not isinstance(length, (int, float)):
+            continue
+        width = width_by_road.get(name.lower())
+        if width is None:
+            unmatched.append(name)
+            continue
+        contribution = length * width
+        if road.get("road_type") in ("improvement_to_existing", "fronting_existing"):
+            contribution /= 2
+        total += contribution
+        found_any = True
+
+    return (round(total, 2) if found_any else None), unmatched
+
+
+# Best-effort map from the pipeline's own project_type extraction (gemini_phase0_5.txt)
+# to the case-library's job_type vocabulary (DEFAULT_JOB_TYPES, static/js/qp_job_form.js).
+# The two vocabularies are NOT 1:1 — deliberately incomplete:
+#   - "rural_access" has no case-library equivalent at all.
+#   - "mixed" (pipeline: mixed rural/commercial signals) is not reliably the same concept
+#     as "mixed_use" (case-library: mixed-use real-estate development) — left unmapped
+#     rather than guessed.
+#   - "road_widening" is a case-library-only scope descriptor with no project_type source.
+# Unmapped/unrecognized project_type values fall back to asking the estimator directly,
+# per the confirmation-loop convention (TODO_KK) — only the unambiguous cases get a
+# suggested default.
+_QP_PROJECT_TYPE_TO_JOB_TYPE = {
+    "residential_subdivision": "subdivision_road",
+    "commercial_development":  "commercial_site",
+}
+
+
+def _qp_suggest_job_type(index) -> tuple:
+    """Returns (suggested_job_type_or_None, project_type_value_or_None) for the
+    create_job tool's job_type hint. Only returns a suggestion for project_type
+    values with an unambiguous case-library equivalent — see
+    _QP_PROJECT_TYPE_TO_JOB_TYPE for why the rest are deliberately left unmapped."""
+    entry = index.extracted_values.get("project_type")
+    project_type = entry.get("value") if isinstance(entry, dict) else entry
+    if not isinstance(project_type, str) or not project_type:
+        return None, None
+    return _QP_PROJECT_TYPE_TO_JOB_TYPE.get(project_type), project_type
+
+
+async def _qp_create_job(run_id: str, index, tool_input: dict) -> str:
+    """Handle the manager's create_job tool (phase-6 continuation chat only,
+    TODO_ZZ): add this run's priced proposal to the case-library DB as a new
+    job record, via the same validate/recompute/write path as the manual
+    Jobs-form POST /case_library route (case_library_create) — so a
+    manager-created job is indistinguishable from a hand-entered one.
+
+    Deterministic data (priced line items, scale metrics) is pulled straight
+    from this run's own index/final_line_items — the manager only supplies
+    job-level identity/classification fields that have no pipeline source
+    (client, job_type, location, etc.), plus optional per-line category/
+    is_optional corrections. Per TODO_KK, the manager is expected to have
+    already confirmed job_name/client/job_type/taxed-or-optional items with
+    the estimator in chat before calling this — this handler does not itself
+    prompt for confirmation, it only performs the write.
+    """
+    job_name = (tool_input.get("job_name") or "").strip()
+    client = (tool_input.get("client") or "").strip()
+    job_type = (tool_input.get("job_type") or "").strip()
+    if not job_name or not client or not job_type:
+        return "Error: create_job requires job_name, client, and job_type — confirm these with the estimator first."
+
+    final_line_items = index.extracted_data.get("final_line_items") or []
+    if not final_line_items:
+        return "Error: this run has no final_line_items yet (end_generation hasn't produced a priced proposal)."
+
+    overrides = {}
+    for ov in (tool_input.get("line_item_overrides") or []):
+        if not isinstance(ov, dict):
+            continue
+        desc = (ov.get("description") or "").strip()
+        if desc:
+            overrides[_norm_line_item_desc(desc)] = ov
+
+    category_defaults = _qp_line_category_defaults()
+    line_items = []
+    for item in final_line_items:
+        if not isinstance(item, dict):
+            continue
+        desc = (item.get("description") or "").strip()
+        norm = _norm_line_item_desc(desc)
+        ov = overrides.get(norm, {})
+        category = (ov.get("category") or category_defaults.get(norm) or "UNCATEGORIZED")
+        line_items.append({
+            "description": desc,
+            "category":    category,
+            "unit":        item.get("unit"),
+            "qty":         item.get("qty"),
+            "unit_price":  item.get("unit_price"),
+            "ext_price":   item.get("ext_price"),
+            # end_generation's own tax_rate convention is already a decimal fraction
+            # (e.g. 0.089) — do NOT run this through _normalize_case_tax_rates, which
+            # assumes a whole-number percent (matching the job-form UI) and would
+            # divide an already-correct fraction by 100 again.
+            "tax_rate":    item.get("tax_rate") or 0,
+            "is_optional": bool(ov.get("is_optional", False)),
+        })
+
+    def _extracted(key):
+        entry = index.extracted_values.get(key)
+        return entry.get("value") if isinstance(entry, dict) else entry
+
+    raw_road_lf = _extracted("road_LF")
+
+    scale = {}
+    skipped_scale_keys = []
+    for key in ("lot_count", "lot_area_sf", "stripping_depth_in",
+                "road_subgrade_SY", "road_paving_SY", "ballast_CY", "fronting_LF"):
+        value = _extracted(key)
+        if isinstance(value, (int, float)):
+            scale[key] = value
+        elif value is not None:
+            # Some scale fields (road_subgrade_SY, road_paving_SY, ballast_CY, fronting_LF)
+            # are only ever computed narratively during Phase B pricing, not written back to
+            # the index as clean scalars — skip rather than crash the DB write on an
+            # unexpected shape (list/dict/string).
+            skipped_scale_keys.append(key)
+
+    if isinstance(raw_road_lf, list):
+        # Gemini's own road_LF schema is a per-road array of {road_name, length, ...} objects
+        # (see gemini_phase3.txt) — the case-library column is a single scalar total LF across
+        # all roads, so sum it rather than writing the array in place.
+        lengths = [r.get("length") for r in raw_road_lf if isinstance(r, dict) and isinstance(r.get("length"), (int, float))]
+        if lengths:
+            scale["road_LF"] = round(sum(lengths), 2)
+        else:
+            skipped_scale_keys.append("road_LF")
+    elif isinstance(raw_road_lf, (int, float)):
+        scale["road_LF"] = raw_road_lf
+    elif raw_road_lf is not None:
+        skipped_scale_keys.append("road_LF")
+
+    row_sf, unmatched_roads = _qp_compute_row_sf(raw_road_lf, _extracted("ROW_width_ft"))
+    if row_sf is not None:
+        scale["ROW_SF"] = row_sf
+    else:
+        skipped_scale_keys.append("ROW_SF")
+
+    identity = {"client": client}
+    for tool_key in ("client_location", "engineering_firm", "job_location",
+                     "local_folder", "true_job_number"):
+        val = tool_input.get(tool_key)
+        val = val.strip() if isinstance(val, str) else val
+        if val:
+            identity[tool_key] = val
+
+    content = {
+        "schema_version": "1.0",
+        "job_name": job_name,
+        "identity": identity,
+        "classification": {"job_type": job_type, "job_type_source": "manager_create_job"},
+        "primary_proposal_index": 0,
+        "derived": {"scale_metrics": scale},
+        "proposals": [{
+            "revision_label": (tool_input.get("revision_label") or "base revision").strip(),
+            # Defaults to today (the job is being added at/near generation time) — override
+            # only if the estimator explicitly gives a different historical proposal date.
+            "proposal_date":  (tool_input.get("proposal_date") or "").strip() or time.strftime("%Y-%m-%d"),
+            "grand_total":    _run_grand_total(run_id),
+            "source_file":    f"run:{run_id}",
+            "line_items":     line_items,
+        }],
+    }
+
+    try:
+        _validate_case_record(content)
+        _recompute_reconciliation(content)
+        slug = re.sub(r"[^a-z0-9]+", "_", job_name.lower()).strip("_")
+        _validate_case_slug(slug)
+    except HTTPException as e:
+        return f"Error: {e.detail}"
+
+    db = SessionLocal()
+    try:
+        if case_store.get_job(db, slug) is not None:
+            return (f"Error: a job already exists at slug '{slug}'. Ask the estimator whether to "
+                     "pick a different job_name or update the existing job instead (create_job does "
+                     "not overwrite existing jobs).")
+        _reject_duplicate_job_name(db, job_name)
+        case_store.upsert_job(db, slug, content)
+        db.commit()
+        n_li = len(line_items)
+        grand_total = content["proposals"][0]["grand_total"]
+        logger.info(f"[quick_proposal] create_job: added '{job_name}' (slug={slug}) "
+                    f"from run={run_id} — {n_li} line item(s)"
+                    + (f", skipped scale fields: {skipped_scale_keys}" if skipped_scale_keys else ""))
+        skipped_note = (
+            f" Not auto-filled (unexpected shape in this run's extraction, add manually via the "
+            f"Jobs tab if known): {', '.join(skipped_scale_keys)}."
+            if skipped_scale_keys else ""
+        )
+        unmatched_note = (
+            f" ROW_SF excludes {len(unmatched_roads)} road(s) with no matching typical-section "
+            f"width in ROW_width_ft: {', '.join(unmatched_roads)} — likely an undercount, verify."
+            if unmatched_roads else ""
+        )
+        return (f"Job '{job_name}' added to the case library (slug={slug}), {n_li} line item(s), "
+                f"grand_total={'$' + format(grand_total, ',.2f') if grand_total is not None else 'not recorded'}."
+                f"{skipped_note}{unmatched_note}")
+    except HTTPException as e:
+        db.rollback()
+        return f"Error: {e.detail}"
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"[quick_proposal] create_job failed run={run_id}: {e}")
+        return f"Error creating job: {e}"
+    finally:
+        db.close()
+
+
 def _save_run_results(run_id: str, index) -> None:
     results_path = Path(RUNS_DIR) / run_id / "results.json"
     try:
-        # Preserve context_usage — it's patched in incrementally by _save_context_usage during
-        # the run, not tracked on `index`, so a naive overwrite here would erase it at completion.
+        # Preserve context_usage and cumulative_usage — both are patched in incrementally
+        # during the run (_save_context_usage, _add_cumulative_usage), not tracked on
+        # `index`, so a naive overwrite here would erase them at completion.
         existing_context_usage: dict = {}
+        existing_cumulative_usage: dict = {}
         if results_path.is_file():
-            existing_context_usage = json.loads(results_path.read_text(encoding="utf-8")).get("context_usage", {})
+            _prior = json.loads(results_path.read_text(encoding="utf-8"))
+            existing_context_usage    = _prior.get("context_usage", {})
+            existing_cumulative_usage = _prior.get("cumulative_usage", {})
         results = {
             "pages": [
                 {
@@ -519,9 +1260,10 @@ def _save_run_results(run_id: str, index) -> None:
                 }
                 for bid, rec in index.bboxes.items()
             },
-            "extracted_data":   index.extracted_data,
-            "extracted_values": index.extracted_values,
-            "context_usage":    existing_context_usage,
+            "extracted_data":    index.extracted_data,
+            "extracted_values":  index.extracted_values,
+            "context_usage":     existing_context_usage,
+            "cumulative_usage":  existing_cumulative_usage,
         }
         results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
     except Exception as e:
@@ -602,6 +1344,459 @@ def _save_generation_snapshot(run_id: str, session_id: str, manager_model: str, 
     finally:
         db.close()
 
+    _auto_pair_actual(run_id, results_snapshot)
+
+
+def _candidate_names_for_run(run_id: str, results_snapshot: dict) -> list:
+    """Every human-readable name we have for a run: its meta.json run_name
+    (set at upload time) plus whatever job_name Gemini extracted from the
+    cover sheet, if that field was populated on this generation. Runs whose
+    folder was cleaned up off disk (_load_run_meta returns {}) fall back to
+    the extracted value alone; a run with neither has no candidate names."""
+    meta = _load_run_meta(run_id)
+    candidate_names = [meta.get("run_name")]
+    extracted_values = (results_snapshot or {}).get("extracted_values") or {}
+    job_name_field = extracted_values.get("job_name")
+    if isinstance(job_name_field, dict):
+        candidate_names.append(job_name_field.get("value"))
+    elif isinstance(job_name_field, str):
+        candidate_names.append(job_name_field)
+    return candidate_names
+
+
+def _display_name_for_run(run_id: str, results_snapshot: dict) -> Optional[str]:
+    """Best available human-readable label for a run, for the QP Generations
+    list/detail views — prefers the run_name set at upload time (matches what
+    the estimator typed on the run-creation form) and falls back to the
+    extracted cover-sheet job_name when meta.json is missing or blank."""
+    for name in _candidate_names_for_run(run_id, results_snapshot):
+        if name:
+            return name
+    return None
+
+
+def _auto_pair_actual(run_id: str, results_snapshot: dict) -> None:
+    """Best-effort auto-pairing of a real-bid actuals file to this run
+    (TODO_B_NEW-2 follow-up) — see actuals_matcher for the matching/parsing
+    logic and why it's deliberately conservative (name-substring only, no
+    fuzzy fallback). Never overwrites an existing QpActual (an estimator- or
+    script-entered actual always wins over an auto-match), and any failure
+    here is logged and swallowed — this must never break a run's completion.
+    """
+    from core.database import SessionLocal as _SL, QpActual as _QpActual
+
+    db = _SL()
+    try:
+        if db.query(_QpActual).filter(_QpActual.run_id == run_id).first():
+            return
+
+        candidate_names = _candidate_names_for_run(run_id, results_snapshot)
+        match = actuals_matcher.find_actual_match(candidate_names)
+        if not match:
+            return
+
+        db.add(_QpActual(
+            id=str(uuid.uuid4()),
+            run_id=run_id,
+            actual_total=match["grand_total"],
+            actual_values=actuals_matcher.build_actual_values(match),
+            notes=(
+                f"Auto-paired — job {match['job_number']} {match['job_name']}, "
+                f"source: documentation/temp/actuals/{match['source_file']} "
+                f"({len(match['line_items'])} line items)"
+            ),
+        ))
+        db.commit()
+        logger.info(
+            f"[quick_proposal] auto-paired actual for run={run_id} "
+            f"-> job {match['job_number']} {match['job_name']}"
+        )
+    except Exception as e:
+        logger.warning(f"[quick_proposal] auto-pair actual failed run={run_id}: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _diff_generation_vs_actual(extracted_values: dict, actual_values: dict) -> list:
+    """Field-by-field proposal-vs-actual diff (TODO_B_NEW pairing infra).
+
+    Deliberately schema-agnostic — walks whatever keys are present in either
+    dict rather than a hardcoded field list, since the KP/extraction schema
+    evolves over time. Numeric fields get delta/delta_pct; everything else is
+    still surfaced side-by-side with delta=None so it's visible, just not scored.
+    """
+    extracted_values = extracted_values or {}
+    actual_values = actual_values or {}
+
+    def _unwrap(v):
+        # extracted_values entries are commonly {"value": ...}; actual_values
+        # may be plain scalars — normalize both to a bare value.
+        if isinstance(v, dict) and "value" in v:
+            return v["value"]
+        return v
+
+    rows = []
+    for field in sorted(set(extracted_values) | set(actual_values)):
+        proposal_value = _unwrap(extracted_values.get(field))
+        actual_value = _unwrap(actual_values.get(field))
+
+        delta = None
+        delta_pct = None
+        if isinstance(proposal_value, (int, float)) and isinstance(actual_value, (int, float)):
+            delta = proposal_value - actual_value
+            delta_pct = (delta / actual_value * 100.0) if actual_value else None
+
+        rows.append({
+            "field": field,
+            "proposal_value": proposal_value,
+            "actual_value": actual_value,
+            "delta": delta,
+            "delta_pct": delta_pct,
+        })
+
+    rows.sort(key=lambda r: abs(r["delta"]) if r["delta"] is not None else -1, reverse=True)
+    return rows
+
+
+# Rule-based actuals-line-item matchers (TODO_B_NEW-2). Deliberately small and
+# hand-curated rather than an LLM guess or a general free-text mapper — these
+# are the only fields observed consistently named + cleanly numeric across
+# paired runs (survey: 20-21/21 runs for the first five; drywell fields are
+# messier — several synonym spellings — but explicitly worth a best-effort
+# pass since TODO_B_NEW's original text called drywell count out by name).
+# Each entry: (extracted_values field name, description regex, allowed units).
+_DIRECT_LINE_ITEM_MATCHERS = [
+    ("water_main_LF", re.compile(r"\bWATER MAIN\b", re.I), {"LF"}),
+    ("sewer_main_LF", re.compile(r"\bSEWER MAIN\b", re.I), {"LF"}),
+    ("proposed_fire_hydrant_count", re.compile(r"FIRE HYDRANT", re.I), {"EA"}),
+    ("proposed_ped_ramp_count", re.compile(r"PED RAMP", re.I), {"EA"}),
+]
+# proposed_manhole_count's extracted value is a nested {total, count_48in,
+# count_60in} dict, not a bare number — flattened separately in
+# _flatten_nested_fields_for_diff rather than here.
+_MANHOLE_PATTERN = re.compile(r"MANHOLE", re.I)
+# Several manager runs invented different names for "total drywell count" —
+# only one of these will ever be present on a given generation, so whichever
+# is found gets paired against the same combined (single + double) actual sum.
+_DRYWELL_GENERIC_FIELDS = ("drywell_count", "drywell_count_final", "proposed_drywell_count")
+_DRYWELL_ANY_PATTERN = re.compile(r"DRYWELL", re.I)
+_DRYWELL_SINGLE_PATTERN = re.compile(r"SINGLE DRYWELL", re.I)
+_DRYWELL_DOUBLE_PATTERN = re.compile(r"DOUBLE DRYWELL", re.I)
+# Scuppers are recorded under three different shapes across generations —
+# a dedicated "scupper_count" field, a dedicated "scuppers_count" (plural)
+# field, or (by far the most common: 21/28 generations surveyed vs 3/28 for
+# the two dedicated fields combined) a scope_items entry with work_type
+# "SCUPPERS" (see gemini_phase3.txt's own example schema). All three are
+# canonicalized onto one "scupper_count" key (_flatten_nested_fields_for_diff
+# for the proposed side, _build_mapped_actual_values below for the actual
+# side) so the reliability aggregator groups them as one field instead of
+# three separate low-N rows.
+_SCUPPER_GENERIC_FIELDS = ("scupper_count", "scuppers_count")
+_SCUPPER_PATTERN = re.compile(r"SCUPPER", re.I)
+
+
+def _scope_items_scupper_qty(extracted_values: dict):
+    """Sums quantity across any scope_items entries whose work_type mentions
+    "scupper" (matches "SCUPPERS", "SCUPPERS / CURB CUTS", "SCUPPERS/CURB
+    INLETS", etc. via substring). Returns None (not 0) if scope_items is
+    absent or no matching entry has a real quantity, so callers can tell
+    "no signal" apart from "confirmed zero"."""
+    scope_items = extracted_values.get("scope_items")
+    items = scope_items.get("value") if isinstance(scope_items, dict) else scope_items
+    if not isinstance(items, list):
+        return None
+    total = sum(
+        item.get("quantity") or 0
+        for item in items
+        if isinstance(item, dict) and _SCUPPER_PATTERN.search(str(item.get("work_type") or ""))
+    )
+    return total or None
+
+
+def _sum_matching_line_items(line_items: list, pattern, units: set) -> float:
+    return sum(
+        (li.get("quantity") or 0) for li in line_items
+        if pattern.search(li.get("description") or "") and (not units or li.get("unit") in units)
+    )
+
+
+# Earthwork dollar-comparison matchers (TODO_B_NEW-2 follow-up). Real-bid
+# earthwork line items are quoted almost entirely as lump-sum $ (1 LS), not a
+# standardized quantity, so they can't be compared via _sum_matching_line_items
+# like water_main_LF etc. Instead these compare $ ext_price on BOTH sides:
+# the manager's own priced final_line_items (proposed) against the actual
+# bid's line_items (actual) — the two use the same description/unit/qty/
+# unit_price/ext_price shape, and earthwork descriptions are phrased
+# consistently enough across jobs for keyword matching. Caveat: some bids
+# lump multiple scopes into one line (e.g. "STRIP, EXC TO EMBANK LOTS"), which
+# will double-count into more than one category below — an inherent ambiguity
+# in the source data, not a matcher bug.
+_EARTHWORK_STRIP_PATTERN = re.compile(r"\bSTRIP(?!ING\b)", re.I)
+_EARTHWORK_HAUL_TOPSOIL_PATTERN = re.compile(r"\bHAUL\b", re.I)
+_EARTHWORK_TOPSOIL_PATTERN = re.compile(r"TOPSOIL|TOSPOIL", re.I)  # "TOSPOIL" is a recurring typo in the source bids
+_EARTHWORK_EXC_EMBANK_PATTERN = re.compile(r"(?=.*\bEXC)(?=.*EMBANK)", re.I)
+_EARTHWORK_SUBGRADE_PATTERN = re.compile(r"SUBGRADE", re.I)
+_EARTHWORK_BALLAST_PATTERN = re.compile(r"BALLAST", re.I)
+
+
+def _matches_strip_haul_off(description: str) -> bool:
+    description = description or ""
+    if _EARTHWORK_STRIP_PATTERN.search(description):
+        return True
+    return bool(_EARTHWORK_HAUL_TOPSOIL_PATTERN.search(description) and _EARTHWORK_TOPSOIL_PATTERN.search(description))
+
+
+_EARTHWORK_DOLLAR_MATCHERS = [
+    ("earthwork_strip_haul_off_dollars", _matches_strip_haul_off),
+    ("earthwork_exc_to_embank_dollars", lambda d: bool(_EARTHWORK_EXC_EMBANK_PATTERN.search(d or ""))),
+    ("earthwork_subgrade_road_dollars", lambda d: bool(_EARTHWORK_SUBGRADE_PATTERN.search(d or ""))),
+    ("earthwork_ballast_dollars", lambda d: bool(_EARTHWORK_BALLAST_PATTERN.search(d or ""))),
+]
+
+
+def _sum_matching_ext_price(line_items: list, matcher) -> float:
+    return sum(
+        (li.get("ext_price") or 0) for li in (line_items or [])
+        if matcher(li.get("description"))
+    )
+
+
+def _build_earthwork_dollar_fields(final_line_items: list, actual_line_items: list) -> tuple[dict, dict]:
+    """Returns (proposed_fields, actual_fields) for the earthwork $ categories
+    above. A field is only included if the ACTUAL side has a matching line
+    item — mirrors _build_mapped_actual_values's convention of only surfacing
+    fields with real signal on the actual side, so an unmatched category is
+    left out rather than showing a misleading proposed-vs-zero comparison.
+
+    Older QpGeneration snapshots predate final_line_items being captured
+    (extracted_data only has phase1_summary/notes_text/scope_analysis) — an
+    empty final_line_items there means "not recorded," not "proposed $0," so
+    this returns nothing rather than fabricating a false -100% delta.
+    """
+    if not final_line_items:
+        return {}, {}
+    proposed, actual = {}, {}
+    for field, matcher in _EARTHWORK_DOLLAR_MATCHERS:
+        actual_total = _sum_matching_ext_price(actual_line_items, matcher)
+        if actual_total:
+            actual[field] = actual_total
+            proposed[field] = _sum_matching_ext_price(final_line_items, matcher)
+    return proposed, actual
+
+
+# Paving quantity-comparison matchers (TODO_B_NEW-2 follow-up). Unlike
+# earthwork, paving IS quoted in a consistent unit (SY) on both the actual
+# bid and the manager's final_line_items, so this compares SY quantity
+# directly rather than $ — isolating extraction/sizing error from unit-price
+# assumptions. "PAVING" vs "PAVEMENT" conveniently separates new-construction
+# paving from patch/repair line items ("PAVEMENT PATCHING", "PAVEMENT PATCH")
+# in the observed data — patch items are intentionally excluded, they're a
+# different scope with much smaller quantities that would skew the stats.
+_PAVING_PATTERN = re.compile(r"PAVING", re.I)
+_PAVING_PATHWAY_PATTERN = re.compile(r"PATHWAY", re.I)
+
+
+def _matches_road_paving(description: str) -> bool:
+    description = description or ""
+    return bool(_PAVING_PATTERN.search(description) and not _PAVING_PATHWAY_PATTERN.search(description))
+
+
+def _matches_pathway_paving(description: str) -> bool:
+    description = description or ""
+    return bool(_PAVING_PATTERN.search(description) and _PAVING_PATHWAY_PATTERN.search(description))
+
+
+_PAVING_QUANTITY_MATCHERS = [
+    ("road_paving_SY", _matches_road_paving),
+    ("pathway_paving_SY", _matches_pathway_paving),
+]
+
+
+def _sum_matching_quantity(line_items: list, matcher, qty_key: str, unit: str) -> float:
+    return sum(
+        (li.get(qty_key) or 0) for li in (line_items or [])
+        if matcher(li.get("description")) and li.get("unit") == unit
+    )
+
+
+def _build_paving_quantity_fields(final_line_items: list, actual_line_items: list) -> tuple[dict, dict]:
+    """Returns (proposed_fields, actual_fields) for the paving SY categories
+    above. Same "actual side must have a match" + "final_line_items must be
+    present" conventions as _build_earthwork_dollar_fields. Note the actual
+    bid's line items key quantity as "quantity" while final_line_items keys
+    it as "qty" — different field names for the same concept, handled here
+    rather than normalized upstream since nothing else needs that unified."""
+    if not final_line_items:
+        return {}, {}
+    proposed, actual = {}, {}
+    for field, matcher in _PAVING_QUANTITY_MATCHERS:
+        actual_total = _sum_matching_quantity(actual_line_items, matcher, qty_key="quantity", unit="SY")
+        if actual_total:
+            actual[field] = actual_total
+            proposed[field] = _sum_matching_quantity(final_line_items, matcher, qty_key="qty", unit="SY")
+    return proposed, actual
+
+
+def _diff_generation_full(gen, actual) -> list:
+    """Full proposal-vs-actual diff for one QpGeneration, combining the
+    quantity-based mapper (_build_mapped_actual_values) with the earthwork
+    $ comparison (_build_earthwork_dollar_fields) and the paving SY
+    comparison (_build_paving_quantity_fields). Shared by the per-run detail
+    route and the cross-run reliability aggregator so the two stay in sync."""
+    results_snapshot = gen.results_snapshot or {}
+    extracted_values = results_snapshot.get("extracted_values", {})
+    final_line_items = results_snapshot.get("extracted_data", {}).get("final_line_items", [])
+    line_items = (actual.actual_values or {}).get("line_items", [])
+
+    proposed_side = _flatten_nested_fields_for_diff(extracted_values)
+    actual_side = _build_mapped_actual_values(extracted_values, line_items)
+
+    earthwork_proposed, earthwork_actual = _build_earthwork_dollar_fields(final_line_items, line_items)
+    proposed_side.update(earthwork_proposed)
+    actual_side.update(earthwork_actual)
+
+    paving_proposed, paving_actual = _build_paving_quantity_fields(final_line_items, line_items)
+    proposed_side.update(paving_proposed)
+    actual_side.update(paving_actual)
+
+    return _diff_generation_vs_actual(proposed_side, actual_side)
+
+
+def _build_mapped_actual_values(extracted_values: dict, line_items: list) -> dict:
+    """Best-effort rule-based enrichment (TODO_B_NEW-2): derive comparable actual
+    quantities for a small set of consistently-named, cleanly-numeric KP fields
+    by aggregating matching real-bid line items (matched on description keyword
+    + unit). Returns field_name -> value pairs keyed with extracted_values' OWN
+    field names so they merge naturally into _diff_generation_vs_actual's
+    key-based comparison. Only covers fields with an unambiguous, auditable
+    description pattern — everything else is intentionally left unmapped rather
+    than risk a wrong guess corrupting the comparison.
+    """
+    extracted_values = extracted_values or {}
+    line_items = line_items or []
+    mapped = {}
+
+    for field, pattern, units in _DIRECT_LINE_ITEM_MATCHERS:
+        if field in extracted_values:
+            total = _sum_matching_line_items(line_items, pattern, units)
+            if total:
+                mapped[field] = total
+
+    if "proposed_manhole_count" in extracted_values:
+        total = _sum_matching_line_items(line_items, _MANHOLE_PATTERN, {"EA"})
+        if total:
+            mapped["proposed_manhole_count"] = total
+
+    _scupper_present = (
+        any(f in extracted_values for f in _SCUPPER_GENERIC_FIELDS)
+        or _scope_items_scupper_qty(extracted_values) is not None
+    )
+    if _scupper_present:
+        total = _sum_matching_line_items(line_items, _SCUPPER_PATTERN, {"EA"})
+        if total:
+            mapped["scupper_count"] = total
+
+    for field in _DRYWELL_GENERIC_FIELDS:
+        if field in extracted_values:
+            total = _sum_matching_line_items(line_items, _DRYWELL_ANY_PATTERN, {"EA"})
+            if total:
+                mapped[field] = total
+            break  # only one synonym name is ever present per generation
+
+    if "single_drywell_count" in extracted_values:
+        total = _sum_matching_line_items(line_items, _DRYWELL_SINGLE_PATTERN, {"EA"})
+        if total:
+            mapped["single_drywell_count"] = total
+    if "double_drywell_count" in extracted_values:
+        total = _sum_matching_line_items(line_items, _DRYWELL_DOUBLE_PATTERN, {"EA"})
+        if total:
+            mapped["double_drywell_count"] = total
+
+    return mapped
+
+
+def _flatten_nested_fields_for_diff(extracted_values: dict) -> dict:
+    """Returns a shallow copy of extracted_values with the handful of
+    dict-shaped-value fields we know how to compare (currently just
+    proposed_manhole_count.value.total) replaced by a bare-number {"value": ...}
+    entry, so _diff_generation_vs_actual's plain isinstance(int, float) check
+    can score them. Never mutates the original (still shown unflattened
+    elsewhere, e.g. the per-generation extracted_values in the API response)."""
+    extracted_values = dict(extracted_values or {})
+    manhole = extracted_values.get("proposed_manhole_count")
+    if isinstance(manhole, dict):
+        inner = manhole.get("value")
+        if isinstance(inner, dict) and isinstance(inner.get("total"), (int, float)):
+            extracted_values["proposed_manhole_count"] = {"value": inner["total"]}
+
+    # See _scope_items_scupper_qty's docstring — canonicalize whichever of the
+    # three scupper shapes is present onto one "scupper_count" key so it lines
+    # up with _build_mapped_actual_values' actual-side key of the same name.
+    scupper_value = None
+    for f in _SCUPPER_GENERIC_FIELDS:
+        entry = extracted_values.pop(f, None)
+        if scupper_value is None and isinstance(entry, dict) and isinstance(entry.get("value"), (int, float)):
+            scupper_value = entry["value"]
+    if scupper_value is None:
+        scupper_value = _scope_items_scupper_qty(extracted_values)
+    if scupper_value is not None:
+        extracted_values["scupper_count"] = {"value": scupper_value}
+
+    return extracted_values
+
+
+def _aggregate_actuals_reliability(db) -> list:
+    """Cross-run reliability stats (TODO_B_NEW-2), built on the same rule-based
+    field mapper as the per-run diff. Uses the LATEST QpGeneration per run_id
+    (avoids double-counting reruns of one attempt under one run_id) — distinct
+    baseline/rerun/test run_ids for the same underlying job are each counted as
+    their own data point, since they're independent extraction attempts.
+
+    Informational only, per this feature's scope decision — surfaced in the QP
+    Generations modal as a report, not wired into any manager-side gate or
+    prompt. Sample sizes here are small (13 paired jobs as of session 31); this
+    is a first look, not a basis for hardcoding thresholds yet.
+    """
+    per_field_pct: dict = {}
+
+    for actual in db.query(QpActual).all():
+        gen = (
+            db.query(QpGeneration)
+            .filter(QpGeneration.run_id == actual.run_id)
+            .order_by(QpGeneration.generation_index.desc())
+            .first()
+        )
+        if not gen:
+            continue
+        diff = _diff_generation_full(gen, actual)
+        for row in diff:
+            if row["delta_pct"] is None:
+                continue
+            per_field_pct.setdefault(row["field"], []).append(row["delta_pct"])
+
+    report = []
+    for field, pcts in per_field_pct.items():
+        n = len(pcts)
+        pcts_sorted = sorted(pcts)
+        median_pct = (
+            pcts_sorted[n // 2] if n % 2
+            else (pcts_sorted[n // 2 - 1] + pcts_sorted[n // 2]) / 2.0
+        )
+        report.append({
+            "field": field,
+            "sample_count": n,
+            "mean_delta_pct": sum(pcts) / n,
+            "median_delta_pct": median_pct,
+            "over_count": sum(1 for p in pcts if p > 0),
+            "under_count": sum(1 for p in pcts if p < 0),
+            "min_delta_pct": min(pcts),
+            "max_delta_pct": max(pcts),
+        })
+
+    report.sort(key=lambda r: -r["sample_count"])
+    return report
+
 
 def _resolve_upload_path(upload_id: str) -> str:
     direct = os.path.join(UPLOAD_DIR, upload_id)
@@ -657,16 +1852,168 @@ def _compact_case(data: dict) -> dict | None:
     }
 
 
-def _load_case_library() -> list[dict]:
-    cases = []
-    for path in sorted(_CASE_LIBRARY_DIR.glob("*.json")):
+class CaseLibraryUpsert(BaseModel):
+    content: dict
+    slug: str = ""
+
+
+_CASE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,80}$")
+
+
+def _validate_case_slug(slug: str) -> str:
+    if not _CASE_SLUG_RE.match(slug or ""):
+        raise HTTPException(status_code=400, detail="Invalid job slug (use lowercase letters, digits, _ or -)")
+    return slug
+
+
+def _validate_case_record(content) -> dict:
+    if not isinstance(content, dict):
+        raise HTTPException(status_code=422, detail="Job record must be a JSON object")
+    job_name = content.get("job_name")
+    if not isinstance(job_name, str) or not job_name.strip():
+        raise HTTPException(status_code=422, detail="Job record needs a non-empty 'job_name'")
+    if content.get("proposals") is not None and not isinstance(content["proposals"], list):
+        raise HTTPException(status_code=422, detail="'proposals' must be a list")
+    return content
+
+
+def _normalize_case_tax_rates(content: dict) -> None:
+    """The job-form UI sends each line item's ``tax_rate`` as the whole-number
+    percent the user typed (e.g. ``7`` or ``7.5``). Persist it as a decimal
+    fraction (``0.07`` / ``0.075``) so downstream pricing can multiply it
+    directly. Mutates ``content`` in place; only touches items that actually
+    carry a ``tax_rate`` key, and is safe against blank/non-numeric values."""
+    for proposal in (content.get("proposals") or []):
+        if not isinstance(proposal, dict):
+            continue
+        for item in (proposal.get("line_items") or []):
+            if not isinstance(item, dict) or "tax_rate" not in item:
+                continue
+            raw = item.get("tax_rate")
+            try:
+                pct = float(raw) if raw not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                pct = 0.0
+            item["tax_rate"] = round(pct / 100.0, 6)
+
+
+def _recompute_reconciliation(content: dict) -> None:
+    """Recompute each proposal's live reconciliation fields — ``line_items_sum``,
+    ``total_reconciled``, ``grand_total_mismatch``, ``total_unreconciled_delta``,
+    ``line_items_sum_matches_total`` — from its CURRENT ``line_items``/``grand_total``,
+    every time a job is saved (TODO_XX part (c)). These describe whether the record's
+    line items presently sum to its present grand_total; recomputing on every save means
+    they can never go stale relative to an edit the way a carried-over import-time
+    snapshot would. Mutates ``content`` in place.
+
+    ``grand_total_raw`` is deliberately NOT touched — it's the grand total as originally
+    parsed from the historical source document (set once at import, if at all), not a
+    live-state field, so an edit here must not overwrite that provenance."""
+    for proposal in (content.get("proposals") or []):
+        if not isinstance(proposal, dict):
+            continue
+        line_items = proposal.get("line_items") or []
+        line_items_sum = round(sum(
+            (item.get("ext_price") or 0)
+            for item in line_items
+            if isinstance(item, dict) and not item.get("is_optional")
+        ), 2)
+        proposal["line_items_sum"] = line_items_sum
+        proposal["total_reconciled"] = line_items_sum
+        grand_total = proposal.get("grand_total")
+        if grand_total is None:
+            proposal["total_unreconciled_delta"] = None
+            proposal["grand_total_mismatch"] = None
+            proposal["line_items_sum_matches_total"] = None
+        else:
+            delta = round(grand_total - line_items_sum, 2)
+            mismatch = abs(delta) > 0.01
+            proposal["total_unreconciled_delta"] = delta
+            proposal["grand_total_mismatch"] = mismatch
+            proposal["line_items_sum_matches_total"] = not mismatch
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically: temp file in the same directory →
+    flush + fsync → os.replace. Two reasons this matters here:
+      1. Readers never see a half-written file (write_text truncates in place).
+      2. On Docker Desktop bind mounts (macOS VirtioFS/gRPC-FUSE), an in-place
+         rewrite can be served stale by the FS attribute cache on a read right
+         after the write. os.replace swaps in a NEW directory entry, so the next
+         open resolves fresh content instead of a cached stale version.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
         try:
-            data    = json.loads(path.read_text(encoding="utf-8"))
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def _norm_line_item_desc(desc: str) -> str:
+    """Normalization key for deduping/matching line-item descriptions: lowercase,
+    trimmed, inner whitespace collapsed. Preserves digits/quotes so 4\" vs 6\"
+    stay distinct. The job-form 'add line item' picker uses the same rule in JS."""
+    return " ".join(str(desc or "").lower().split())
+
+
+def _reject_duplicate_job_name(db, job_name: str, exclude_slug: str = "") -> None:
+    # job_name doubles as the job id everywhere (selection, KP scoping, actuals
+    # pairing) — two rows with the same job_name would silently conflate jobs.
+    # The unique constraint on QpJobData.job_name is case-sensitive; this adds the
+    # case-insensitive guard the file store had.
+    other = case_store.get_job_by_name(db, job_name, exclude_slug=exclude_slug)
+    if other is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Another job already uses job_name '{other.job_name}' ({other.slug})")
+
+
+def _case_library_summary(slug: str, data: dict) -> dict:
+    ident = data.get("identity") or {}
+    props = data.get("proposals") or []
+    idx   = data.get("primary_proposal_index", 0)
+    prim  = props[idx] if isinstance(props, list) and 0 <= idx < len(props) and isinstance(props[idx], dict) else None
+    return {
+        "slug":            slug,
+        "job_name":        data.get("job_name", slug),
+        "client":          ident.get("client"),
+        "job_type":        (data.get("classification") or {}).get("job_type"),
+        "built_at":        data.get("built_at"),
+        "proposal_count":  len(props),
+        "grand_total":     (prim or {}).get("grand_total"),
+        "line_item_count": len((prim or {}).get("line_items") or []),
+    }
+
+
+def _load_case_library_records() -> list[dict]:
+    """Every case-library job reassembled into its full record dict (DB-backed).
+    This is the raw form the knowledge-pack derivation consumes."""
+    db = SessionLocal()
+    try:
+        return case_store.load_all_records(db)
+    finally:
+        db.close()
+
+
+def _load_case_library() -> list[dict]:
+    """Compacted case records for prompt context (the small per-job summary the
+    manager/Gemini see). Built from the full DB-backed records."""
+    cases = []
+    for data in _load_case_library_records():
+        try:
             compact = _compact_case(data)
             if compact:
                 cases.append(compact)
         except Exception as e:
-            logger.warning(f"[quick_proposal] case library parse error {path.name}: {e}")
+            logger.warning(f"[quick_proposal] case library compact error {data.get('job_name')}: {e}")
     return cases
 
 
@@ -724,7 +2071,7 @@ async def _gemini_cache_create(system_text: str, api_key: str) -> Optional[str]:
         "Content-Type": "application/json",
     }
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             r = await client.post(_GEMINI_CACHES, headers=headers, json=payload)
             if not r.is_success:
                 logger.info(
@@ -792,21 +2139,72 @@ async def _classify_one_page(
             "response_format": {"type": "json_object"},
         }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    # 300s: gemini-3.1-pro-preview (a thinking model) can take 1-3 min per
+    # image-heavy classification when Google's preview capacity is under load.
+    # Local models (Ollama/vLLM) run on much slower hardware, so give them
+    # significantly more headroom before treating the call as hung.
+    classify_timeout = 1800.0 if _is_local_endpoint(url) else 300.0
+    async with httpx.AsyncClient(timeout=classify_timeout) as client:
         r = await client.post(url, headers=req_headers, json=payload)
         r.raise_for_status()
         text = r.json()["choices"][0]["message"]["content"]
         stripped = _strip_fences(text)
         try:
-            return json.loads(stripped)
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                # Gemini occasionally wraps the classification object in a single-
+                # element array (valid JSON, so this doesn't raise JSONDecodeError
+                # and skips the list-unwrap the json_repair salvage tier below
+                # already does) — unwrap it the same way here.
+                found = next((x for x in parsed if isinstance(x, dict) and x), None)
+                if found is None:
+                    raise json.JSONDecodeError("list contained no usable object", stripped, 0)
+                logger.info("[quick_proposal] classification response was a list, unwrapped first object")
+                return found
+            if not isinstance(parsed, dict):
+                raise json.JSONDecodeError(f"expected a JSON object, got {type(parsed).__name__}", stripped, 0)
+            return parsed
         except json.JSONDecodeError as e:
+            # Tier 1 — targeted unescaped-quote repair (cheap; common inch-mark
+            # case like `12"` written mid-string).
             try:
                 repaired = json.loads(_repair_unescaped_quotes(stripped))
                 logger.info(f"[quick_proposal] JSON parse failed ({e}), repaired via quote-escaping, no retry needed")
                 return repaired
             except json.JSONDecodeError:
-                logger.warning(f"[quick_proposal] JSON parse failed, raw response: {text[:500]}")
-                raise e
+                pass
+            # Tier 2 — general structural salvage (missing/trailing commas,
+            # unescaped control chars, truncation) via json_repair. Retrying the
+            # vision call at temp 0 usually reproduces the SAME malformed output,
+            # so salvaging here is what actually stops the wasted API credits
+            # (TODO_DD). Only if this also fails do we fall through to a retry.
+            try:
+                from json_repair import repair_json
+                obj = repair_json(stripped, return_objects=True)
+                # "Extra data" (a valid object followed by a second one) makes
+                # json_repair hand back a [obj1, obj2, ...] list — take the first
+                # usable dict rather than falling through to a wasted retry.
+                if isinstance(obj, list):
+                    obj = next((x for x in obj if isinstance(x, dict) and x), None)
+                if isinstance(obj, dict) and obj:
+                    logger.info(f"[quick_proposal] JSON parse failed ({e}), salvaged via json_repair, no retry needed")
+                    return obj
+            except Exception as re:
+                logger.warning(f"[quick_proposal] json_repair salvage failed: {re}")
+            logger.warning(f"[quick_proposal] JSON parse failed, raw response: {text[:500]}")
+            raise e
+
+
+def _flat_numeric_bbox(bbox) -> Optional[list]:
+    """Return bbox as a flat list of numbers, or None if it isn't one.
+
+    Gemini occasionally returns a malformed bbox (e.g. a nested list like
+    [[x1,y1],[x2,y2]] instead of [x1,y1,x2,y2]), which crashes max()/comparisons
+    downstream since they assume every element is an int/float.
+    """
+    if not isinstance(bbox, list) or not all(isinstance(v, (int, float)) for v in bbox):
+        return None
+    return bbox
 
 
 async def phase2_classify_pages(index, queue: asyncio.Queue, model_override: str = "", retry_attempts: int = 3, fallback_models: list | None = None) -> None:
@@ -831,7 +2229,17 @@ async def phase2_classify_pages(index, queue: asyncio.Queue, model_override: str
             return
 
     prompt     = (_PROMPTS_DIR / "gemini_phase1.txt").read_text(encoding="utf-8")
-    cache_name = await _gemini_cache_create(prompt, api_key)
+    # cached_content is a native-Gemini field the OpenAI-compat endpoint rejects with a
+    # 400 ("Unknown name 'cached_content'"). Only create/use the cache on the native
+    # endpoint — mirrors the phase-3 payload guard (~:1600) and phase-5 create guard
+    # (~:2787). Without this, every phase-1 page 400s once cache creation succeeds.
+    # Local models (Ollama/vLLM) have no Gemini API key and don't support this
+    # cache at all — skip the attempt entirely rather than let it fail and fall back.
+    cache_name = (
+        await _gemini_cache_create(prompt, api_key)
+        if "/openai/" not in url and not _is_local_endpoint(url)
+        else None
+    )
 
     # Fallbacks use None for cache_name — the cache is tied to the primary endpoint's API key.
     fallback_configs: list = []
@@ -896,8 +2304,8 @@ async def phase2_classify_pages(index, queue: asyncio.Queue, model_override: str
 
             # Auto-redo once if Gemini returned out-of-range (1000-based) coords
             if page.idx not in auto_redone:
-                raw_bboxes = [r.get("bbox", []) for r in result.get("regions", [])]
-                if any(len(b) >= 4 and max(b) > 100 for b in raw_bboxes):
+                raw_bboxes = [_flat_numeric_bbox(r.get("bbox", [])) for r in result.get("regions", [])]
+                if any(b and len(b) >= 4 and max(b) > 100 for b in raw_bboxes):
                     auto_redone.add(page.idx)
                     logger.info(f"[quick_proposal] phase1 page={page.idx} auto-redo: out-of-range bbox coords")
                     try:
@@ -912,7 +2320,10 @@ async def phase2_classify_pages(index, queue: asyncio.Queue, model_override: str
             regions_out = []
             for region in result.get("regions", []):
                 bbox_id = f"{page.idx}_{region['id']}"
-                bbox    = region.get("bbox", [0, 0, 100, 100])
+                bbox    = _flat_numeric_bbox(region.get("bbox", [0, 0, 100, 100]))
+                if bbox is None:
+                    logger.warning(f"[quick_proposal] phase1 page={page.idx} region={region.get('id')} malformed bbox {region.get('bbox')!r}, using default")
+                    bbox = [0, 0, 100, 100]
                 if len(bbox) < 4:
                     bbox = bbox + [0] * (4 - len(bbox))
                 # Gemini's native format is 0-1000; normalize when it bleeds through
@@ -1024,16 +2435,37 @@ _GEMINI_PHASE3_TOOLS = [
         "type": "function",
         "function": {
             "name": "index_write",
-            "description": "Writes an extracted value to the shared index.",
+            "description": (
+                "Write one or more extracted values to the shared index. PREFERRED: pass "
+                "`writes` — a list of {key, value, source_bbox_id, confidence} objects — to "
+                "record several values in ONE call instead of one call per value. Batch every "
+                "value you can read from the regions you've already viewed into a single "
+                "index_write(writes=[...]). A single key/value/source_bbox_id/confidence is "
+                "still accepted for a one-off write."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "key":           {"type": "string"},
-                    "value":         {"description": "The extracted value (string, number, or bool)"},
-                    "source_bbox_id":{"type": "string", "description": "bbox_id this value was read from"},
-                    "confidence":    {"type": "string", "enum": ["high", "medium", "low"]},
+                    "writes": {
+                        "type":        "array",
+                        "description": "Batch form: list of values to write in one call.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key":           {"type": "string"},
+                                "value":         {"description": "The extracted value (string, number, or bool)"},
+                                "source_bbox_id":{"type": "string", "description": "bbox_id this value was read from"},
+                                "confidence":    {"type": "string", "enum": ["high", "medium", "low"]},
+                            },
+                            "required": ["key", "value", "source_bbox_id", "confidence"],
+                        },
+                    },
+                    "key":           {"type": "string", "description": "Single write: the value's key."},
+                    "value":         {"description": "Single write: the extracted value (string, number, or bool)"},
+                    "source_bbox_id":{"type": "string", "description": "Single write: bbox_id this value was read from"},
+                    "confidence":    {"type": "string", "enum": ["high", "medium", "low"], "description": "Single write: confidence"},
                 },
-                "required": ["key", "value", "source_bbox_id", "confidence"],
+                "required": [],
             },
         },
     },
@@ -1285,25 +2717,73 @@ async def _tool_get_image(args: dict, image_store: dict) -> list:
 
 
 async def _tool_index_write(args: dict, index, queue: asyncio.Queue) -> list:
-    key            = args.get("key", "")
-    value          = args.get("value")
-    if isinstance(value, str) and value[:1] in "[{":
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            pass
-    source_bbox_id = args.get("source_bbox_id")
-    confidence     = args.get("confidence", "medium")
-    index.extracted_values[key] = {
-        "value":          value,
-        "source_bbox_id": source_bbox_id,
-        "confidence":     confidence,
-    }
-    await _emit(queue, "index_update",
-                key=key, value=value,
-                source_bbox_id=source_bbox_id, confidence=confidence)
+    """Write one or more extracted values to the shared index. Accepts either a single
+    key/value/source_bbox_id/confidence, or a batch via `writes=[{...}, ...]` — the batch
+    form lets Gemini record many values in ONE turn instead of one write-turn per value
+    (each of which otherwise resends the whole image-heavy context). All writes in a batch
+    are persisted with a single results.json save."""
+    def _coerce(v):
+        if isinstance(v, str) and v[:1] in "[{":
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return v
+        return v
+
+    writes  = args.get("writes")
+    entries = writes if (isinstance(writes, list) and writes) else [args]
+
+    written: list = []
+    for w in entries:
+        if not isinstance(w, dict):
+            continue
+        key = w.get("key", "")
+        if not key:
+            continue
+        value          = _coerce(w.get("value"))
+        source_bbox_id = w.get("source_bbox_id")
+        confidence     = w.get("confidence", "medium")
+        index.extracted_values[key] = {
+            "value":          value,
+            "source_bbox_id": source_bbox_id,
+            "confidence":     confidence,
+        }
+        await _emit(queue, "index_update",
+                    key=key, value=value,
+                    source_bbox_id=source_bbox_id, confidence=confidence)
+        written.append((key, value, confidence))
+
+    if not written:
+        return [{"type": "text", "text": "index_write: no valid key(s) provided."}]
+
+    # One disk save for the whole batch, not one per value.
     _save_extracted_values(index.run_id, index.extracted_values)
-    return [{"type": "text", "text": f"Wrote {key} = {json.dumps(value)} (confidence={confidence})"}]
+
+    if len(written) == 1:
+        k, v, c = written[0]
+        return [{"type": "text", "text": f"Wrote {k} = {json.dumps(v)} (confidence={c})"}]
+    lines = "\n".join(f"  {k} = {json.dumps(v)} (confidence={c})" for k, v, c in written)
+    return [{"type": "text", "text": f"Wrote {len(written)} values:\n{lines}"}]
+
+
+def _earthwork_balance_present(extracted_values: dict) -> bool:
+    """True if earthwork_balance has a usable classification for at least one road.
+
+    earthwork_balance is a per-road list (see gemini_phase3.txt): each entry carries its
+    own "balance" key. Older snapshots may still hold the pre-migration scalar shape
+    ({"value": "roughly_balanced", ...}) — both are handled here so the TODO_JJ gate below
+    doesn't silently stop firing on either shape.
+    """
+    entry = extracted_values.get("earthwork_balance")
+    if not isinstance(entry, dict):
+        return False
+    value = entry.get("value")
+    if isinstance(value, list):
+        return any(
+            isinstance(road, dict) and road.get("balance") not in (None, "", "unknown")
+            for road in value
+        )
+    return value not in (None, "", "unknown")
 
 
 async def _tool_write_note(args: dict, index, queue: asyncio.Queue) -> list:
@@ -1378,8 +2858,23 @@ async def _gemini_call_with_retry(
     retry_attempts: int = 3,
     fallback_models_info: list | None = None,
     queue: asyncio.Queue | None = None,
-) -> "httpx.Response":
-    """POST to Gemini, retrying transient errors then falling through to fallback models."""
+    log_path: str = "",
+) -> dict:
+    """Call the vision/tool-loop model, retrying transient errors then falling through
+    to fallback models. Returns the normalized {choices, usage} response dict (raises
+    on total failure across every candidate).
+
+    Each candidate (the primary model and every configured fallback) is checked
+    independently for whether it resolves to Anthropic — advanced mode (TODO_AAA) lets
+    any phase's model, including a fallback, be swapped to Claude. Anthropic's native
+    /v1/messages API doesn't understand this app's OpenAI-shaped payload (image_url
+    blocks, tool_calls, role:"tool"), so an Anthropic candidate is routed through
+    _stream_anthropic_native instead of a raw POST — that's also the only place prompt-
+    cache breakpoints get applied for Claude. Gemini needs no equivalent branch: it has
+    its own automatic server-side context caching (see the `cached_content` handling in
+    _run_gemini_with_tools), which is why this call went straight to the wire for years
+    before Claude became pickable here.
+    """
     base_headers = {**headers, "Content-Type": "application/json"}
     # (url, headers, model) — primary first, then fallbacks
     configs = [(url, base_headers, payload["model"])]
@@ -1387,15 +2882,18 @@ async def _gemini_call_with_retry(
         configs.append((fb_url, {**fb_hdrs, "Content-Type": "application/json"}, fb_model))
 
     last_response: "httpx.Response | None" = None
+    last_exc: "Exception | None" = None
+    last_err_msg: str | None = None
     delay = 2.0
 
     for cfg_idx, (cfg_url, cfg_hdrs, cfg_model) in enumerate(configs):
         n_tries = retry_attempts if cfg_idx == 0 else 1
         attempt_payload = {**payload, "model": cfg_model}
+        is_anthropic = _is_anthropic_endpoint(cfg_url, cfg_hdrs)
 
         for attempt in range(n_tries):
             if attempt > 0:
-                notice = f"Gemini error — retrying {cfg_model} (attempt {attempt + 1}/{n_tries})…"
+                notice = f"Model error — retrying {cfg_model} (attempt {attempt + 1}/{n_tries})…"
                 logger.warning(f"[quick_proposal] {notice}")
                 if queue:
                     await _emit(queue, "extraction_message", role="retry_notice", text=notice)
@@ -1407,11 +2905,40 @@ async def _gemini_call_with_retry(
                 if queue:
                     await _emit(queue, "extraction_message", role="retry_notice", text=notice)
 
-            async with httpx.AsyncClient(timeout=180.0) as client:
-                r = await client.post(cfg_url, headers=cfg_hdrs, json=attempt_payload)
+            if is_anthropic:
+                # 5m breakpoints, not 1h: unlike the manager (whose gaps between turns
+                # are bounded by this whole sub-loop and can run long), this loop's own
+                # turns are back-to-back awaits — a few seconds apart at most — so a 5m
+                # TTL can't realistically miss, and it's cheaper than paying the 1h
+                # write premium for headroom this call site will never use.
+                resp_dict = await _stream_anthropic_native(
+                    cfg_url, cfg_hdrs, attempt_payload, queue, cfg_model, log_path, cache_ttl="5m"
+                )
+                if "error" not in resp_dict:
+                    # Tells _run_gemini_with_tools this turn's text/thinking were already
+                    # streamed live (claude_text_delta/claude_thinking_delta) — the caller
+                    # must close out that live bubble instead of emitting a second, separate
+                    # "gemini" bubble with the same text.
+                    resp_dict["_anthropic_streamed"] = True
+                    return resp_dict
+                last_err_msg = resp_dict["error"].get("message", "Anthropic call failed")
+                logger.warning(f"[quick_proposal] Anthropic vision-loop call model={cfg_model} attempt={attempt + 1}/{n_tries}: {last_err_msg}")
+                continue
+
+            # A timeout / connection drop raises an exception rather than returning a
+            # response, so it must be caught here or it bypasses the entire retry +
+            # fallback ladder below (Gemini preview capacity spells routinely ReadTimeout).
+            try:
+                call_timeout = 1800.0 if _is_local_endpoint(cfg_url) else 300.0
+                async with httpx.AsyncClient(timeout=call_timeout) as client:
+                    r = await client.post(cfg_url, headers=cfg_hdrs, json=attempt_payload)
+            except httpx.TransportError as exc:
+                last_exc = exc
+                logger.warning(f"[quick_proposal] Gemini transport error model={cfg_model} attempt={attempt + 1}/{n_tries}: {type(exc).__name__}: {exc}")
+                continue
 
             if r.is_success:
-                return r
+                return r.json()
 
             last_response = r
             if r.status_code not in _RETRYABLE_STATUS:
@@ -1422,6 +2949,10 @@ async def _gemini_call_with_retry(
 
     if last_response is not None:
         last_response.raise_for_status()
+    if last_exc is not None:
+        raise last_exc
+    if last_err_msg is not None:
+        raise RuntimeError(f"[quick_proposal] Anthropic vision-loop call failed: {last_err_msg}")
     raise RuntimeError("[quick_proposal] Gemini call failed: all attempts exhausted")
 
 
@@ -1454,41 +2985,72 @@ async def _run_gemini_with_tools(
         if gemini_state.get("cache_name") and "/openai/" not in gemini_state["url"]:
             payload["cached_content"] = gemini_state["cache_name"]
 
-        r = await _gemini_call_with_retry(
+        resp_data = await _gemini_call_with_retry(
             gemini_state["url"], gemini_state["headers"], payload,
             retry_attempts=retry_attempts,
             fallback_models_info=fallback_models_info,
             queue=queue,
+            log_path=gemini_state.get("log_path", ""),
         )
 
-        resp_data  = r.json()
         g_usage = resp_data.get("usage", {})
         if g_usage:
+            logger.info(f"[quick_proposal] gemini raw usage run={index.run_id} usage={json.dumps(g_usage)}")
             _ctx_payload = dict(role="gemini",
                                  model=gemini_state.get("model", ""),
                                  input_tokens=g_usage.get("prompt_tokens", 0),
                                  output_tokens=g_usage.get("completion_tokens", 0),
-                                 context_window=1048576)
+                                 context_window=1048576,
+                                 cache_creation_input_tokens=g_usage.get("cache_creation_input_tokens", 0),
+                                 cache_read_input_tokens=g_usage.get("cache_read_input_tokens", 0))
             await _emit(queue, "context_usage", **_ctx_payload)
             _save_context_usage(index.run_id, "gemini", _ctx_payload)
+            logger.info(f"[quick_proposal] gemini call run={index.run_id} "
+                        f"input={g_usage.get('prompt_tokens', '?')} output={g_usage.get('completion_tokens', '?')} "
+                        f"cache_read={g_usage.get('cache_read_input_tokens', '?')} cache_creation={g_usage.get('cache_creation_input_tokens', '?')}")
+            _cum = _add_cumulative_usage(index.run_id, "gemini", g_usage)
+            logger.info(f"[quick_proposal] gemini cumulative run={index.run_id} calls={_cum.get('calls')} "
+                        f"input={_cum.get('input_tokens')} output={_cum.get('output_tokens')} "
+                        f"cache_read={_cum.get('cache_read_input_tokens')} cache_creation={_cum.get('cache_creation_input_tokens')}")
         choice     = resp_data.get("choices", [{}])[0]
         msg        = choice.get("message", {})
         tool_calls = msg.get("tool_calls") or []
         text_out   = msg.get("content") or ""
 
         if tool_calls:
-            gemini_state["messages"].append({
+            assistant_msg: dict = {
                 "role": "assistant",
                 "content": text_out or None,
                 "tool_calls": tool_calls,
-            })
+            }
         else:
-            gemini_state["messages"].append({
+            assistant_msg = {
                 "role": "assistant",
                 "content": text_out,
-            })
+            }
+        # Anthropic rejects a tool_use turn immediately followed by tool_result if the
+        # original thinking block for that turn is missing — stash the verbatim native
+        # blocks (see _stream_anthropic_native) so the next turn replays them exactly,
+        # same pattern the manager loop uses (_openai_messages_to_anthropic).
+        native_blocks = resp_data.get("_native_blocks")
+        if native_blocks:
+            assistant_msg["_anthropic_native_content"] = native_blocks
+        gemini_state["messages"].append(assistant_msg)
 
-        if text_out and text_out.strip():
+        if resp_data.get("_anthropic_streamed"):
+            # This turn's text (and any thinking) already rendered live via
+            # claude_text_delta/claude_thinking_delta inside _stream_anthropic_native —
+            # close out that live bubble (upgrade to markdown, or drop it if empty)
+            # instead of emitting a second "gemini"-labeled bubble with the same text,
+            # which left the live bubble frozen mid-stream with no closing signal.
+            model_label = gemini_state.get("model", "")
+            if text_out and text_out.strip():
+                await _emit(queue, "extraction_message", role="claude", text=text_out, model=model_label)
+                if log_path := gemini_state.get("log_path"):
+                    _log_phase3_event(log_path, {"type": "extraction_message", "role": "claude", "text": text_out, "model": model_label})
+            else:
+                await _emit(queue, "extraction_message", role="claude_text_end", model=model_label)
+        elif text_out and text_out.strip():
             # Intermediate text that precedes tool calls is Gemini's reasoning —
             # show it collapsed. Text in a final (no tool_calls) turn is the summary.
             gemini_role = "gemini_thinking" if tool_calls else "gemini"
@@ -1820,12 +3382,97 @@ async def phase_scope_analysis(
     await _emit(queue, "phase_complete", phase="scope")
 
 
+def _kp_strip_observations(entry: dict) -> dict:
+    """Return a shallow copy of a distribution/trend entry with the raw per-job
+    `observations` list removed. The summary stats (n, min/median/max, mean, std,
+    date_range, …) are computed from those rows and are what pricing actually uses; the
+    raw rows are the only part that grows O(jobs), so they're stripped for many-item
+    batch scans and kept only on single-item drill-down."""
+    if not isinstance(entry, dict):
+        return entry
+    return {k: v for k, v in entry.items() if k != "observations"}
+
+
+def _kp_trends_map(knowledge_pack: dict) -> dict:
+    """Per-item price-trend map. The live KP nests these under price_trends['trends'];
+    tolerate an older flat shape too. (Historically _kp_lookup indexed price_trends at
+    the top level, which is {description, trends} — so a per-item trend never actually
+    attached to any result. This resolves to the right level.)"""
+    pt = knowledge_pack.get("price_trends", {}) or {}
+    trends = pt.get("trends")
+    return trends if isinstance(trends, dict) else pt
+
+
+def _kp_resolve_key(distributions: dict, q: str) -> str | None:
+    """Fuzzy-resolve a queried item name to a canonical unit_price_distributions key, or
+    None. Same precedence as _kp_lookup: exact → case-insensitive → difflib → substring."""
+    import difflib
+    if q in distributions:
+        return q
+    q_up = q.upper()
+    for key in distributions:
+        if key.upper() == q_up:
+            return key
+    matches = difflib.get_close_matches(q, list(distributions.keys()), n=1, cutoff=0.4)
+    if matches:
+        return matches[0]
+    q_low = q.lower()
+    for key in distributions:
+        if q_low in key.lower() or key.lower() in q_low:
+            return key
+    return None
+
+
+def _kp_build_entry(distributions: dict, trends_map: dict, key: str, *, full: bool) -> dict:
+    """Build a priced entry for a resolved KP key. `full` keeps the raw per-job
+    observation rows (single-item drill-down); otherwise they're stripped to stats-only."""
+    dist  = distributions[key]
+    entry = {"matched_item":            key,
+             "unit_price_distribution": dist if full else _kp_strip_observations(dist)}
+    trend = trends_map.get(key)
+    if trend is not None:
+        entry["price_trend"] = trend if full else _kp_strip_observations(trend)
+    return entry
+
+
+def _kp_possibly_relevant(pairs: list, anchor_keys: set, *,
+                          threshold: float = 0.7, cap: int = 15) -> tuple[list, int]:
+    """From item_pairs, surface co-occurring candidate items that were NOT among the
+    anchors (the items just requested/priced) — e.g. an item Gemini missed that reliably
+    co-occurs with one that was found. Aggregated by candidate (one row each, not one per
+    edge) carrying its strongest link and a `support` count of how many anchors pull it
+    in, then thresholded, ranked by (support, rate), and capped. Returns (rows, n_truncated)."""
+    agg: dict = {}   # candidate -> {"rate": float, "anchor": str, "support": int}
+    for p in pairs:
+        a, b = p.get("item_a"), p.get("item_b")
+        rate = p.get("co_occurrence_rate") or 0.0
+        for anchor, cand in ((a, b), (b, a)):
+            if anchor in anchor_keys and cand and cand not in anchor_keys:
+                cur = agg.get(cand)
+                if cur is None:
+                    agg[cand] = {"rate": rate, "anchor": anchor, "support": 1}
+                else:
+                    cur["support"] += 1
+                    if rate > cur["rate"]:
+                        cur["rate"], cur["anchor"] = rate, anchor
+    rows = [
+        {"item": cand, "related_to": v["anchor"],
+         "co_occurrence_rate": round(v["rate"], 3), "support": v["support"]}
+        for cand, v in agg.items() if v["rate"] >= threshold
+    ]
+    rows.sort(key=lambda r: (r["support"], r["co_occurrence_rate"]), reverse=True)
+    truncated = max(0, len(rows) - cap)
+    return rows[:cap], truncated
+
+
 def _kp_lookup(knowledge_pack: dict, query: str) -> str:
-    """Fuzzy lookup for unit price distributions, price trends, item pair detail, or named KP sections."""
+    """Single-item / special-form KP lookup. Returns FULL detail (raw per-job
+    observations included) — this is the drill-down path. Use _kp_lookup_batch for cheap
+    stats-only many-item scans."""
     import difflib
 
     distributions = knowledge_pack.get("unit_price_distributions", {})
-    price_trends  = knowledge_pack.get("price_trends", {})
+    trends_map    = _kp_trends_map(knowledge_pack)
     pairs         = knowledge_pack.get("item_pairs", {}).get("pairs", [])
 
     q = query.strip()
@@ -1879,21 +3526,15 @@ def _kp_lookup(knowledge_pack: dict, query: str) -> str:
             + "\n".join(lines)
         )
 
-    def _build_result(key: str) -> dict:
-        entry = {"matched_item": key, "unit_price_distribution": distributions[key]}
-        if key in price_trends:
-            entry["price_trend"] = price_trends[key]
-        return entry
-
     # Exact match
     if q in distributions:
-        return json.dumps(_build_result(q))
+        return json.dumps(_kp_build_entry(distributions, trends_map, q, full=True))
 
     # Case-insensitive exact
     q_up = q.upper()
     for key in distributions:
         if key.upper() == q_up:
-            return json.dumps(_build_result(key))
+            return json.dumps(_kp_build_entry(distributions, trends_map, key, full=True))
 
     # Fuzzy
     all_keys = list(distributions.keys())
@@ -1908,9 +3549,53 @@ def _kp_lookup(knowledge_pack: dict, query: str) -> str:
         return f"No item found matching '{q}'. Call kp_lookup with item='LIST' to see all available items."
 
     if len(matches) == 1:
-        return json.dumps(_build_result(matches[0]))
+        return json.dumps(_kp_build_entry(distributions, trends_map, matches[0], full=True))
 
-    return json.dumps({"query": q, "matches": {k: _build_result(k) for k in matches}})
+    return json.dumps({"query": q, "matches": {k: _kp_build_entry(distributions, trends_map, k, full=True) for k in matches}})
+
+
+def _kp_lookup_batch(knowledge_pack: dict, items: list, *,
+                     threshold: float = 0.7, cap: int = 15) -> str:
+    """Batch, stats-only KP price lookup — collapses the one-lookup-per-line-item Phase-B
+    pattern into a single turn. Returns:
+      • priced             — {matched_key: {requested, unit_price_distribution (stats-only,
+                             observations stripped), price_trend}} for each requested item
+      • possibly_relevant  — co-occurring items NOT requested (aggregated, gap-filtered,
+                             thresholded, ranked, capped) so the manager can decide what
+                             else to price (mobilization / co-occurrence gaps) in a follow-up
+      • unmatched          — requested strings that resolved to no KP item
+    Raw per-job observations are omitted here; call single-item kp_lookup for those."""
+    distributions = knowledge_pack.get("unit_price_distributions", {})
+    trends_map    = _kp_trends_map(knowledge_pack)
+    pairs         = knowledge_pack.get("item_pairs", {}).get("pairs", [])
+
+    priced: dict      = {}
+    unmatched: list   = []
+    anchor_keys: set  = set()
+    for raw in items:
+        q   = re.sub(r'\\+"', '"', str(raw).strip())
+        key = _kp_resolve_key(distributions, q)
+        if key is None:
+            unmatched.append(raw)
+            continue
+        anchor_keys.add(key)
+        entry = _kp_build_entry(distributions, trends_map, key, full=False)
+        entry["requested"] = raw
+        priced[key] = entry
+
+    rel, truncated = _kp_possibly_relevant(pairs, anchor_keys, threshold=threshold, cap=cap)
+    result: dict = {
+        "priced":            priced,
+        "possibly_relevant": rel,
+        "_note": ("Stats-only view (per-job observations omitted — call single-item "
+                  "kp_lookup for those). To price a possibly_relevant item, include it in a "
+                  "follow-up kp_lookup `items` batch."),
+    }
+    if unmatched:
+        result["unmatched"] = unmatched
+    if truncated:
+        result["possibly_relevant_truncated"] = truncated
+    return json.dumps(result)
 
 
 _THINK_TAG_RE = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL)
@@ -1933,6 +3618,133 @@ def _openai_tools_to_anthropic(tools: list) -> list:
             "description": fn.get("description", ""),
             "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
         })
+    return out
+
+
+# Manager prompt-cache breakpoint TTL differs by call site (both GA, no beta header
+# needed):
+#   - phase5 (_qp_continuation_task's sibling, phase5_extraction_loop): gaps between
+#     manager turns are bounded by Gemini's send_to_gemini sub-loop, which is NOT
+#     bounded by 5 minutes in practice — a single slow extraction call is enough to
+#     blow past it. Was 5m on the theory that a session-29 measurement (max gap
+#     4m19s) generalized; a 2026-07-15 run instead hit a 5m25s gap and missed,
+#     forcing a full rewrite of ~101k already-cached tokens at 1.25x instead of a
+#     0.1x read — a single miss like that costs more than the entire session's flat
+#     0.75x premium for running 1h everywhere. Miss cost scales with how much cache
+#     has accumulated by the time it happens, and phase5 conversations only grow, so
+#     later misses get worse, not better. Switched to 1h (TODO_SS pattern) so misses
+#     can't happen at all within a normal phase5 run.
+#   - phase6 (_qp_continuation_task, ordinary post-proposal chat): gaps are user-driven
+#     (the estimator reads the proposal, steps away, comes back) and routinely exceed
+#     5 minutes — this is the original TODO_SS access pattern the 1h TTL was chosen
+#     for, and it still applies here. Do not lower this one to 5m.
+_CACHE_CONTROL_5M = {"type": "ephemeral", "ttl": "5m"}
+_CACHE_CONTROL_1H = {"type": "ephemeral", "ttl": "1h"}
+
+# Models that rejected "thinking.type: enabled" with a 400 (newer models require
+# "thinking.type: adaptive" + "output_config.effort" instead, which we don't speak
+# yet). Remembered per model_id so only the FIRST turn per model wastes a failed
+# round-trip — every turn after that skips straight to no-thinking.
+_ANTHROPIC_NO_THINKING_MODELS: set[str] = set()
+
+
+def _mark_cache_breakpoint(msg: dict, cache_control: dict) -> dict:
+    """Return a copy of `msg` with an ephemeral prompt-cache breakpoint on the
+    last block of its content (converting plain-string content to a block first).
+
+    Never mutates `msg` or its content list in place — for assistant turns those
+    are often the exact same list object stored in the caller's persisted
+    mgr_messages history (`_anthropic_native_content`), so an in-place edit would
+    permanently bake a cache_control marker into history that gets resent (and
+    re-marked) every subsequent turn, eventually exceeding Anthropic's 4-breakpoint
+    per-request limit.
+    """
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        new_content = [{"type": "text", "text": content, "cache_control": cache_control}]
+    elif isinstance(content, list) and content:
+        # Anthropic rejects cache_control on thinking/redacted_thinking blocks. Those
+        # only land last if a turn was cut off mid-thinking with no text/tool_use after
+        # it (rare) — skip marking rather than risk a 400 on an otherwise-fine request.
+        if content[-1].get("type") in ("thinking", "redacted_thinking"):
+            return msg
+        new_content = content[:-1] + [{**content[-1], "cache_control": cache_control}]
+    else:
+        return msg
+    return {**msg, "content": new_content}
+
+
+# Anthropic's per-image size limit tightens once a request holds many images —
+# confirmed live: a phase5 vision-loop run using Claude 400'd with "At least one of
+# the image dimensions exceed max allowed size for many-image requests: 2000 pixels"
+# once enough region-crop/thumbnail images had accumulated in the conversation.
+# 1568 is Anthropic's own documented long-edge resize target (no vision-quality
+# benefit above it, and it's what they downscale to server-side in the normal,
+# few-image case) — staying at or under it here means this app never depends on
+# how many images happen to be in a given request.
+_ANTHROPIC_MAX_IMAGE_EDGE = 1568
+
+
+@functools.lru_cache(maxsize=256)
+def _resize_image_b64_for_anthropic(b64_data: str, media_type: str) -> tuple[str, str]:
+    """Downscale a base64-encoded image so neither dimension exceeds
+    _ANTHROPIC_MAX_IMAGE_EDGE, re-encoding as JPEG. Returns (b64, media_type)
+    unchanged if the image is already small enough or if decoding fails for any
+    reason (caller sends whatever comes back either way).
+
+    Cached because _openai_messages_to_anthropic re-derives the Anthropic view of
+    the full OpenAI-shaped message history from scratch on every turn — without
+    this, the same accumulated images would get re-decoded and re-resized on every
+    single turn of a long-running extraction loop.
+    """
+    try:
+        from PIL import Image
+        raw = base64.b64decode(b64_data)
+        img = Image.open(io.BytesIO(raw))
+        w, h = img.size
+        if max(w, h) <= _ANTHROPIC_MAX_IMAGE_EDGE:
+            return b64_data, media_type
+        scale = _ANTHROPIC_MAX_IMAGE_EDGE / max(w, h)
+        new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        img = img.convert("RGB").resize(new_size, Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=88)
+        return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
+    except Exception as e:
+        logger.warning(f"[quick_proposal] Anthropic image downscale failed, sending original: {e}")
+        return b64_data, media_type
+
+
+def _openai_image_url_source_to_anthropic(url: str) -> dict:
+    """Convert an OpenAI image_url's `url` field into Anthropic's image source shape.
+    This app only ever emits base64 data: URLs for images (see _execute_gemini_tool's
+    enhance_region/crop_page/get_image results) but a remote http(s) URL is also
+    handled since Anthropic supports a "url" source type natively."""
+    if url.startswith("data:") and ";base64," in url:
+        header, b64 = url.split(";base64,", 1)
+        media_type = header[len("data:"):] or "image/jpeg"
+        b64, media_type = _resize_image_b64_for_anthropic(b64, media_type)
+        return {"type": "base64", "media_type": media_type, "data": b64}
+    return {"type": "url", "url": url}
+
+
+def _openai_content_to_anthropic(content):
+    """Convert OpenAI-style message content (a plain string, or a list of text/
+    image_url blocks) into Anthropic's content shape. Only the vision/tool-loop
+    (_run_gemini_with_tools) ever puts image_url blocks in user content — the
+    manager delegates all image viewing to that sub-loop via send_to_gemini."""
+    if isinstance(content, str) or content is None:
+        return content or ""
+    out = []
+    for block in content:
+        btype = block.get("type")
+        if btype == "image_url":
+            url = (block.get("image_url") or {}).get("url", "")
+            out.append({"type": "image", "source": _openai_image_url_source_to_anthropic(url)})
+        elif btype == "text":
+            out.append({"type": "text", "text": block.get("text", "")})
+        else:
+            out.append(block)
     return out
 
 
@@ -1959,7 +3771,7 @@ def _openai_messages_to_anthropic(messages: list) -> tuple[str, list]:
             system = m.get("content") or ""
             i += 1
         elif role == "user":
-            out.append({"role": "user", "content": m.get("content") or ""})
+            out.append({"role": "user", "content": _openai_content_to_anthropic(m.get("content"))})
             i += 1
         elif role == "assistant":
             native_blocks = m.get("_anthropic_native_content")
@@ -2009,6 +3821,7 @@ async def _stream_anthropic_native(
     queue: asyncio.Queue,
     mgr_model_id: str,
     log_path: str,
+    cache_ttl: str = "1h",
 ) -> dict:
     """Stream a native Anthropic /v1/messages call with extended thinking enabled.
 
@@ -2019,23 +3832,30 @@ async def _stream_anthropic_native(
     native Messages API plus an explicit `thinking` request param). This emits
     the same claude_thinking_start/delta QP SSE events Ollama runs already use,
     so no frontend changes are needed.
+
+    `cache_ttl` selects the prompt-cache breakpoint TTL ("5m" or "1h") — see the
+    _CACHE_CONTROL_5M / _CACHE_CONTROL_1H comment above for which call site should
+    pass which.
     """
     url = _anthropic_native_url(url)
     system, anth_messages = _openai_messages_to_anthropic(payload.get("messages") or [])
     max_tokens    = payload.get("max_tokens", 8000)
     budget_tokens = max(1024, min(8000, max_tokens - 2000))
+    cache_control = _CACHE_CONTROL_5M if cache_ttl == "5m" else _CACHE_CONTROL_1H
 
-    body = {
-        "model":      mgr_model_id,
-        "max_tokens": max_tokens,
-        "system":     system,
-        "messages":   anth_messages,
-        "thinking":   {"type": "enabled", "budget_tokens": budget_tokens},
-        "stream":     True,
-    }
-    anth_tools = _openai_tools_to_anthropic(payload.get("tools") or [])
-    if anth_tools:
-        body["tools"] = anth_tools
+    # Prompt caching: the manager loop resends the same system prompt, tool
+    # definitions, and growing message history on every one of ~45-55 turns per
+    # run with no discount otherwise (see TODO_QQ). Anthropic allows up to 4
+    # cache_control breakpoints per request; each marks "everything up to and
+    # including this block" as cacheable. We use all 4: tools, system, and the
+    # last two messages (a sliding pair — whichever messages are last this turn
+    # will still be the second-to-last/earlier prefix next turn, so the cache
+    # from this turn's breakpoint gets hit again next turn even as history grows).
+    if len(anth_messages) >= 2:
+        for _idx in (len(anth_messages) - 2, len(anth_messages) - 1):
+            anth_messages[_idx] = _mark_cache_breakpoint(anth_messages[_idx], cache_control)
+    elif anth_messages:
+        anth_messages[-1] = _mark_cache_breakpoint(anth_messages[-1], cache_control)
 
     req_headers = {**headers, "content-type": "application/json"}
     req_headers.setdefault("anthropic-version", "2023-06-01")
@@ -2045,157 +3865,204 @@ async def _stream_anthropic_native(
             req_headers["x-api-key"] = env_key
 
     timeout = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
-    thinking_id         = uuid.uuid4().hex[:8]
-    thinking_streaming  = False
-    text_streaming      = False
-    content_blocks: dict[int, dict] = {}
-    raw_blocks: list    = []
-    tool_calls_map: dict[int, dict] = {}
-    usage: dict         = {}
-    stop_reason: str | None = None
-    thinking_buf = ""
-    content_buf  = ""
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, headers=req_headers, json=body) as resp:
-                if not resp.is_success:
-                    body_text = await resp.aread()
-                    body_str  = body_text.decode("utf-8", errors="ignore")
-                    logger.error(f"[quick_proposal] anthropic native manager HTTP {resp.status_code}: {body_str}")
-                    return {"error": {"message": f"Model returned {resp.status_code}: {body_str}"}}
-                _line_iter = resp.aiter_lines().__aiter__()
-                while True:
-                    try:
-                        line = await asyncio.wait_for(_line_iter.__anext__(), timeout=120.0)
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        logger.warning("[quick_proposal] anthropic native stream idle >120s — model may have crashed")
-                        return {"error": {"message": "Model stopped responding (no tokens for 120 seconds). The model may have crashed or run out of memory."}}
-                    if not line.startswith("data: "):
-                        continue
-                    try:
-                        data = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
+    # At most 2 passes: honor extended thinking unless this model is already
+    # known not to support it, and if Anthropic 400s specifically on
+    # thinking.type, retry once with it disabled. This loops around the whole
+    # request instead of recursing from inside the `async with` blocks (as it
+    # used to) — the failed attempt's client/response are fully closed before
+    # the retry opens a new one, rather than staying open, unused, for the
+    # retried call's entire duration. A visible SSE notice replaces what was
+    # previously a silent gap (the manager call can look identical to a hung
+    # turn otherwise, since the spinner is already gone by this point).
+    for attempt in range(2):
+        want_thinking = mgr_model_id not in _ANTHROPIC_NO_THINKING_MODELS
 
-                    etype = data.get("type")
+        body = {
+            "model":      mgr_model_id,
+            "max_tokens": max_tokens,
+            "system":     [{"type": "text", "text": system, "cache_control": cache_control}] if system else system,
+            "messages":   anth_messages,
+            "stream":     True,
+        }
+        if want_thinking:
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
+        anth_tools = _openai_tools_to_anthropic(payload.get("tools") or [])
+        if anth_tools:
+            anth_tools[-1] = {**anth_tools[-1], "cache_control": cache_control}
+            body["tools"] = anth_tools
 
-                    if etype == "message_start":
-                        u = (data.get("message") or {}).get("usage") or {}
-                        if u:
-                            usage["prompt_tokens"] = u.get("input_tokens", 0)
+        thinking_id         = uuid.uuid4().hex[:8]
+        thinking_streaming  = False
+        text_streaming      = False
+        content_blocks: dict[int, dict] = {}
+        raw_blocks: list    = []
+        tool_calls_map: dict[int, dict] = {}
+        usage: dict         = {}
+        stop_reason: str | None = None
+        thinking_buf = ""
+        content_buf  = ""
 
-                    elif etype == "content_block_start":
-                        idx   = data.get("index", 0)
-                        block = data.get("content_block") or {}
-                        btype = block.get("type")
-                        if btype == "tool_use":
-                            content_blocks[idx] = {"type": "tool_use", "id": block.get("id", ""),
-                                                    "name": block.get("name", ""), "json_buf": ""}
-                        elif btype == "redacted_thinking":
-                            content_blocks[idx] = {"type": "redacted_thinking", "data": block.get("data", "")}
-                        else:
-                            content_blocks[idx] = {"type": btype or "text", "text": "", "thinking": "", "signature": ""}
-
-                    elif etype == "content_block_delta":
-                        idx   = data.get("index", 0)
-                        delta = data.get("delta") or {}
-                        dtype = delta.get("type")
-                        block = content_blocks.setdefault(idx, {"type": "text", "text": ""})
-                        if dtype == "thinking_delta":
-                            chunk = delta.get("thinking", "")
-                            block["thinking"] = block.get("thinking", "") + chunk
-                            if not thinking_streaming:
-                                thinking_streaming = True
-                                await _emit(queue, "extraction_message",
-                                            role="claude_thinking_start", thinking_id=thinking_id, model=mgr_model_id)
-                            await _emit(queue, "extraction_message",
-                                        role="claude_thinking_delta", thinking_id=thinking_id,
-                                        text=chunk, model=mgr_model_id)
-                            thinking_buf += chunk
-                        elif dtype == "signature_delta":
-                            block["signature"] = block.get("signature", "") + delta.get("signature", "")
-                        elif dtype == "text_delta":
-                            chunk = delta.get("text", "")
-                            block["text"] = block.get("text", "") + chunk
-                            content_buf += chunk
-                            if not text_streaming:
-                                text_streaming = True
-                                await _emit(queue, "extraction_message", role="claude_text_start", model=mgr_model_id)
-                            await _emit(queue, "extraction_message",
-                                        role="claude_text_delta", text=chunk, model=mgr_model_id)
-                        elif dtype == "input_json_delta":
-                            block["json_buf"] = block.get("json_buf", "") + delta.get("partial_json", "")
-
-                    elif etype == "content_block_stop":
-                        idx   = data.get("index", 0)
-                        block = content_blocks.get(idx)
-                        if not block:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, headers=req_headers, json=body) as resp:
+                    if not resp.is_success:
+                        body_text = await resp.aread()
+                        body_str  = body_text.decode("utf-8", errors="ignore")
+                        if (attempt == 0 and want_thinking and resp.status_code == 400
+                                and "thinking.type" in body_str and "not supported" in body_str):
+                            logger.info(f"[quick_proposal] model {mgr_model_id!r} does not support extended thinking — "
+                                        f"disabling it for this model and retrying")
+                            _ANTHROPIC_NO_THINKING_MODELS.add(mgr_model_id)
+                            await _emit(queue, "extraction_message", role="retry_notice",
+                                        text=f"{mgr_model_id} doesn't support extended thinking — retrying without it…")
                             continue
-                        if block["type"] == "thinking":
-                            raw_blocks.append({"type": "thinking", "thinking": block.get("thinking", ""),
-                                                "signature": block.get("signature", "")})
-                        elif block["type"] == "redacted_thinking":
-                            raw_blocks.append({"type": "redacted_thinking", "data": block.get("data", "")})
-                        elif block["type"] == "tool_use":
-                            try:
-                                tool_input = json.loads(block.get("json_buf") or "{}")
-                            except json.JSONDecodeError:
-                                tool_input = {}
-                            raw_blocks.append({"type": "tool_use", "id": block.get("id", ""),
-                                                "name": block.get("name", ""), "input": tool_input})
-                            tool_calls_map[idx] = {
-                                "id": block.get("id", ""), "type": "function",
-                                "function": {"name": block.get("name", ""),
-                                             "arguments": block.get("json_buf") or "{}"},
-                            }
-                        else:
-                            raw_blocks.append({"type": "text", "text": block.get("text", "")})
+                        logger.error(f"[quick_proposal] anthropic native manager HTTP {resp.status_code}: {body_str}")
+                        return {"error": {"message": f"Model returned {resp.status_code}: {body_str}"}}
+                    _line_iter = resp.aiter_lines().__aiter__()
+                    while True:
+                        try:
+                            line = await asyncio.wait_for(_line_iter.__anext__(), timeout=120.0)
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            logger.warning("[quick_proposal] anthropic native stream idle >120s — model may have crashed")
+                            return {"error": {"message": "Model stopped responding (no tokens for 120 seconds). The model may have crashed or run out of memory."}}
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
 
-                    elif etype == "message_delta":
-                        d = data.get("delta") or {}
-                        if d.get("stop_reason"):
-                            stop_reason = d["stop_reason"]
-                        u = data.get("usage") or {}
-                        if u.get("output_tokens") is not None:
-                            usage["completion_tokens"] = u.get("output_tokens", 0)
+                        etype = data.get("type")
 
-                    elif etype == "message_stop":
-                        break
+                        if etype == "message_start":
+                            u = (data.get("message") or {}).get("usage") or {}
+                            if u:
+                                usage["prompt_tokens"] = u.get("input_tokens", 0)
+                                usage["cache_creation_input_tokens"] = u.get("cache_creation_input_tokens", 0)
+                                usage["cache_read_input_tokens"]     = u.get("cache_read_input_tokens", 0)
+                                # Per-TTL write breakdown — proves the 1h cache_control took effect
+                                # server-side (TODO_SS). Writes land in the 1h bucket when ttl:"1h" is honored.
+                                _cc = u.get("cache_creation") or {}
+                                usage["cache_creation_1h_input_tokens"] = _cc.get("ephemeral_1h_input_tokens", 0)
+                                usage["cache_creation_5m_input_tokens"] = _cc.get("ephemeral_5m_input_tokens", 0)
 
-                    elif etype == "error":
-                        err = data.get("error") or {}
-                        return {"error": {"message": err.get("message", "Anthropic stream error")}}
+                        elif etype == "content_block_start":
+                            idx   = data.get("index", 0)
+                            block = data.get("content_block") or {}
+                            btype = block.get("type")
+                            if btype == "tool_use":
+                                content_blocks[idx] = {"type": "tool_use", "id": block.get("id", ""),
+                                                        "name": block.get("name", ""), "json_buf": ""}
+                            elif btype == "redacted_thinking":
+                                content_blocks[idx] = {"type": "redacted_thinking", "data": block.get("data", "")}
+                            else:
+                                content_blocks[idx] = {"type": btype or "text", "text": "", "thinking": "", "signature": ""}
 
-    except httpx.HTTPStatusError as _http_err:
-        logger.error(f"[quick_proposal] Unexpected HTTPStatusError (anthropic native): {_http_err}")
-        return {"error": {"message": f"Model returned {_http_err.response.status_code}: (unexpected error)"}}
-    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as _conn_err:
-        logger.error(f"[quick_proposal] anthropic native stream connection error: {_conn_err}")
-        return {"error": {"message": f"Connection to model failed: {_conn_err}"}}
+                        elif etype == "content_block_delta":
+                            idx   = data.get("index", 0)
+                            delta = data.get("delta") or {}
+                            dtype = delta.get("type")
+                            block = content_blocks.setdefault(idx, {"type": "text", "text": ""})
+                            if dtype == "thinking_delta":
+                                chunk = delta.get("thinking", "")
+                                block["thinking"] = block.get("thinking", "") + chunk
+                                if not thinking_streaming:
+                                    thinking_streaming = True
+                                    await _emit(queue, "extraction_message",
+                                                role="claude_thinking_start", thinking_id=thinking_id, model=mgr_model_id)
+                                await _emit(queue, "extraction_message",
+                                            role="claude_thinking_delta", thinking_id=thinking_id,
+                                            text=chunk, model=mgr_model_id)
+                                thinking_buf += chunk
+                            elif dtype == "signature_delta":
+                                block["signature"] = block.get("signature", "") + delta.get("signature", "")
+                            elif dtype == "text_delta":
+                                chunk = delta.get("text", "")
+                                block["text"] = block.get("text", "") + chunk
+                                content_buf += chunk
+                                if not text_streaming:
+                                    text_streaming = True
+                                    await _emit(queue, "extraction_message", role="claude_text_start", model=mgr_model_id)
+                                await _emit(queue, "extraction_message",
+                                            role="claude_text_delta", text=chunk, model=mgr_model_id)
+                            elif dtype == "input_json_delta":
+                                block["json_buf"] = block.get("json_buf", "") + delta.get("partial_json", "")
 
-    if thinking_buf.strip() and log_path:
-        _log_phase3_event(log_path, {
-            "type": "extraction_message", "role": "claude_thinking",
-            "text": thinking_buf.strip(), "model": mgr_model_id,
-        })
+                        elif etype == "content_block_stop":
+                            idx   = data.get("index", 0)
+                            block = content_blocks.get(idx)
+                            if not block:
+                                continue
+                            if block["type"] == "thinking":
+                                raw_blocks.append({"type": "thinking", "thinking": block.get("thinking", ""),
+                                                    "signature": block.get("signature", "")})
+                            elif block["type"] == "redacted_thinking":
+                                raw_blocks.append({"type": "redacted_thinking", "data": block.get("data", "")})
+                            elif block["type"] == "tool_use":
+                                try:
+                                    tool_input = json.loads(block.get("json_buf") or "{}")
+                                except json.JSONDecodeError:
+                                    tool_input = {}
+                                raw_blocks.append({"type": "tool_use", "id": block.get("id", ""),
+                                                    "name": block.get("name", ""), "input": tool_input})
+                                tool_calls_map[idx] = {
+                                    "id": block.get("id", ""), "type": "function",
+                                    "function": {"name": block.get("name", ""),
+                                                 "arguments": block.get("json_buf") or "{}"},
+                                }
+                            else:
+                                raw_blocks.append({"type": "text", "text": block.get("text", "")})
 
-    finish_reason   = {"max_tokens": "length", "tool_use": "tool_calls"}.get(stop_reason, "stop")
-    tool_calls_list = [tool_calls_map[i] for i in sorted(tool_calls_map)] if tool_calls_map else None
+                        elif etype == "message_delta":
+                            d = data.get("delta") or {}
+                            if d.get("stop_reason"):
+                                stop_reason = d["stop_reason"]
+                            u = data.get("usage") or {}
+                            if u.get("output_tokens") is not None:
+                                usage["completion_tokens"] = u.get("output_tokens", 0)
 
-    return {
-        "choices": [{
-            "finish_reason": finish_reason,
-            "message": {
-                "content":    content_buf.strip() or None,
-                "tool_calls": tool_calls_list,
-            },
-        }],
-        "usage": usage,
-        "_native_blocks": raw_blocks or None,
-    }
+                        elif etype == "message_stop":
+                            break
+
+                        elif etype == "error":
+                            err = data.get("error") or {}
+                            return {"error": {"message": err.get("message", "Anthropic stream error")}}
+
+        except httpx.HTTPStatusError as _http_err:
+            logger.error(f"[quick_proposal] Unexpected HTTPStatusError (anthropic native): {_http_err}")
+            return {"error": {"message": f"Model returned {_http_err.response.status_code}: (unexpected error)"}}
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as _conn_err:
+            logger.error(f"[quick_proposal] anthropic native stream connection error: {_conn_err}")
+            return {"error": {"message": f"Connection to model failed: {_conn_err}"}}
+
+        if thinking_buf.strip() and log_path:
+            _log_phase3_event(log_path, {
+                "type": "extraction_message", "role": "claude_thinking",
+                "text": thinking_buf.strip(), "model": mgr_model_id,
+            })
+
+        finish_reason   = {"max_tokens": "length", "tool_use": "tool_calls"}.get(stop_reason, "stop")
+        tool_calls_list = [tool_calls_map[i] for i in sorted(tool_calls_map)] if tool_calls_map else None
+
+        return {
+            "choices": [{
+                "finish_reason": finish_reason,
+                "message": {
+                    "content":    content_buf.strip() or None,
+                    "tool_calls": tool_calls_list,
+                },
+            }],
+            "usage": usage,
+            "_native_blocks": raw_blocks or None,
+        }
+
+    # Unreachable in practice: the loop always returns, except when the first
+    # attempt hits the thinking-unsupported retry, and the second attempt's
+    # own failure path returns above regardless of status.
+    return {"error": {"message": "Manager call failed after retry."}}
 
 
 async def _stream_manager_call(
@@ -2205,11 +4072,15 @@ async def _stream_manager_call(
     queue: asyncio.Queue,
     mgr_model_id: str,
     log_path: str,
+    cache_ttl: str = "1h",
 ) -> dict:
     """Stream an OpenAI-compat manager call, emitting thinking as a QP SSE event.
 
     Returns a dict with the same {choices, usage} shape as a non-streaming response
     so the caller loop requires no restructuring.
+
+    `cache_ttl` ("5m" or "1h") is forwarded to _stream_anthropic_native — ignored
+    for non-Anthropic models, which don't go through that path at all.
 
     Using read=None means no per-chunk timeout — as long as thinking tokens keep
     arriving the connection stays alive, which is the whole point.
@@ -2217,8 +4088,8 @@ async def _stream_manager_call(
     Anthropic models are routed to `_stream_anthropic_native` instead — its
     OpenAI-compat endpoint doesn't surface extended thinking as a separate field.
     """
-    if "anthropic.com" in (url or "") or "anthropic-version" in (headers or {}):
-        return await _stream_anthropic_native(url, headers, payload, queue, mgr_model_id, log_path)
+    if _is_anthropic_endpoint(url, headers):
+        return await _stream_anthropic_native(url, headers, payload, queue, mgr_model_id, log_path, cache_ttl=cache_ttl)
 
     stream_payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
     thinking_id  = uuid.uuid4().hex[:8]
@@ -2232,6 +4103,10 @@ async def _stream_manager_call(
 
     req_headers = {**headers, "content-type": "application/json"}
     timeout = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
+    # Local models (Ollama/vLLM) can go quiet far longer than 120s between
+    # tokens on modest hardware, especially mid-"thinking" — widen the idle
+    # watchdog so slow-but-alive generations aren't killed as "crashed".
+    idle_timeout = 900.0 if _is_local_endpoint(url) else 120.0
 
     try:
       # Pre-flight: log payload details before sending
@@ -2262,12 +4137,12 @@ async def _stream_manager_call(
             _line_iter = resp.aiter_lines().__aiter__()
             while True:
                 try:
-                    line = await asyncio.wait_for(_line_iter.__anext__(), timeout=120.0)
+                    line = await asyncio.wait_for(_line_iter.__anext__(), timeout=idle_timeout)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
-                    logger.warning("[quick_proposal] manager stream idle >120s — model may have crashed")
-                    return {"error": {"message": "Model stopped responding (no tokens for 120 seconds). The model may have crashed or run out of memory."}}
+                    logger.warning(f"[quick_proposal] manager stream idle >{idle_timeout:.0f}s — model may have crashed")
+                    return {"error": {"message": f"Model stopped responding (no tokens for {idle_timeout:.0f} seconds). The model may have crashed or run out of memory."}}
                 if not line.startswith("data: ") or line == "data: [DONE]":
                     continue
                 try:
@@ -2392,7 +4267,7 @@ async def _fetch_context_window_async(chat_url: str, model_id: str) -> int:
     return 0
 
 
-async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False, session_id: str = "") -> None:
+async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str = "", gemini_model: str = "", retry_attempts: int = 3, gemini_fallback_models: list | None = None, holdout_kp_path: str = "", resume: bool = False, session_id: str = "", memory_recall_count: int = 12) -> None:
     """Phase 3: Manager LLM orchestrates Gemini extraction via send_to_gemini tool."""
     # Resolve manager endpoint — prefer the explicitly selected model, fall back to Anthropic endpoint.
     mgr_url = mgr_headers = mgr_api_key = mgr_model_id = None
@@ -2455,11 +4330,14 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
     await _emit(queue, "manager_thinking", text=f"[Phase 3] Knowledge pack: {kp_label} ({kp_key_count} keys)")
 
     # Cache gemini_phase3.txt system prompt for reuse across all Gemini turns.
-    # cached_content is only supported on the native Gemini API, not the OpenAI-compat endpoint.
+    # cached_content is only supported on the native Gemini API, not the OpenAI-compat
+    # endpoint, and local models (Ollama/vLLM) don't support it at all.
     gemini_phase3_prompt = (_PROMPTS_DIR / "gemini_phase3.txt").read_text(encoding="utf-8")
     gemini_cache_name    = (
         await _gemini_cache_create(gemini_phase3_prompt, gemini_api_key)
         if "/openai/" not in gemini_url
+            and not _is_local_endpoint(gemini_url)
+            and not _is_anthropic_endpoint(gemini_url, gemini_headers)
         else None
     )
 
@@ -2496,6 +4374,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
     project_type_val = index.extracted_values.get("project_type", {}).get("value", "")
     plan_completeness_val = index.extracted_values.get("plan_completeness", {}).get("value")
     completeness_notes_val = index.extracted_values.get("completeness_notes", {}).get("value", "")
+    user_context_val = (index.job_notes or "").strip()
 
     ctx_parts = ["Here is the Phase 1 classification index for this plan set:\n\n" + phase1_summary]
     if project_type_val:
@@ -2507,6 +4386,8 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
         )
     if completeness_notes_val:
         ctx_parts.append(f"\nCompleteness notes: {completeness_notes_val}")
+    if user_context_val:
+        ctx_parts.append(_user_context_block(user_context_val, lead="\n"))
     ctx_parts.append("\n\nStand by for extraction instructions.")
 
     gemini_state["messages"].extend([
@@ -2523,6 +4404,43 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
     manager_system    = (_PROMPTS_DIR / "manager_system.txt").read_text(encoding="utf-8")
     system_prompt_txt = (_PROMPTS_DIR / "system_prompt.txt").read_text(encoding="utf-8")
     combined_system   = manager_system + "\n\n---\n\n" + system_prompt_txt
+
+    # Memory injection (TODO_D): the Tier-1 global user profile plus recalled
+    # Tier-2 specifics ride in the system prompt — stable per-run, so they stay
+    # inside the cached prefix — and are appended BEFORE the mgr_system_prompt
+    # save below so phase-6 continuation chat inherits them for free (same
+    # pattern as TODO_RR / the job_notes wiring).
+    run_meta  = _load_run_meta(index.run_id)
+    run_owner = _resolve_run_owner(index.run_id, session_id, run_meta)
+    global_doc = ""
+    try:
+        from src.global_memory import load_global_memory, format_global_memory_block
+        global_doc = load_global_memory(run_owner)
+        combined_system += format_global_memory_block(global_doc)
+    except Exception as e:
+        logger.warning(f"[quick_proposal] global memory injection failed run={index.run_id}: {e}")
+    _mem_query = " ".join(
+        p for p in [project_type_val, run_meta.get("run_name", ""),
+                    "estimating preferences pricing corrections"] if p
+    )
+    recalled_block, recalled_count = await _recalled_memories_block(run_owner, _mem_query, top_k=memory_recall_count)
+    combined_system += recalled_block
+
+    _mem_summary = (
+        (f"global profile ({len(global_doc):,} chars)" if global_doc else "no global profile yet")
+        + f" + {recalled_count} recalled memor{'y' if recalled_count == 1 else 'ies'}"
+    )
+    logger.info(f"[quick_proposal] phase3 memory injection run={index.run_id} "
+                f"owner={run_owner or '(none)'}: {_mem_summary}")
+    await _emit(queue, "manager_thinking", text=f"[Phase 3] Memory: {_mem_summary}")
+
+    # Persist the manager system prompt into run meta so the phase-6 continuation
+    # chat (_qp_continuation_task) can restore it. Without this, every post-proposal
+    # follow-up ran with an empty system prompt, silently dropping all pricing / KP /
+    # QC / job-type instructions (TODO_RR). Idempotent for the static prompt-file
+    # content; the appended memory blocks refresh on rerun/resume.
+    _save_run_meta(index.run_id, mgr_system_prompt=combined_system)
+
     send_to_gemini_tool = {
         "type": "function",
         "function": {
@@ -2578,9 +4496,11 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
             "name":        "end_generation",
             "description": (
                 "Call this tool once the Phase B proposal is fully written. "
-                "Pass the Grand Total dollar amount as a number. "
-                "This is the required final step — do not call it before the complete "
-                "line-item table, Grand Total, Confidence Band, and Sanity Check are written."
+                "Pass the Grand Total dollar amount, plus the same line items from your "
+                "written proposal table as a structured array (one entry per priced line, "
+                "excluding subtotals/headers). This is the required final step — do not call "
+                "it before the complete line-item table, Grand Total, Confidence Band, and "
+                "Sanity Check are written."
             ),
             "parameters": {
                 "type":       "object",
@@ -2589,8 +4509,24 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                         "type":        "number",
                         "description": "The final Grand Total from the Phase B budget estimate as a dollar amount (e.g. 1234567.89).",
                     },
+                    "line_items": {
+                        "type":        "array",
+                        "description": "Every priced line from the proposal table, in the same order as written — used for automated actual-vs-predicted comparison, not shown to the user separately.",
+                        "items": {
+                            "type":       "object",
+                            "properties": {
+                                "description": {"type": "string",  "description": "Line item name, e.g. '8\" SEWER MAIN'."},
+                                "unit":        {"type": "string",  "description": "Unit of measure, e.g. LF, SY, CY, LS, EA."},
+                                "qty":         {"type": "number",  "description": "Quantity in that unit."},
+                                "unit_price":  {"type": "number",  "description": "Price per unit, pre-tax."},
+                                "tax_rate":    {"type": "number",  "description": "Sales tax rate applied to this line, as a decimal fraction (e.g. 0.09 for 9%), or 0 if untaxed. Only non-zero on Washington jobs where kp_lookup('SECTION: wa_tax_scope') classifies this item as site_work — see the Sales Tax rule in the estimator system prompt. Omit or 0 for every other job."},
+                                "ext_price":   {"type": "number",  "description": "Extended price = qty * unit_price * (1 + tax_rate)."},
+                            },
+                            "required": ["description", "unit", "qty", "unit_price", "ext_price"],
+                        },
+                    },
                 },
-                "required": ["grand_total"],
+                "required": ["grand_total", "line_items"],
             },
         },
     }
@@ -2600,26 +4536,38 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
         "function": {
             "name":        "kp_lookup",
             "description": (
-                "Look up knowledge pack data on demand. Four query forms: "
-                "(1) item name e.g. '8\" SEWER MAIN' — returns unit price distribution + price trend; "
-                "(2) 'item_pairs: <item name>' e.g. 'item_pairs: ROLLED CURB' — returns full pair metadata "
-                "(r, n_shared_jobs, median_ratio, shared_jobs) for all pairs involving that item; "
-                "(3) 'LIST' — lists all available unit price distribution item names; "
-                "(4) 'SECTION: <name>' — returns a full named KP section not injected into opening context. "
-                "Phase B sections to fetch before pricing: 'SECTION: qty_scale_correlations', "
-                "'SECTION: item_scaling', 'SECTION: ls_item_variance', "
-                "'SECTION: ls_earthwork_rates', 'SECTION: paving_rates'. "
-                "Use (1) and (3) during Phase A for dynamic field scanning, and (1) during Phase B for every line item you price."
+                "Look up knowledge pack data on demand. Provide EITHER `items` (a list, for "
+                "batch pricing — strongly preferred in Phase B) OR `item` (a single string). "
+                "`items` (list of item names): returns a stats-only price join for all of them "
+                "in ONE call — {priced: {...}, possibly_relevant: [...]}. `possibly_relevant` "
+                "lists co-occurring items you did NOT ask for (with their strongest related "
+                "item + co_occurrence_rate + support) so you can decide what else to price "
+                "(e.g. an item Gemini missed) in a follow-up batch. Use this to price all your "
+                "line items at once instead of one call per item. "
+                "`item` (single string) — four forms, returns FULL detail incl. per-job observations: "
+                "(1) item name e.g. '8\" SEWER MAIN' — unit price distribution + price trend; "
+                "(2) 'item_pairs: <item name>' — full pair metadata (r, n_shared_jobs, median_ratio, shared_jobs); "
+                "(3) 'LIST' — all available item names; "
+                "(4) 'SECTION: <name>' — a full named KP section not in opening context "
+                "(qty_scale_correlations, item_scaling, ls_item_variance, ls_earthwork_rates, paving_rates, "
+                "wa_tax_scope — public-vs-site-work sales tax classification, Washington jobs only). "
+                "Use single `item` for LIST/SECTION/item_pairs and for drilling into one item's raw observations; "
+                "use `items` to price many line items in a single turn."
             ),
             "parameters": {
                 "type":       "object",
                 "properties": {
                     "item": {
                         "type":        "string",
-                        "description": "Line item name to look up, e.g. '8\" SEWER MAIN'. Pass 'LIST' to list all items.",
+                        "description": "Single lookup: a line item name e.g. '8\" SEWER MAIN', or 'LIST' / 'SECTION: <name>' / 'item_pairs: <name>'.",
+                    },
+                    "items": {
+                        "type":        "array",
+                        "items":       {"type": "string"},
+                        "description": "Batch lookup: list of line item names to price in one call, e.g. ['8\" SEWER MAIN', 'MOBILIZATION', '6\" CURB & GUTTER']. Returns stats-only priced join + possibly_relevant co-occurrence leads.",
                     },
                 },
-                "required": ["item"],
+                "required": [],
             },
         },
     }
@@ -2635,6 +4583,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
         "ls_item_variance",                            # 2k  — Phase B only
         "ls_earthwork_rates",                          # 2k  — Phase B only
         "paving_rates",                                # 3k  — Phase B only
+        "wa_tax_scope",                                # Phase B only — Washington jobs only
     }
     kp_for_context = {k: v for k, v in (index.knowledge_pack or {}).items() if k not in _HEAVY_KP_SECTIONS}
     if "item_pairs" in kp_for_context:
@@ -2648,6 +4597,11 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
         }
     kp_json = json.dumps(kp_for_context) if kp_for_context else "{}"
 
+    # Estimator-supplied context, fenced so the manager never mistakes it for its own
+    # system instructions. Appended to the final (user) turn to preserve message
+    # alternation and keep the last message a user turn for the resume path.
+    user_context_block = _user_context_block(user_context_val)
+
     # Anthropic native format: system is top-level; messages are content-block arrays.
     mgr_system = combined_system
     mgr_messages = [
@@ -2658,7 +4612,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
             "```json\n" + kp_json + "\n```"
         )},
         {"role": "assistant", "content": "Understood. I have reviewed the knowledge pack and will use its unit price distributions, derivation rules, and analog jobs for all Phase B estimation."},
-        {"role": "user",      "content": "Here is the Phase 1 index from the plan set. Begin extraction.\n\n" + phase1_summary},
+        {"role": "user",      "content": "Here is the Phase 1 index from the plan set. Begin extraction.\n\n" + phase1_summary + user_context_block},
     ]
 
 
@@ -2680,13 +4634,48 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
     for i, m in enumerate(mgr_messages):
         logger.info(f"[quick_proposal] init mgr_messages[{i}] role={m['role']} chars={len(str(m.get('content') or ''))}")
 
-    all_tools = [send_to_gemini_tool, read_index_tool, kp_lookup_tool, end_generation_tool]
+    create_memory_tool = {
+        "type": "function",
+        "function": {
+            "name":        "create_memory",
+            "description": (
+                "Save a durable memory about this estimator or job to the persistent "
+                "memory system (recalled in future proposals and in regular chat). Use it "
+                "when the estimator states something worth remembering beyond this run: "
+                "pricing preferences, spec interpretations, standing corrections. Set "
+                "confirms_run=true ONLY when the estimator has explicitly corrected a "
+                "value in this run's proposal — that updates this run's auto-snapshot "
+                "memory with your corrected text and marks it estimator-confirmed."
+            ),
+            "parameters": {
+                "type":       "object",
+                "properties": {
+                    "text": {
+                        "type":        "string",
+                        "description": "The memory text — self-contained, durable phrasing that makes sense outside this conversation (include the job name and the specific values).",
+                    },
+                    "confirms_run": {
+                        "type":        "boolean",
+                        "description": "True only when recording an explicit estimator correction to this run's numbers; upserts and confirms the run's snapshot memory.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    }
+
+    all_tools = [send_to_gemini_tool, read_index_tool, kp_lookup_tool, create_memory_tool, end_generation_tool]
 
     await _emit(queue, "phase_start", phase="phase5", label="Extracting values from plans…")
 
     phase_b_complete = False
     phase_b_nudges   = 0
     log_path         = gemini_state.get("log_path", "")
+    # Structural gate for TODO_JJ: manager_system.txt mandates a kp_lookup('SECTION:
+    # earthwork_balance_prior') check whenever earthwork_balance is present, but that
+    # requirement lived in prompt text only and was confirmed skipped in two live runs.
+    # This flag is the code-side backstop — see the end_generation gate below.
+    _earthwork_prior_checked = False
 
     try:
         for _ in range(60):
@@ -2698,7 +4687,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                 "tools":      all_tools,
             }
             resp = await _stream_manager_call(
-                mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path
+                mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path, cache_ttl="1h"
             )
 
             if "error" in resp:
@@ -2712,7 +4701,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     await _emit(queue, "extraction_message", role="retry_notice", text=notice)
                     await asyncio.sleep(wait_s)
                     resp = await _stream_manager_call(
-                        mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path
+                        mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path, cache_ttl="1h"
                     )
                     if "error" not in resp:
                         break
@@ -2736,9 +4725,15 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                 _ctx_payload = dict(role="claude", model=mgr_model_id,
                                      input_tokens=usage.get("prompt_tokens", 0),
                                      output_tokens=usage.get("completion_tokens", 0),
-                                     context_window=mgr_context_window)
+                                     context_window=mgr_context_window,
+                                     cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+                                     cache_read_input_tokens=usage.get("cache_read_input_tokens", 0))
                 await _emit(queue, "context_usage", **_ctx_payload)
                 _save_context_usage(index.run_id, "claude", _ctx_payload)
+                _cum = _add_cumulative_usage(index.run_id, "claude", usage)
+                logger.info(f"[quick_proposal] claude cumulative run={index.run_id} calls={_cum.get('calls')} "
+                            f"input={_cum.get('input_tokens')} output={_cum.get('output_tokens')} "
+                            f"cache_read={_cum.get('cache_read_input_tokens')} cache_creation={_cum.get('cache_creation_input_tokens')}")
                 _ctx_pct = (round(_ctx_payload["input_tokens"] / mgr_context_window * 100, 1)
                             if mgr_context_window else None)
                 # Persisted alongside the message (not just the run-level context_usage
@@ -2779,7 +4774,10 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                                {"model": mgr_model_id, **_msg_metrics,
                                 **({"tool_calls": tool_calls} if tool_calls else {})})
 
-            logger.info(f"[quick_proposal] manager finish_reason={finish_reason} output_tokens={usage.get('completion_tokens', '?')}")
+            logger.info(f"[quick_proposal] manager finish_reason={finish_reason} output_tokens={usage.get('completion_tokens', '?')} "
+                        f"input_tokens={usage.get('prompt_tokens', '?')} cache_read={usage.get('cache_read_input_tokens', '?')} "
+                        f"cache_creation={usage.get('cache_creation_input_tokens', '?')} "
+                        f"cache_1h={usage.get('cache_creation_1h_input_tokens', '?')} cache_5m={usage.get('cache_creation_5m_input_tokens', '?')}")
 
             if finish_reason == "length":
                 logger.warning("[quick_proposal] manager output truncated (finish_reason=length) — sending continuation")
@@ -2873,13 +4871,21 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                                                       "tool_id": tool_id, "tool": "read_index", "result": index_json})
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": index_json})
                     _save_chat_message(session_id, "tool", index_json,
-                                       {"tool_call_id": tool_id, "tool_name": "read_index"})
+                                       {"tool_call_id": tool_id, "tool_name": "read_index", "section": section})
                 elif tool_name == "kp_lookup":
-                    item_query    = tool_input.get("item", "").strip()
-                    lookup_result = _kp_lookup(index.knowledge_pack or {}, item_query)
+                    items_arg = tool_input.get("items")
+                    if isinstance(items_arg, list) and items_arg:
+                        _kp_args      = {"items": [str(x) for x in items_arg]}
+                        lookup_result = _kp_lookup_batch(index.knowledge_pack or {}, _kp_args["items"])
+                    else:
+                        _kp_args      = {"item": tool_input.get("item", "").strip()}
+                        lookup_result = _kp_lookup(index.knowledge_pack or {}, _kp_args["item"])
+                    if any("earthwork_balance_prior" in str(v).lower()
+                           for v in (_kp_args.get("items") or [_kp_args.get("item", "")])):
+                        _earthwork_prior_checked = True
                     await _emit(queue, "extraction_message",
                                 role="tool_call", tool_id=tool_id, tool="kp_lookup",
-                                model=mgr_model_id, args=json.dumps({"item": item_query}))
+                                model=mgr_model_id, args=json.dumps(_kp_args))
                     await _emit(queue, "extraction_message",
                                 role="tool_result", tool_id=tool_id, tool="kp_lookup",
                                 model=mgr_model_id, result=lookup_result)
@@ -2889,17 +4895,64 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": lookup_result})
                     _save_chat_message(session_id, "tool", lookup_result,
                                        {"tool_call_id": tool_id, "tool_name": "kp_lookup"})
-                elif tool_name == "end_generation":
-                    grand_total = tool_input.get("grand_total")
-                    await _emit(queue, "grand_total", amount=grand_total, model=mgr_model_id)
+                elif tool_name == "create_memory":
+                    _mem_args = {"text": (tool_input.get("text") or "")[:300],
+                                 "confirms_run": bool(tool_input.get("confirms_run"))}
+                    await _emit(queue, "extraction_message",
+                                role="tool_call", tool_id=tool_id, tool="create_memory",
+                                model=mgr_model_id, args=json.dumps(_mem_args))
+                    mem_result = await _qp_create_memory(index.run_id, tool_input)
+                    await _emit(queue, "extraction_message",
+                                role="tool_result", tool_id=tool_id, tool="create_memory",
+                                model=mgr_model_id, result=mem_result)
                     if log_path:
-                        _log_phase3_event(log_path, {"type": "grand_total", "amount": grand_total})
-                    _end_content = f"Pipeline complete. Grand Total recorded: ${grand_total:,.2f}" if grand_total is not None else "Pipeline complete."
-                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": _end_content})
-                    _save_chat_message(session_id, "tool", _end_content,
-                                       {"tool_call_id": tool_id, "tool_name": "end_generation"})
-                    phase_b_complete = True
-                    break
+                        _log_phase3_event(log_path, {"type": "extraction_message", "role": "tool_result",
+                                                      "tool_id": tool_id, "tool": "create_memory", "result": mem_result})
+                    mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": mem_result})
+                    _save_chat_message(session_id, "tool", mem_result,
+                                       {"tool_call_id": tool_id, "tool_name": "create_memory"})
+                elif tool_name == "end_generation":
+                    _eb_present = _earthwork_balance_present(index.extracted_values)
+                    if _eb_present and not _earthwork_prior_checked:
+                        _eb_entry  = index.extracted_values.get("earthwork_balance") or {}
+                        _eb_value  = _eb_entry.get("value")
+                        _eb_summary = (
+                            ", ".join(
+                                f"{r.get('road_name')}={r.get('balance')}"
+                                for r in _eb_value if isinstance(r, dict)
+                            )
+                            if isinstance(_eb_value, list) else repr(_eb_value)
+                        )
+                        _reject_msg = (
+                            "end_generation rejected: earthwork_balance is present "
+                            f"({_eb_summary}) "
+                            "but kp_lookup('SECTION: earthwork_balance_prior') was never called this run. "
+                            "Call it now, cross-check this job's project_type against the historical "
+                            "import/export/roughly_balanced split, quote the plan's supporting cut/fill or "
+                            "import/export/haul-off language, and confirm (or redirect Gemini to re-verify) "
+                            "before ending generation."
+                        )
+                        logger.warning(f"[quick_proposal] end_generation blocked — earthwork_balance_prior "
+                                       f"kp_lookup missing (run={index.run_id})")
+                        await _emit(queue, "extraction_message",
+                                    role="tool_result", tool_id=tool_id, tool="end_generation",
+                                    model=mgr_model_id, result=_reject_msg)
+                        mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": _reject_msg})
+                        _save_chat_message(session_id, "tool", _reject_msg,
+                                           {"tool_call_id": tool_id, "tool_name": "end_generation"})
+                    else:
+                        grand_total = tool_input.get("grand_total")
+                        final_line_items = tool_input.get("line_items") or []
+                        index.extracted_data["final_line_items"] = final_line_items
+                        await _emit(queue, "grand_total", amount=grand_total, model=mgr_model_id)
+                        if log_path:
+                            _log_phase3_event(log_path, {"type": "grand_total", "amount": grand_total, "line_items": final_line_items})
+                        _end_content = f"Pipeline complete. Grand Total recorded: ${grand_total:,.2f}" if grand_total is not None else "Pipeline complete."
+                        mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": _end_content})
+                        _save_chat_message(session_id, "tool", _end_content,
+                                           {"tool_call_id": tool_id, "tool_name": "end_generation"})
+                        phase_b_complete = True
+                        break
                 else:
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id,
                                          "content": f"Unknown tool: {tool_name}"})
@@ -2977,6 +5030,7 @@ async def run_pipeline(
     selected_jobs: Optional[List[str]] = None,
     gemini_model: str = "",
     manager_model: str = "",
+    phase_models: Optional[Dict[str, str]] = None,
     gemini_retry_attempts: int = 3,
     gemini_fallback_models: list | None = None,
     holdout_kp_path: str = "",
@@ -2985,8 +5039,14 @@ async def run_pipeline(
     import_scope_from_run_id: str = "",
     project_type: str = "",
     session_id: str = "",
+    memory_recall_count: int = 12,
 ) -> None:
     _success = False
+    # Advanced mode: a phase key with a non-blank override wins; otherwise fall
+    # back to the run's default gemini_model/manager_model (regular-mode behavior).
+    phase_models = phase_models or {}
+    def _pm(key: str, default: str) -> str:
+        return phase_models.get(key) or default
     try:
         # Step 1 — render pages
         await _emit(queue, "phase_start", phase="load", label="Rendering pages…")
@@ -3010,12 +5070,34 @@ async def run_pipeline(
         _save_run_results(run_id, index)  # persist page list so view panel works if run is cancelled before phase3
 
         # Step 2 — load knowledge base
-        await _emit(queue, "phase_start", phase="index", label="Loading knowledge base…")
+        full_library = _load_case_library()
+        all_job_names = {c.get("job_name") for c in full_library}
+        # Dynamic KP: a proper-subset job selection (and no explicit holdout KP)
+        # gets a knowledge pack derived from just those jobs, scoped to this run.
+        dynamic_kp = bool(
+            selected_jobs
+            and not holdout_kp_path
+            and not all_job_names.issubset(set(selected_jobs))
+        )
+        await _emit(queue, "phase_start", phase="index",
+                    label=(f"Building knowledge pack from {len(selected_jobs)} selected jobs…"
+                           if dynamic_kp else "Loading knowledge base…"))
         try:
+            if dynamic_kp:
+                from src.quick_proposal.knowledge_pack.derive_patterns import build_kp_for_jobs
+                kp_out = Path(RUNS_DIR) / run_id / "kp"
+                # Derive from the DB-backed records (TODO_YY) rather than the frozen
+                # seed files; the derivation filters these to `selected_jobs` itself.
+                db_records = await asyncio.to_thread(_load_case_library_records)
+                built = await asyncio.to_thread(build_kp_for_jobs, selected_jobs, kp_out, db_records)
+                holdout_kp_path = str(built)
+                # Stamp into run meta so phase-6 continuation / phase-3 restarts
+                # reload this run's pack through the existing holdout plumbing.
+                _save_run_meta(run_id, holdout_kp_path=holdout_kp_path, dynamic_kp=True)
+                logger.info(f"[quick_proposal] dynamic KP built from {len(selected_jobs)} jobs → {built}")
             kp_path_used = holdout_kp_path or str(_KP_PATH)
             index.knowledge_pack = _load_knowledge_pack(holdout_kp_path or None)
             logger.info(f"[quick_proposal] knowledge pack loaded: {kp_path_used} ({len(index.knowledge_pack)} top-level keys)")
-            full_library         = _load_case_library()
             # Filter to user-selected jobs if any were specified at run start.
             if index.selected_jobs:
                 index.case_library = [c for c in full_library if c.get("job_name") in index.selected_jobs]
@@ -3043,7 +5125,7 @@ async def run_pipeline(
         else:
             await phase1_detect_job_type(
                 index, queue,
-                gemini_model=gemini_model,
+                gemini_model=_pm("phase1", gemini_model),
                 retry_attempts=gemini_retry_attempts,
                 gemini_fallback_models=gemini_fallback_models,
             )
@@ -3101,7 +5183,7 @@ async def run_pipeline(
             logger.info(f"[quick_proposal] imported classifications from run {import_from_run_id}")
         else:
             await _wait_for_gate(run_id, queue, "classify", "Classify Pages")
-            await phase2_classify_pages(index, queue, model_override=gemini_model, retry_attempts=gemini_retry_attempts, fallback_models=gemini_fallback_models)
+            await phase2_classify_pages(index, queue, model_override=_pm("phase2", gemini_model), retry_attempts=gemini_retry_attempts, fallback_models=gemini_fallback_models)
         _save_run_results(run_id, index)  # persist phase1 classifications + bboxes
 
         # Step 3.5 — Build phase1_summary (needed by Phase 3), then gate → Phase 3
@@ -3111,7 +5193,7 @@ async def run_pipeline(
 
         await phase3_completeness_score(
             index, queue,
-            gemini_model=gemini_model,
+            gemini_model=_pm("phase3", gemini_model),
             retry_attempts=gemini_retry_attempts,
             gemini_fallback_models=gemini_fallback_models,
         )
@@ -3135,7 +5217,7 @@ async def run_pipeline(
         else:
             await phase_notes_extraction(
                 index, queue,
-                gemini_model=gemini_model,
+                gemini_model=_pm("notes", gemini_model),
                 retry_attempts=gemini_retry_attempts,
                 gemini_fallback_models=gemini_fallback_models,
             )
@@ -3155,7 +5237,7 @@ async def run_pipeline(
         else:
             await phase_scope_analysis(
                 index, queue,
-                gemini_model=gemini_model,
+                gemini_model=_pm("scope", gemini_model),
                 retry_attempts=gemini_retry_attempts,
                 gemini_fallback_models=gemini_fallback_models,
             )
@@ -3164,7 +5246,16 @@ async def run_pipeline(
         await _wait_for_gate(run_id, queue, "phase3", "Extraction")
 
         # Step 5 — Phase 3: manager LLM + Gemini extraction tool loop
-        await phase5_extraction_loop(index, queue, manager_model=manager_model, gemini_model=gemini_model, retry_attempts=gemini_retry_attempts, gemini_fallback_models=gemini_fallback_models, holdout_kp_path=holdout_kp_path, session_id=session_id)
+        await phase5_extraction_loop(
+            index, queue,
+            manager_model=_pm("phase5_manager", manager_model),
+            gemini_model=_pm("phase5_gemini", gemini_model),
+            retry_attempts=gemini_retry_attempts,
+            gemini_fallback_models=gemini_fallback_models,
+            holdout_kp_path=holdout_kp_path,
+            session_id=session_id,
+            memory_recall_count=memory_recall_count,
+        )
         _success = True
 
     except BaseException as e:
@@ -3181,7 +5272,8 @@ async def run_pipeline(
         if _success:
             _save_run_meta(run_id, status="complete")
             _save_run_results(run_id, index)
-            _save_generation_snapshot(run_id, session_id, manager_model, gemini_model, holdout_kp_path)
+            _save_generation_snapshot(run_id, session_id, _pm("phase5_manager", manager_model), _pm("phase5_gemini", gemini_model), holdout_kp_path)
+            await _write_qp_auto_memory(run_id, session_id, index)
         queue.put_nowait(None)
 
 
@@ -3290,7 +5382,9 @@ async def _qp_continuation_task(
     finally:
         db.close()
 
-    mgr_system = ""
+    # Restore the manager system prompt persisted at phase-5 start (TODO_RR).
+    # Falls back to a persisted role="system" ChatMessage row if one exists.
+    mgr_system = meta.get("mgr_system_prompt", "")
     mgr_messages: list = []
     for row in rows:
         meta_d = json.loads(row.meta_data) if row.meta_data else {}
@@ -3313,6 +5407,13 @@ async def _qp_continuation_task(
         elif row.role == "tool":
             msg["tool_call_id"] = meta_d.get("tool_call_id", "")
         mgr_messages.append(msg)
+
+    # Carry the estimator's init context into every follow-up turn. It's small, so it
+    # rides in the cached system block (near-zero marginal cost after the first turn
+    # under prompt caching) — deliberately WITHOUT re-sending the expensive Phase-1
+    # index or knowledge pack, which the manager can pull on demand via kp_lookup /
+    # read_index if a specific answer needs them.
+    mgr_system += _user_context_block(meta.get("notes", ""))
 
     # Append the new human turn.
     mgr_messages.append({"role": "user", "content": user_message, "name": "user"})
@@ -3356,6 +5457,22 @@ async def _qp_continuation_task(
         "image_store": image_store,
     }
 
+    _suggested_job_type, _project_type_for_hint = _qp_suggest_job_type(index)
+    if _suggested_job_type:
+        _job_type_hint = (
+            f" This run's extracted project_type ('{_project_type_for_hint}') maps to "
+            f"'{_suggested_job_type}' — propose that to the estimator as a default and confirm "
+            "it rather than picking blind, but still confirm before calling the tool."
+        )
+    elif _project_type_for_hint:
+        _job_type_hint = (
+            f" This run's extracted project_type ('{_project_type_for_hint}') has no reliable "
+            "case-library equivalent — do not guess, ask the estimator directly which of the "
+            "vocabulary values above fits."
+        )
+    else:
+        _job_type_hint = " No project_type was extracted for this run — ask the estimator directly which of the vocabulary values above fits."
+
     all_tools = [
         {
             "type": "function",
@@ -3389,8 +5506,96 @@ async def _qp_continuation_task(
             "type": "function",
             "function": {
                 "name": "kp_lookup",
-                "description": "Look up knowledge pack data on demand.",
-                "parameters": {"type": "object", "properties": {"item": {"type": "string"}}, "required": ["item"]},
+                "description": ("Look up knowledge pack data on demand. Provide EITHER `items` "
+                                "(a list of item names — batch, stats-only, returns priced join "
+                                "+ possibly_relevant co-occurrence leads) OR `item` (a single "
+                                "string — full detail incl. observations, or 'LIST' / "
+                                "'SECTION: <name>' / 'item_pairs: <name>')."),
+                "parameters": {"type": "object", "properties": {
+                    "item":  {"type": "string"},
+                    "items": {"type": "array", "items": {"type": "string"}},
+                }, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_memory",
+                "description": (
+                    "Save a durable memory about this estimator or job to the persistent "
+                    "memory system (recalled in future proposals and in regular chat). Set "
+                    "confirms_run=true ONLY when the estimator has explicitly corrected a "
+                    "value in this run's proposal — that updates this run's auto-snapshot "
+                    "memory with your corrected text and marks it estimator-confirmed."
+                ),
+                "parameters": {"type": "object", "properties": {
+                    "text":         {"type": "string", "description": "Self-contained, durable memory text (include the job name and the specific values)."},
+                    "confirms_run": {"type": "boolean", "description": "True only when recording an explicit estimator correction to this run's numbers."},
+                }, "required": ["text"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_job",
+                "description": (
+                    "Add this completed run to the case-library knowledge base as a new job "
+                    "record (TODO_ZZ), e.g. when the estimator says something like 'add this "
+                    "job to the knowledge base'. Reuses this run's own priced line items and "
+                    "extracted scale metrics automatically — do NOT retype quantities/prices/"
+                    "scale numbers, those are pulled from the run for you. Only pass fields "
+                    "that have no source in the pipeline extraction: business/identity fields "
+                    "(client, job_type, location, etc.) and any line-item category or "
+                    "optional-flag corrections. Before calling this, confirm job_name, client, "
+                    "and job_type with the estimator in chat — do not guess them — and ask "
+                    "explicitly about any line items that should be flagged optional or whose "
+                    "category is unclear. Fails with an explanatory error if job_name is "
+                    "already used by another job or this run has no priced proposal yet."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_name": {"type": "string", "description": "Unique job name (case-insensitive unique across the case library) — the business key used everywhere (KP scoping, actuals pairing). Confirm with the estimator, do not guess."},
+                        "client": {"type": "string", "description": "The paying client/developer for this job — a business relationship never present in the plan set. Must be confirmed with the estimator."},
+                        "client_location": {"type": "string", "description": "Optional — client's location/HQ, if known."},
+                        "job_location": {"type": "string", "description": "Optional — the project's physical location (city/state). This run's extraction may already have a location/project_state value — confirm it with the estimator rather than assuming it's this field."},
+                        "engineering_firm": {"type": "string", "description": "Optional — engineering/design firm of record, if extracted or known."},
+                        "local_folder": {"type": "string", "description": "Optional — internal file-path reference for this job, if the estimator gives one."},
+                        "true_job_number": {"type": "string", "description": "Optional — internal job number, if the estimator gives one."},
+                        "job_type": {
+                            "type": "string",
+                            "description": (
+                                "Case-library job-type classification. Existing vocabulary: "
+                                "subdivision_road, private_drive, commercial_site, road_widening, "
+                                "mixed_use. Only propose a new value if none fit, after confirming "
+                                "with the estimator — do not invent one silently."
+                                + _job_type_hint
+                            ),
+                        },
+                        "revision_label": {"type": "string", "description": "Defaults to 'base revision' if omitted."},
+                        "proposal_date": {"type": "string", "description": "YYYY-MM-DD. Optional — defaults to today's date. Only pass this if the estimator gives a different historical date."},
+                        "line_item_overrides": {
+                            "type": "array",
+                            "description": (
+                                "Optional per-line corrections, matched by exact description text "
+                                "against this run's own priced line items. Only include entries "
+                                "where the auto-filled default (historical most-common category for "
+                                "that description, is_optional=false) is wrong or was flagged as "
+                                "optional/uncertain by the estimator."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "description": {"type": "string", "description": "Must exactly match a description from this run's priced line items."},
+                                    "category":    {"type": "string", "description": "Override category for this line item."},
+                                    "is_optional": {"type": "boolean", "description": "Set true to flag this line item as optional."},
+                                },
+                                "required": ["description"],
+                            },
+                        },
+                    },
+                    "required": ["job_name", "client", "job_type"],
+                },
             },
         },
     ]
@@ -3398,8 +5603,23 @@ async def _qp_continuation_task(
     # Drive manager loop (up to 10 iterations for multi-step tool calls).
     for _ in range(10):
         oai_messages = [{"role": "system", "content": mgr_system}] + mgr_messages
-        payload = {"model": mgr_model_id, "max_tokens": 16000, "messages": oai_messages, "tools": all_tools}
-        resp = await _stream_manager_call(mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path)
+        payload = {"model": mgr_model_id, "max_tokens": 32000, "messages": oai_messages, "tools": all_tools}
+        resp = await _stream_manager_call(mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path, cache_ttl="1h")
+
+        if "error" in resp:
+            err_msg = resp.get("error", {}).get("message", str(resp))
+            for attempt in range(1, 4):
+                if not _is_retryable_manager_error(err_msg):
+                    break
+                wait_s = 2 ** (attempt + 1)  # 4, 8, 16
+                notice = f"Manager overloaded — retrying in {wait_s}s (attempt {attempt}/3)…"
+                logger.warning(f"[qp_chat] {notice} err={err_msg}")
+                await _emit(queue, "extraction_message", role="retry_notice", text=notice)
+                await asyncio.sleep(wait_s)
+                resp = await _stream_manager_call(mgr_url, mgr_headers or {}, payload, queue, mgr_model_id, log_path, cache_ttl="1h")
+                if "error" not in resp:
+                    break
+                err_msg = resp.get("error", {}).get("message", str(resp))
 
         if "error" in resp:
             await _emit(queue, "error", message=resp.get("error", {}).get("message", str(resp)), phase="phase6")
@@ -3421,9 +5641,19 @@ async def _qp_continuation_task(
             _ctx_payload = dict(role="claude", model=mgr_model_id,
                                  input_tokens=usage.get("prompt_tokens", 0),
                                  output_tokens=usage.get("completion_tokens", 0),
-                                 context_window=mgr_context_window)
+                                 context_window=mgr_context_window,
+                                 cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+                                 cache_read_input_tokens=usage.get("cache_read_input_tokens", 0))
             await _emit(queue, "context_usage", **_ctx_payload)
             _save_context_usage(run_id, "claude", _ctx_payload)
+            logger.info(f"[qp_chat] claude call run={run_id} finish_reason={finish_reason} "
+                        f"input={usage.get('prompt_tokens', '?')} output={usage.get('completion_tokens', '?')} "
+                        f"cache_read={usage.get('cache_read_input_tokens', '?')} cache_creation={usage.get('cache_creation_input_tokens', '?')} "
+                        f"cache_1h={usage.get('cache_creation_1h_input_tokens', '?')} cache_5m={usage.get('cache_creation_5m_input_tokens', '?')}")
+            _cum = _add_cumulative_usage(run_id, "claude", usage)
+            logger.info(f"[qp_chat] claude cumulative run={run_id} calls={_cum.get('calls')} "
+                        f"input={_cum.get('input_tokens')} output={_cum.get('output_tokens')} "
+                        f"cache_read={_cum.get('cache_read_input_tokens')} cache_creation={_cum.get('cache_creation_input_tokens')}")
             _ctx_pct = (round(_ctx_payload["input_tokens"] / mgr_context_window * 100, 1)
                         if mgr_context_window else None)
             _msg_metrics = {
@@ -3489,17 +5719,57 @@ async def _qp_continuation_task(
                 _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "send_to_gemini"})
             elif tool_name == "read_index":
                 section = tool_input.get("section", "values")
+                await _emit(queue, "extraction_message",
+                            role="tool_call", tool_id=tool_id, tool="read_index",
+                            model=mgr_model_id, args=json.dumps({"section": section}))
                 if section == "notes":
                     result = json.dumps(index.extracted_data.get("notes_text", {}), indent=2)
                 elif section == "scope":
                     result = json.dumps(index.extracted_data.get("scope_analysis", ""), indent=2)
                 else:
                     result = json.dumps(index.extracted_values, indent=2)
-                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "read_index"})
+                await _emit(queue, "extraction_message",
+                            role="tool_result", tool_id=tool_id, tool="read_index",
+                            model=mgr_model_id, result=result)
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "read_index", "section": section})
             elif tool_name == "kp_lookup":
-                item_query = tool_input.get("item", "").strip()
-                result = _kp_lookup(index.knowledge_pack or {}, item_query)
+                items_arg = tool_input.get("items")
+                if isinstance(items_arg, list) and items_arg:
+                    _kp_args = {"items": [str(x) for x in items_arg]}
+                else:
+                    _kp_args = {"item": tool_input.get("item", "").strip()}
+                await _emit(queue, "extraction_message",
+                            role="tool_call", tool_id=tool_id, tool="kp_lookup",
+                            model=mgr_model_id, args=json.dumps(_kp_args))
+                if isinstance(items_arg, list) and items_arg:
+                    result = _kp_lookup_batch(index.knowledge_pack or {}, _kp_args["items"])
+                else:
+                    result = _kp_lookup(index.knowledge_pack or {}, _kp_args["item"])
+                await _emit(queue, "extraction_message",
+                            role="tool_result", tool_id=tool_id, tool="kp_lookup",
+                            model=mgr_model_id, result=result)
                 _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "kp_lookup"})
+            elif tool_name == "create_memory":
+                _mem_args = {"text": (tool_input.get("text") or "")[:300],
+                             "confirms_run": bool(tool_input.get("confirms_run"))}
+                await _emit(queue, "extraction_message",
+                            role="tool_call", tool_id=tool_id, tool="create_memory",
+                            model=mgr_model_id, args=json.dumps(_mem_args))
+                result = await _qp_create_memory(run_id, tool_input)
+                await _emit(queue, "extraction_message",
+                            role="tool_result", tool_id=tool_id, tool="create_memory",
+                            model=mgr_model_id, result=result)
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "create_memory"})
+            elif tool_name == "create_job":
+                _cj_args = {k: tool_input.get(k) for k in ("job_name", "client", "job_type") if tool_input.get(k)}
+                await _emit(queue, "extraction_message",
+                            role="tool_call", tool_id=tool_id, tool="create_job",
+                            model=mgr_model_id, args=json.dumps(_cj_args))
+                result = await _qp_create_job(run_id, index, tool_input)
+                await _emit(queue, "extraction_message",
+                            role="tool_result", tool_id=tool_id, tool="create_job",
+                            model=mgr_model_id, result=result)
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "create_job"})
             else:
                 result = f"Unknown tool: {tool_name}"
             mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": result})
@@ -3532,6 +5802,7 @@ def setup_quick_proposal_routes(session_manager=None):
             run_id,
             id=run_id,
             session_id=session_id,
+            owner=owner or "",
             upload_id=req.upload_id,
             filename=req.filename or req.upload_id,
             run_name=req.run_name,
@@ -3541,6 +5812,8 @@ def setup_quick_proposal_routes(session_manager=None):
             holdout_kp_path=req.holdout_kp_path or "",
             gemini_model=req.gemini_model or "",
             manager_model=req.manager_model or "",
+            phase_models=req.phase_models or {},
+            auto_memory=bool(req.auto_memory),
         )
 
         # Resolve manager endpoint for session model/url metadata.
@@ -3596,6 +5869,7 @@ def setup_quick_proposal_routes(session_manager=None):
             selected_jobs=req.selected_jobs or None,
             gemini_model=req.gemini_model,
             manager_model=req.manager_model,
+            phase_models=req.phase_models or None,
             gemini_retry_attempts=req.gemini_retry_attempts,
             gemini_fallback_models=req.gemini_fallback_models or None,
             holdout_kp_path=req.holdout_kp_path,
@@ -3603,6 +5877,7 @@ def setup_quick_proposal_routes(session_manager=None):
             import_notes_from_run_id=req.import_notes_from_run_id,
             import_scope_from_run_id=req.import_scope_from_run_id,
             project_type=req.project_type,
+            memory_recall_count=req.memory_recall_count,
             session_id=session_id,
         ))
         _active_tasks[run_id] = task
@@ -3634,6 +5909,7 @@ def setup_quick_proposal_routes(session_manager=None):
             selected_jobs=req.selected_jobs or None,
             gemini_model=req.gemini_model,
             manager_model=req.manager_model,
+            phase_models=req.phase_models or None,
             gemini_retry_attempts=req.gemini_retry_attempts,
             gemini_fallback_models=req.gemini_fallback_models or None,
             holdout_kp_path=req.holdout_kp_path,
@@ -3641,6 +5917,7 @@ def setup_quick_proposal_routes(session_manager=None):
             import_notes_from_run_id=req.import_notes_from_run_id,
             import_scope_from_run_id=req.import_scope_from_run_id,
             project_type=req.project_type,
+            memory_recall_count=req.memory_recall_count,
         ))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
@@ -3678,16 +5955,31 @@ def setup_quick_proposal_routes(session_manager=None):
             raise HTTPException(status_code=404, detail="Run not found")
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         status = meta.get("status", "unknown")
-        # If meta says running but no active queue exists (server restart), auto-correct.
-        if status == "running" and run_id not in _active_runs:
+        # Re-derive a possibly-stale on-disk status from the saved extraction index. Two cases:
+        #  - "running" with no active queue → a server restart killed the in-flight task.
+        #  - "complete" with only pre-extraction setup keys → a run interrupted during job-type
+        #    detection or completeness scoring was mislabeled complete by the old heuristic. Those
+        #    setup keys are NOT real extraction output, so the run is actually resumable. This case
+        #    must be re-checked (not just "running") because the mislabel is already persisted to
+        #    meta.json and would otherwise never self-heal on restart.
+        # Guarded by `not in _active_runs` so a genuinely-live run is never downgraded.
+        if run_id not in _active_runs and status in ("running", "complete"):
             results_path = Path(RUNS_DIR) / run_id / "results.json"
             if results_path.is_file():
-                results = json.loads(results_path.read_text(encoding="utf-8"))
-                ev = results.get("extracted_values") or {}
-                corrected = "complete" if any(k not in ("project_type", "plan_completeness", "completeness_notes", "extraction_complete") for k in ev) else "cancelled"
+                ev = (json.loads(results_path.read_text(encoding="utf-8")).get("extracted_values")) or {}
+                # Keys written before phase-5 field extraction (job-type detection + completeness
+                # scoring). Only a genuine extraction field (road_LF, lot_count, curb_type, …) beyond
+                # these marks a run complete.
+                _PRE_EXTRACTION_KEYS = {
+                    "project_type", "lot_count_applicable", "building_count", "project_acreage",
+                    "type_signals", "type_confidence", "job_type_detection_complete",
+                    "plan_completeness", "completeness_notes", "extraction_complete",
+                }
+                corrected = "complete" if any(k not in _PRE_EXTRACTION_KEYS for k in ev) else "cancelled"
             else:
-                corrected = "cancelled"
-            _save_run_meta(run_id, status=corrected)
+                corrected = "cancelled" if status == "running" else status
+            if corrected != status:
+                _save_run_meta(run_id, status=corrected)
             status = corrected
         return {
             "run_id":    run_id,
@@ -3819,12 +6111,207 @@ def setup_quick_proposal_routes(session_manager=None):
             })
         return result
 
+    # ── Case library CRUD (brain-window Jobs tab) ──────────────────────────────
+
+    @router.get("/case_library")
+    async def case_library_list():
+        """Summaries of every case-library job record (DB-backed; the canonical
+        library that also feeds the KP derivation — TODO_YY)."""
+        db = SessionLocal()
+        try:
+            out = []
+            for job in db.query(QpJobData).order_by(QpJobData.slug).all():
+                try:
+                    out.append(_case_library_summary(job.slug, case_store.reassemble(job)))
+                except Exception as e:
+                    out.append({"slug": job.slug, "job_name": job.job_name, "parse_error": str(e)})
+            logger.info(f"[quick_proposal] Jobs tab: served {len(out)} jobs from DB (qp_job_data)")
+            return out
+        finally:
+            db.close()
+
+    @router.get("/case_library/line_items")
+    async def case_library_line_items():
+        """Distinct line items aggregated across every case-library job's
+        proposals, for the job-form 'add line item' picker. Deduped by
+        normalized description; each entry carries a representative unit/category
+        (the most common seen) and the number of jobs it appears in.
+
+        NOTE: must be declared before GET /case_library/{slug} so 'line_items'
+        isn't captured as a slug."""
+        from collections import Counter
+        agg: dict[str, dict] = {}
+        for data in _load_case_library_records():
+            job_name = data.get("job_name", "")
+            for proposal in (data.get("proposals") or []):
+                if not isinstance(proposal, dict):
+                    continue
+                for item in (proposal.get("line_items") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    desc = (item.get("description") or "").strip()
+                    if not desc:
+                        continue
+                    norm = _norm_line_item_desc(desc)
+                    entry = agg.get(norm)
+                    if entry is None:
+                        entry = agg[norm] = {"description": desc, "units": Counter(),
+                                             "categories": Counter(), "jobs": set()}
+                    entry["jobs"].add(job_name)
+                    unit = (item.get("unit") or "").strip()
+                    if unit:
+                        entry["units"][unit] += 1
+                    cat = (item.get("category") or "").strip()
+                    if cat:
+                        entry["categories"][cat] += 1
+        out = [{
+            "description": e["description"],
+            "unit":        e["units"].most_common(1)[0][0] if e["units"] else "",
+            "category":    e["categories"].most_common(1)[0][0] if e["categories"] else "",
+            "job_count":   len(e["jobs"]),
+        } for e in agg.values()]
+        out.sort(key=lambda e: (-e["job_count"], e["description"].lower()))
+        return out
+
+    @router.get("/case_library/categories")
+    async def case_library_categories():
+        """Distinct line-item categories actually used across every case-library
+        job's proposals (line items + optional items), for the job-form Category
+        picker. Sorted by usage frequency (most-used first), then alphabetically.
+
+        NOTE: must be declared before GET /case_library/{slug} so 'categories'
+        isn't captured as a slug."""
+        from collections import Counter
+        from itertools import chain
+        counts: Counter = Counter()
+        for data in _load_case_library_records():
+            for proposal in (data.get("proposals") or []):
+                if not isinstance(proposal, dict):
+                    continue
+                items = chain(proposal.get("line_items") or [], proposal.get("optional_items") or [])
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    cat = (item.get("category") or "").strip()
+                    if cat:
+                        counts[cat] += 1
+        return [c for c, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))]
+
+    @router.get("/case_library/{slug}")
+    async def case_library_get(slug: str):
+        _validate_case_slug(slug)
+        db = SessionLocal()
+        try:
+            job = case_store.get_job(db, slug)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Job not found")
+            content = case_store.reassemble(job)
+            n_li = sum(len(r.line_items) for r in job.revisions)
+            logger.info(
+                f"[quick_proposal] Jobs tab: loaded job '{job.job_name}' (slug={slug}) from DB "
+                f"— {len(job.revisions)} revision(s), {n_li} line item(s) reassembled")
+            return {"slug": slug, "content": content}
+        finally:
+            db.close()
+
+    @router.post("/case_library")
+    async def case_library_create(req: CaseLibraryUpsert):
+        content = _validate_case_record(req.content)
+        _normalize_case_tax_rates(content)
+        _recompute_reconciliation(content)
+        slug = req.slug.strip() or re.sub(r"[^a-z0-9]+", "_", content["job_name"].lower()).strip("_")
+        _validate_case_slug(slug)
+        db = SessionLocal()
+        try:
+            if case_store.get_job(db, slug) is not None:
+                raise HTTPException(status_code=409, detail=f"Job '{slug}' already exists")
+            _reject_duplicate_job_name(db, content["job_name"], exclude_slug=slug)
+            case_store.upsert_job(db, slug, content)
+            db.commit()
+            # Read-back confirms the row is committed & queryable (slug is the PK of qp_job_data).
+            saved = case_store.get_job(db, slug)
+            logger.info(
+                f"[quick_proposal] Jobs tab: created job '{saved.job_name}' in DB "
+                f"(qp_job_data.slug='{saved.slug}', created_at={saved.created_at})")
+            return {"slug": slug, "job_name": content["job_name"]}
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @router.put("/case_library/{slug}")
+    async def case_library_update(slug: str, req: CaseLibraryUpsert):
+        _validate_case_slug(slug)
+        content = _validate_case_record(req.content)
+        _normalize_case_tax_rates(content)
+        _recompute_reconciliation(content)
+        db = SessionLocal()
+        try:
+            existing = case_store.get_job(db, slug)
+            if existing is None:
+                raise HTTPException(status_code=404, detail="Job not found")
+            old_content = case_store.reassemble(existing)
+            _reject_duplicate_job_name(db, content["job_name"], exclude_slug=slug)
+            changed_sections = case_store.diff_sections(old_content, content)
+            case_store.upsert_job(db, slug, content)
+            db.commit()
+            # Read-back the rewritten object graph to report row counts (details/scale = 1:1,
+            # revisions/line_items = 1:many) — the cascade rewrites all of them regardless of
+            # which sections actually changed, so `changed_sections` (computed above from the
+            # pre-write content diff) is what tells you what was actually edited.
+            saved = case_store.get_job(db, slug)
+            n_details = 1 if saved.details is not None else 0
+            n_scale = 1 if saved.scale is not None else 0
+            n_rev = len(saved.revisions)
+            n_li = sum(len(r.line_items) for r in saved.revisions)
+            logger.info(
+                f"[quick_proposal] Jobs tab: updated job '{saved.job_name}' (slug={slug}) — "
+                f"changed sections: {', '.join(changed_sections) or 'none'} "
+                f"(rows rewritten: qp_job_details={n_details}, qp_job_scale_metrics={n_scale}, "
+                f"qp_job_revisions={n_rev}, qp_line_items={n_li})")
+            return {"slug": slug, "job_name": content["job_name"]}
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @router.delete("/case_library/{slug}")
+    async def case_library_delete(slug: str):
+        _validate_case_slug(slug)
+        db = SessionLocal()
+        try:
+            job = case_store.get_job(db, slug)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Job not found")
+            db.delete(job)  # child rows cascade (delete-orphan / FK ON DELETE CASCADE)
+            db.commit()
+            logger.info(f"[quick_proposal] case library: deleted {slug}")
+            return {"deleted": slug}
+        finally:
+            db.close()
+
     @router.get("/prompts")
     async def list_prompts():
         prompts = []
         for path in sorted(_PROMPTS_DIR.glob("*.txt")):
             prompts.append({"name": path.stem, "content": path.read_text(encoding="utf-8")})
         return prompts
+
+    @router.put("/prompts/{name}")
+    async def update_prompt(name: str, req: PromptUpdate):
+        path = _PROMPTS_DIR / f"{name}.txt"
+        if path.parent.resolve() != _PROMPTS_DIR.resolve() or not path.is_file():
+            raise HTTPException(status_code=404, detail="Prompt not found")
+        _atomic_write_text(path, req.content)
+        return {"name": name, "content": req.content}
 
     @router.get("/runs/{run_id}")
     async def get_run(run_id: str):
@@ -3977,7 +6464,7 @@ def setup_quick_proposal_routes(session_manager=None):
         _active_runs[run_id] = queue
         _save_run_meta(run_id, status="running")
 
-        task = asyncio.create_task(_run_phase5_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None, holdout_kp_path=req.holdout_kp_path, resume=req.resume, completeness_only=req.completeness_only, session_id=session_id))
+        task = asyncio.create_task(_run_phase5_only(index, queue, run_id, manager_model=req.manager_model, gemini_model=req.gemini_model, retry_attempts=req.gemini_retry_attempts, gemini_fallback_models=req.gemini_fallback_models or None, holdout_kp_path=resolved_holdout, resume=req.resume, completeness_only=req.completeness_only, session_id=session_id, memory_recall_count=req.memory_recall_count))
         _active_tasks[run_id] = task
         return {"run_id": run_id}
 
@@ -4159,20 +6646,154 @@ def setup_quick_proposal_routes(session_manager=None):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @router.get("/runs/{run_id}/status")
-    async def get_run_status(run_id: str):
-        meta_path = Path(RUNS_DIR) / run_id / "meta.json"
-        if not meta_path.is_file():
-            raise HTTPException(404, f"Run {run_id} not found")
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        return {"run_id": run_id, "status": meta.get("status", "unknown"), "session_id": meta.get("session_id", "")}
-
     @router.get("/runs/{run_id}/results")
     async def get_run_results(run_id: str):
         results_path = Path(RUNS_DIR) / run_id / "results.json"
         if not results_path.is_file():
             raise HTTPException(404, f"Results not found for run {run_id}")
         return json.loads(results_path.read_text(encoding="utf-8"))
+
+    @router.get("/generations")
+    async def list_qp_generations():
+        """Browse every run that has at least one QpGeneration snapshot, with a
+        quick actual-vs-proposal glance — TODO_B_NEW pairing infra."""
+        db = SessionLocal()
+        try:
+            gens = db.query(QpGeneration).order_by(QpGeneration.run_id, QpGeneration.generation_index).all()
+            by_run: dict = {}
+            for g in gens:
+                by_run.setdefault(g.run_id, []).append(g)
+
+            actuals = {a.run_id: a for a in db.query(QpActual).all()}
+
+            runs = []
+            for run_id, run_gens in by_run.items():
+                latest = max(run_gens, key=lambda g: g.generation_index)
+                actual = actuals.get(run_id)
+                runs.append({
+                    "run_id": run_id,
+                    "run_name": _display_name_for_run(run_id, latest.results_snapshot),
+                    "generation_count": len(run_gens),
+                    "latest_generation_index": latest.generation_index,
+                    "latest_grand_total": latest.grand_total,
+                    "manager_model": latest.manager_model,
+                    "gemini_model": latest.gemini_model,
+                    "created_at": latest.created_at.isoformat() if latest.created_at else None,
+                    "has_actual": actual is not None,
+                    "actual_total": actual.actual_total if actual else None,
+                })
+            runs.sort(key=lambda r: r["created_at"] or "", reverse=True)
+            return {"runs": runs}
+        finally:
+            db.close()
+
+    @router.get("/generations/{run_id}")
+    async def get_qp_generation_detail(run_id: str):
+        """Full detail for one run: every QpGeneration attempt + paired QpActual
+        (if any) + a per-generation field diff — TODO_B_NEW pairing infra."""
+        db = SessionLocal()
+        try:
+            gens = (
+                db.query(QpGeneration)
+                .filter(QpGeneration.run_id == run_id)
+                .order_by(QpGeneration.generation_index)
+                .all()
+            )
+            if not gens:
+                raise HTTPException(404, f"No generations found for run {run_id}")
+
+            actual = db.query(QpActual).filter(QpActual.run_id == run_id).first()
+
+            generations = []
+            for g in gens:
+                extracted_values = (g.results_snapshot or {}).get("extracted_values", {})
+                diff = _diff_generation_full(g, actual) if actual else None
+                generations.append({
+                    "id": g.id,
+                    "generation_index": g.generation_index,
+                    "grand_total": g.grand_total,
+                    "manager_model": g.manager_model,
+                    "gemini_model": g.gemini_model,
+                    "holdout_kp_path": g.holdout_kp_path,
+                    "created_at": g.created_at.isoformat() if g.created_at else None,
+                    "extracted_values": extracted_values,
+                    "diff": diff,
+                    "grand_total_delta": (
+                        (g.grand_total - actual.actual_total)
+                        if (actual and actual.actual_total is not None and g.grand_total is not None)
+                        else None
+                    ),
+                })
+
+            return {
+                "run_id": run_id,
+                "run_name": _display_name_for_run(run_id, gens[-1].results_snapshot),
+                "generations": generations,
+                "actual": ({
+                    "actual_total": actual.actual_total,
+                    "actual_values": actual.actual_values,
+                    "notes": actual.notes,
+                    "created_at": actual.created_at.isoformat() if actual.created_at else None,
+                    "updated_at": actual.updated_at.isoformat() if actual.updated_at else None,
+                } if actual else None),
+            }
+        finally:
+            db.close()
+
+    @router.put("/actuals/{run_id}")
+    async def upsert_qp_actual(run_id: str, req: QpActualRequest):
+        """Upsert the real bid actuals for a run — TODO_B_NEW pairing infra.
+
+        No entry form in the UI by design: the estimator pastes real numbers
+        into chat and Claude calls this endpoint directly."""
+        db = SessionLocal()
+        try:
+            existing = db.query(QpActual).filter(QpActual.run_id == run_id).first()
+            if existing:
+                existing.actual_total = req.actual_total
+                existing.actual_values = req.actual_values
+                existing.notes = req.notes
+                db.commit()
+                db.refresh(existing)
+                row = existing
+            else:
+                row = QpActual(
+                    id=str(uuid.uuid4()),
+                    run_id=run_id,
+                    actual_total=req.actual_total,
+                    actual_values=req.actual_values,
+                    notes=req.notes,
+                )
+                db.add(row)
+                db.commit()
+                db.refresh(row)
+
+            return {
+                "run_id": row.run_id,
+                "actual_total": row.actual_total,
+                "actual_values": row.actual_values,
+                "notes": row.notes,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            logger.exception(f"[quick_proposal] actuals upsert failed run={run_id}")
+            raise HTTPException(500, f"Actuals upsert failed: {e}")
+        finally:
+            db.close()
+
+    @router.get("/actuals-reliability")
+    async def get_actuals_reliability():
+        """Cross-run reliability report (TODO_B_NEW-2) — informational only,
+        not wired into any gate or manager prompt."""
+        db = SessionLocal()
+        try:
+            return {"fields": _aggregate_actuals_reliability(db)}
+        finally:
+            db.close()
 
     @router.post("/runs/{run_id}/chat-stream")
     async def qp_chat_continuation(run_id: str, req: QPContinuationRequest, request: Request):
@@ -4231,6 +6852,26 @@ def setup_quick_proposal_routes(session_manager=None):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @router.post("/runs/{run_id}/compact-context")
+    async def compact_qp_context(run_id: str, req: CompactContextRequest):
+        """Opt-in TODO_QQ part-3 compaction, called once by the frontend on the first
+        phase-6 message after a run completes (before that message is sent to the
+        manager). `apply=False` just records the decline so the frontend never asks
+        again for this run; `apply=True` actually rewrites the persisted read_index
+        dumps and records the choice the same way."""
+        meta = _load_run_meta(run_id)
+        if not meta:
+            raise HTTPException(404, f"Run {run_id} not found")
+        session_id = meta.get("session_id", "")
+        if not req.apply:
+            _save_run_meta(run_id, compaction_choice="skipped")
+            return {"choice": "skipped"}
+        if not session_id:
+            raise HTTPException(400, "Run has no linked session — use /start-proposal-session")
+        stats = _compact_qp_context(run_id, session_id)
+        _save_run_meta(run_id, compaction_choice="compacted", compaction_stats=stats)
+        return {"choice": "compacted", **stats}
 
     @router.get("/pages/{run_id}/{page_idx}")
     async def get_page(run_id: str, page_idx: int):

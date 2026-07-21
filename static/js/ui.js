@@ -660,6 +660,82 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
 }
 
 /**
+ * Styled 3+ option choice dialog (styledConfirm only supports OK/Cancel).
+ * `buttons` is an array of { label, value, variant } where variant is
+ * 'primary' | 'secondary' | 'danger'. Resolves to the chosen button's
+ * `value`, or `null` on Escape / backdrop dismiss (callers should treat
+ * `null` the same as an explicit cancel/decline).
+ */
+export function styledChoice(message, { title = 'Confirm', buttons = [] } = {}) {
+  return new Promise(resolve => {
+    let overlay = document.getElementById('styled-choice-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'styled-choice-overlay';
+      overlay.className = 'modal';
+      overlay.innerHTML =
+        '<div class="modal-content styled-confirm-box" role="dialog" aria-modal="true" aria-labelledby="styled-choice-title" aria-describedby="styled-choice-msg">' +
+          '<div class="modal-header"><h4 id="styled-choice-title"></h4></div>' +
+          '<div class="modal-body"><p id="styled-choice-msg"></p></div>' +
+          '<div class="modal-footer" id="styled-choice-footer"></div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+    }
+
+    const titleEl = document.getElementById('styled-choice-title');
+    const msgEl   = document.getElementById('styled-choice-msg');
+    const footer  = document.getElementById('styled-choice-footer');
+    titleEl.textContent = title;
+    msgEl.textContent = message;
+    footer.innerHTML = '';
+
+    const _prevFocus = document.activeElement;
+    const btnEls = [];
+
+    function cleanup(result) {
+      overlay.classList.add('hidden');
+      overlay.style.display = 'none';
+      btnEls.forEach(b => b.removeEventListener('click', b._onClick));
+      overlay.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey);
+      try { _prevFocus && _prevFocus.focus && _prevFocus.focus(); } catch {}
+      resolve(result);
+    }
+    function onBackdrop(e) { if (e.target === overlay) cleanup(null); }
+    function onKey(e) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        cleanup(null);
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Tab') {
+        e.preventDefault();
+        const i = btnEls.indexOf(document.activeElement);
+        const forward = e.key !== 'ArrowLeft' && !e.shiftKey;
+        const n = forward ? (i >= btnEls.length - 1 ? 0 : i + 1) : (i <= 0 ? btnEls.length - 1 : i - 1);
+        btnEls[n].focus();
+      }
+    }
+
+    buttons.forEach(({ label, value, variant = 'secondary' }) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.className = 'confirm-btn confirm-btn-' + variant;
+      b._onClick = () => cleanup(value);
+      b.addEventListener('click', b._onClick);
+      footer.appendChild(b);
+      btnEls.push(b);
+    });
+
+    overlay.classList.remove('hidden');
+    overlay.style.display = '';
+    overlay.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey);
+    if (btnEls[0]) btnEls[0].focus();
+  });
+}
+
+/**
  * Styled text-input prompt — drop-in replacement for window.prompt().
  * Resolves to the trimmed string the user typed, or null on Cancel / Escape / backdrop.
  */
@@ -845,6 +921,7 @@ const uiModule = {
   showToast,
   showError,
   styledConfirm,
+  styledChoice,
   styledPrompt,
   scrollHistory,
   scrollHistoryInstant,

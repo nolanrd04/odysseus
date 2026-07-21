@@ -39,6 +39,30 @@ class TaskDeferred(BaseException):
         self.delay_seconds = delay_seconds
 
 
+def _resolve_task_override_headers(owner: str | None, endpoint_url: str) -> dict:
+    """Look up API-key headers for a raw endpoint_url, mirroring how
+    task_scheduler._run_agent_loop resolves headers for a per-task model
+    override — needed so that override can be used as a real LLM candidate
+    rather than just a bare (url, model) pair with no auth."""
+    if not endpoint_url:
+        return {}
+    try:
+        from core.database import SessionLocal, ModelEndpoint
+        from src.endpoint_resolver import normalize_base, build_headers
+        db = SessionLocal()
+        try:
+            ep_q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+            ep_q = owner_filter(ep_q, ModelEndpoint, owner or None)
+            for ep in ep_q.all():
+                if normalize_base(ep.base_url) in endpoint_url or endpoint_url in normalize_base(ep.base_url):
+                    return build_headers(ep.api_key, normalize_base(ep.base_url))
+        finally:
+            db.close()
+    except Exception:
+        pass
+    return {}
+
+
 async def action_tidy_sessions(owner: str, **kwargs) -> Tuple[str, bool]:
     """Delete empty sessions for the owner. Pure heuristic —
     the LLM folder-sort phase is skipped (user opted to keep this task
@@ -70,14 +94,35 @@ async def action_tidy_documents(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
-    """Consolidate/deduplicate memories for the owner."""
+async def action_consolidate_memory(owner: str, model: str | None = None, endpoint_url: str | None = None, **kwargs) -> Tuple[str, bool]:
+    """Memory Tidy: dedupe/clean Tier-2 specifics, then fold them into the
+    Tier-1 per-owner global memory document and age out the raw tier.
+
+    Runs every 5 memory_added events (HOUSEKEEPING_DEFAULTS trigger). Order
+    matters: tidy first (so the global update sees cleaned text), then the
+    handoff-style Tier-1 update, and only after a SUCCESSFUL update does the
+    Tier-2 age-out run — raw memories must never be dropped before their
+    durable content has been absorbed into the global document.
+
+    `model`/`endpoint_url` come from the task's own Model override (set in
+    the Tasks UI) — when present they're tried FIRST, ahead of the
+    Background Tasks/Utility/Default chain, so picking a model there actually
+    takes effect instead of being silently ignored.
+    """
     try:
         import json
         import re
         from src.constants import DATA_DIR
         from src.llm_core import llm_call_async_with_fallback
         from src.memory import MemoryManager
+        from src.task_endpoint import resolve_task_candidates
+
+        def _candidates_for(group_owner: str) -> list:
+            chain = resolve_task_candidates(owner=group_owner or None)
+            if not model:
+                return chain
+            override = (endpoint_url or "", model, _resolve_task_override_headers(group_owner, endpoint_url or ""))
+            return [override] + [c for c in chain if (c[0], c[1]) != (override[0], override[1])]
 
         manager = MemoryManager(DATA_DIR)
         all_memories = manager.load_all()
@@ -115,8 +160,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
             if len(group_memories) < 2:
                 return False
 
-            from src.task_endpoint import resolve_task_candidates
-            candidates = resolve_task_candidates(owner=group_owner or None)
+            candidates = _candidates_for(group_owner)
             if not candidates:
                 return False
 
@@ -149,8 +193,10 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                     candidates,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.0,
-                    max_tokens=4096,
-                    timeout=120,
+                    # Local thinking models spend output budget on reasoning
+                    # before the answer; 4096 left some with nothing to say.
+                    max_tokens=8192,
+                    timeout=180,
                 )
                 from src.text_helpers import strip_think
 
@@ -159,7 +205,16 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                 start = raw.find("{")
                 end = raw.rfind("}")
                 if start != -1 and end != -1 and end > start:
-                    decision = json.loads(raw[start:end + 1])
+                    blob = raw[start:end + 1]
+                    try:
+                        decision = json.loads(blob)
+                    except json.JSONDecodeError:
+                        # Local task models frequently emit near-JSON (missing
+                        # comma/quote). Same tier-2 salvage as the phase-1
+                        # classification parse (TODO_DD); if repair fails the
+                        # outer except falls back to duplicate cleanup as before.
+                        from json_repair import repair_json
+                        decision = json.loads(repair_json(blob))
                     keep_items = decision.get("keep") if isinstance(decision, dict) else None
                     drop_items = decision.get("drop") if isinstance(decision, dict) else None
                     if isinstance(keep_items, list) and isinstance(drop_items, list):
@@ -265,21 +320,161 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
             ]
             total_removed += group_removed
 
+        tidy_summary = ""
         if total_removed or total_cleaned:
             manager.save(all_memories)
             if ai_used:
                 reasons = ai_reasons[:3]
                 reason_text = f": {'; '.join(reasons)}" if reasons else ""
-                return (
+                tidy_summary = (
                     f"AI tidied {total_scanned} memories: "
-                    f"removed {total_removed}, cleaned {total_cleaned}{reason_text}",
-                    True,
+                    f"removed {total_removed}, cleaned {total_cleaned}{reason_text}"
                 )
-            preview = "; ".join(removed_examples)
-            extra = f" (+{total_removed - len(removed_examples)} more)" if total_removed > len(removed_examples) else ""
-            return f"Removed {total_removed} duplicate(s) of {total_scanned}: {preview}{extra}", True
+            else:
+                preview = "; ".join(removed_examples)
+                extra = f" (+{total_removed - len(removed_examples)} more)" if total_removed > len(removed_examples) else ""
+                tidy_summary = f"Removed {total_removed} duplicate(s) of {total_scanned}: {preview}{extra}"
 
-        raise TaskNoop(f"scanned {total_scanned} memories, no duplicates")
+        # ── Tier-1 global memory update + Tier-2 age-out ───────────────────
+        # Fold the (freshly tidied) specifics into each owner's global memory
+        # document, then age out the raw tier past the rolling cap. Reload
+        # through `manager` so the pass never resurrects entries the tidy above
+        # removed, and access global memory via the module so tests can patch it.
+        import src.global_memory as _gm
+
+        TIER2_KEEP = 50  # rolling cap of raw memories per owner
+
+        # Per-memory cap for the Tier-1 update prompt. Deliberately larger than
+        # the tidy pass's text_limit (2000): confirmed QP memories carry long
+        # structured rule lists (2.5k+ chars), and truncating them here would
+        # silently drop rules from the global document — the one place they're
+        # supposed to be preserved.
+        global_text_limit = 6000
+
+        async def _try_global_update(group_owner: str, group_memories: list) -> bool:
+            """Handoff-style Tier-1 update for one owner. True on success."""
+            candidates = _candidates_for(group_owner)
+            if not candidates:
+                logger.warning(
+                    "global memory update skipped for %r: no task LLM candidates",
+                    group_owner,
+                )
+                return False
+            try:
+                current_doc = _gm.load_global_memory(group_owner)
+                items = [
+                    {
+                        "category": m.get("category", "fact"),
+                        "pinned": bool(m.get("pinned")),
+                        "status": (m.get("metadata") or {}).get("status", ""),
+                        "date": datetime.fromtimestamp(m.get("timestamp", 0)).strftime("%Y-%m-%d") if m.get("timestamp") else "",
+                        "text": (m.get("text") or "").strip()[:global_text_limit],
+                    }
+                    for m in group_memories
+                    if (m.get("text") or "").strip()
+                ]
+                if not items:
+                    return False
+                sections = "\n".join(f"## {s}" for s in _gm.GLOBAL_MEMORY_SECTIONS)
+                prompt = (
+                    "You maintain a user's GLOBAL MEMORY: one living markdown document that "
+                    "condenses durable facts about them so an assistant can know the user "
+                    "without reading every saved memory. Update it from the memories below.\n\n"
+                    "Rules:\n"
+                    "- Keep this exact section structure (omit a heading only if it has no content):\n"
+                    f"{sections}\n"
+                    "- Fold NEW durable facts in; condense or supersede stale ones. When facts "
+                    "conflict, keep the latest.\n"
+                    "- Memories with status \"provisional\" are machine-generated and unreviewed — "
+                    "carry their durable gist but phrase it with less certainty than user-stated "
+                    "or confirmed facts.\n"
+                    "- Be conservative: when unsure whether a fact is durable, keep it.\n"
+                    "- Terse bullets, no filler. HARD LIMIT: the whole document must stay under "
+                    f"{_gm.GLOBAL_MEMORY_MAX_CHARS} characters.\n"
+                    "- Return ONLY the updated document. No commentary, no code fences.\n\n"
+                    "CURRENT DOCUMENT:\n"
+                    f"{current_doc or '(empty — create the initial document)'}\n\n"
+                    f"MEMORIES:\n{json.dumps(items, ensure_ascii=False)}"
+                )
+                raw = await llm_call_async_with_fallback(
+                    candidates,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    # Local thinking models can burn 4096 tokens entirely on
+                    # reasoning and return an empty document (seen live
+                    # 2026-07-14); give the answer room after the think phase.
+                    max_tokens=8192,
+                    timeout=180,
+                )
+                from src.text_helpers import strip_think
+                doc = strip_think(raw or "", prose=False, prompt_echo=False).strip()
+                doc = re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", doc, flags=re.MULTILINE).strip()
+                if not doc:
+                    logger.warning(
+                        "global memory update failed for %r: model returned an empty "
+                        "document (raw response %d chars, first 200: %r)",
+                        group_owner, len(raw or ""), (raw or "")[:200],
+                    )
+                    return False
+                _gm.save_global_memory(group_owner, doc)
+                logger.info(
+                    "global memory updated for %r (%d chars from %d memories)",
+                    group_owner, len(doc), len(items),
+                )
+                return True
+            except Exception as g_err:
+                logger.warning("global memory update failed for %r: %s", group_owner, g_err)
+                return False
+
+        fresh = manager.load_all()
+        if _owner_clean:
+            fresh_groups = {
+                _owner_clean: [m for m in fresh if _memory_owner(m) == _owner_clean]
+            }
+        else:
+            fresh_groups = {}
+            for mem in fresh:
+                fresh_groups.setdefault(_memory_owner(mem), []).append(mem)
+
+        def _age_out_group(group_owner: str) -> int:
+            """Drop the owner's oldest non-pinned memories beyond the cap.
+
+            Runs only AFTER a successful Tier-1 update for the owner, so raw
+            memories are never lost before being absorbed. Pinned entries are
+            exempt. (Vector-store rows for dropped ids go stale; recall already
+            skips vector hits with no backing entry.)
+            """
+            entries = manager.load_all()
+            eligible = [
+                m for m in entries
+                if _memory_owner(m) == group_owner and not m.get("pinned")
+            ]
+            if len(eligible) <= TIER2_KEEP:
+                return 0
+            eligible.sort(key=lambda m: m.get("timestamp", 0), reverse=True)
+            drop_ids = {m.get("id") for m in eligible[TIER2_KEEP:] if m.get("id")}
+            if not drop_ids:
+                return 0
+            manager.save([m for m in entries if m.get("id") not in drop_ids])
+            return len(drop_ids)
+
+        global_parts = []
+        for group_owner, group_memories in fresh_groups.items():
+            if not group_memories:
+                continue
+            if await _try_global_update(group_owner, group_memories):
+                aged = _age_out_group(group_owner)
+                label = group_owner or "(default)"
+                part = f"updated global memory for {label}"
+                if aged:
+                    part += f" (aged out {aged} absorbed memories)"
+                global_parts.append(part)
+
+        parts = [p for p in [tidy_summary, *global_parts] if p]
+        if parts:
+            return "; ".join(parts), True
+
+        raise TaskNoop(f"scanned {total_scanned} memories, no duplicates, global memory unchanged")
     except Exception as e:
         logger.error(f"consolidate_memory action failed: {e}")
         return str(e), False
@@ -2445,6 +2640,100 @@ async def action_get_updates(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
+async def action_prune_stale_models(owner: str, **kwargs) -> Tuple[str, bool]:
+    """Re-probe every enabled model endpoint's /v1/models and overwrite its
+    cached_models with the live list, pruning models the provider has
+    deprecated or removed (e.g. retired Gemini preview IDs left lingering).
+
+    Pure API probe — no LLM. Mirrors the manual admin "refresh models" path
+    (authoritative replace of cached_models), just on a schedule.
+
+    Safety:
+    - An endpoint that returns nothing (offline / transient error) is left
+      untouched, so a network blip can't wipe a good cache.
+    - pinned_models (admin-entered) are never in cached_models; they're merged
+      at read time, so pruning cached_models can't drop a pinned ID.
+    - hidden_models (failed-probe filter list) is left as-is.
+    Admin-only (registered in _ADMIN_ONLY_ACTIONS) — endpoints are a global
+    admin resource, so this refreshes all enabled endpoints regardless of owner.
+    """
+    try:
+        import asyncio
+        import json
+        from core.database import SessionLocal, ModelEndpoint
+        from routes.model_routes import _probe_endpoint
+
+        db = SessionLocal()
+        try:
+            endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()  # noqa: E712
+            ep_data = [
+                {"id": ep.id, "name": ep.name, "base_url": ep.base_url,
+                 "api_key": ep.api_key, "cached": ep.cached_models}
+                for ep in endpoints
+            ]
+        finally:
+            db.close()
+
+        if not ep_data:
+            raise TaskNoop("no enabled model endpoints")
+
+        checked = 0
+        offline = 0
+        pruned_total = 0
+        changed = []
+        for ep in ep_data:
+            try:
+                probed = await asyncio.to_thread(_probe_endpoint, ep["base_url"], ep["api_key"], 8)
+            except Exception as e:
+                logger.warning(f"prune_stale_models: probe failed for {ep['name']}: {e}")
+                probed = []
+            if not probed:
+                offline += 1
+                continue
+            checked += 1
+            try:
+                old = set(json.loads(ep["cached"]) if ep["cached"] else [])
+            except Exception:
+                old = set()
+            new = set(probed)
+            if new == old:
+                continue
+            removed = old - new
+            added = new - old
+            db2 = SessionLocal()
+            try:
+                obj = db2.query(ModelEndpoint).filter(ModelEndpoint.id == ep["id"]).first()
+                if obj:
+                    obj.cached_models = json.dumps(probed)
+                    db2.commit()
+            finally:
+                db2.close()
+            pruned_total += len(removed)
+            bits = []
+            if removed:
+                bits.append(f"-{len(removed)}")
+            if added:
+                bits.append(f"+{len(added)}")
+            changed.append(f"{ep['name']} ({', '.join(bits)})")
+
+        if not checked:
+            raise TaskNoop(f"all {offline} endpoint(s) offline/unreachable — kept caches")
+        if not changed:
+            raise TaskNoop(f"checked {checked} endpoint(s), model lists already current")
+
+        summary = f"Refreshed {checked} endpoint(s), pruned {pruned_total} stale model(s): " + "; ".join(changed[:6])
+        if len(changed) > 6:
+            summary += f" (+{len(changed) - 6} more)"
+        if offline:
+            summary += f" · {offline} offline (kept)"
+        return summary, True
+    except TaskNoop:
+        raise
+    except Exception as e:
+        logger.error(f"prune_stale_models action failed: {e}")
+        return str(e), False
+
+
 BUILTIN_ACTIONS = {
     "tidy_sessions": action_tidy_sessions,
     "tidy_documents": action_tidy_documents,
@@ -2466,6 +2755,7 @@ BUILTIN_ACTIONS = {
     "check_email_urgency": action_check_email_urgency,
     "cookbook_serve": action_cookbook_serve,
     "get_updates": action_get_updates,
+    "prune_stale_models": action_prune_stale_models,
     # ping_notes removed from the registry — runs only inside `_note_pings_loop`.
 }
 
@@ -2487,4 +2777,5 @@ BUILTIN_ACTION_INFO = {
     "audit_skills": "Audit unaudited skills after enough new skills are added: test, narrow metadata, self-edit/retry, optional teacher rewrite, tag duplicates/trivial skills, and publish/draft using the auto-approve threshold.",
     "check_email_urgency": "Scan unread emails hourly, tag urgent/reply-soon/newsletter/marketing/spam, and send a reminder when a new email needs a fast reply.",
     "get_updates": "Summarize new git commits since last run and email a digest to yourself.",
+    "prune_stale_models": "Re-probe each model endpoint's /v1/models and drop deprecated/removed models from its cache (e.g. retired Gemini preview IDs). No LLM — pure API probe; offline endpoints are left untouched.",
 }

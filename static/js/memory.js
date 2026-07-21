@@ -406,6 +406,59 @@ export async function loadMemories() {
   syncToggles();
 }
 
+// ---- Global (Tier-1) memory tab ----
+
+// Minimal renderer for the machine-maintained global memory doc. The doc is
+// simple markdown (## headings + "- " bullets) written by the Memory Tidy
+// task; everything is HTML-escaped and only those two constructs are styled,
+// so a malformed doc degrades to plain text instead of injecting markup.
+function _renderGlobalDoc(doc) {
+  const out = [];
+  let listOpen = false;
+  const closeList = () => { if (listOpen) { out.push('</ul>'); listOpen = false; } };
+  for (const rawLine of doc.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) { continue; }
+    if (line.startsWith('## ')) {
+      closeList();
+      out.push(`<h4 class="memory-global-heading">${escapeHtml(line.slice(3))}</h4>`);
+    } else if (line.startsWith('- ')) {
+      if (!listOpen) { out.push('<ul class="memory-global-list">'); listOpen = true; }
+      out.push(`<li>${escapeHtml(line.slice(2))}</li>`);
+    } else {
+      closeList();
+      out.push(`<p class="memory-global-p">${escapeHtml(line)}</p>`);
+    }
+  }
+  closeList();
+  return out.join('');
+}
+
+export async function loadGlobalMemory() {
+  const docEl = document.getElementById('memory-global-doc');
+  const updatedEl = document.getElementById('memory-global-updated');
+  if (!docEl) return;
+  docEl.innerHTML = '<div class="memory-empty">Loading…</div>';
+  try {
+    const res = await fetch(`${window.location.origin}/api/memory/global`);
+    const data = res.ok ? await res.json() : {};
+    const doc = (data.doc || '').trim();
+    if (updatedEl) {
+      updatedEl.textContent = data.updated_at
+        ? `Updated ${new Date(data.updated_at * 1000).toLocaleString()}`
+        : '';
+    }
+    if (!doc) {
+      docEl.innerHTML = '<div class="memory-empty">No global memory yet — it is generated automatically once enough memories have been saved (every 5 additions).</div>';
+      return;
+    }
+    docEl.innerHTML = _renderGlobalDoc(doc);
+  } catch (e) {
+    console.error('Failed to load global memory:', e);
+    docEl.innerHTML = '<div class="memory-empty">Failed to load global memory.</div>';
+  }
+}
+
 // ---- Bulk select mode ----
 
 const _SELECT_BTN_DOT_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>';
@@ -1453,6 +1506,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // Lazy-load skills tab (cascade=true → play the domino-in entrance)
       if (target === 'skills') {
         import('./skills.js').then(m => { if (m.loadSkills) m.loadSkills(true); else if (m.default?.loadSkills) m.default.loadSkills(true); });
+      }
+      if (target === 'global') loadGlobalMemory();
+      if (target === 'jobs') {
+        import('./qp_jobs.js').then(m => m.loadJobsTab && m.loadJobsTab());
       }
     });
   });

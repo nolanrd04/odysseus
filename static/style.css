@@ -622,7 +622,9 @@ body.bg-pattern-sparkles {
     #tools-section {
       margin-top: 1px;
     }
-    #tools-section .list-item {
+    #tools-section .list-item,
+    #quick-proposal-section .list-item,
+    #manual-workflows-section .list-item {
       padding: 8px 8px;
     }
     .sidebar.right-side .sidebar-header {
@@ -5311,7 +5313,12 @@ body.bg-pattern-sparkles {
     }
     .styled-confirm-box {
       width:360px; max-width:90vw;
-      max-height:none; /* override modal-content's 85vh */
+      /* Capped (not unbounded) so a long confirm message — e.g. a full memory's
+         text when deleting it — scrolls inside .modal-body instead of growing
+         the whole box past the viewport and pushing the Confirm/Cancel buttons
+         off-screen. .modal-content's flex column + .modal-body's flex:1;
+         overflow-y:auto already handle the scroll once this cap exists. */
+      max-height:85vh;
       padding:14px 18px;
     }
     .styled-confirm-box .modal-header { margin-bottom:4px; }
@@ -6743,7 +6750,9 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
         border-radius: 12px !important;
         border: 1px solid var(--border) !important;
         animation: modal-enter 0.25s ease-out both !important;
-        max-height: none !important;
+        /* Same overflow fix as the base rule — a long message must scroll
+           inside .modal-body, not push the buttons off the small viewport. */
+        max-height: 80vh !important;
       }
       .styled-confirm-box.modal-closing {
         animation: modal-exit 0.18s ease-in both !important;

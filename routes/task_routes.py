@@ -362,7 +362,12 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             if status:
                 q = q.filter(ScheduledTask.status == status)
             tasks = q.order_by(ScheduledTask.created_at.desc()).all()
-            return {"tasks": [_task_to_dict(t, include_last_run_result=include_last_run) for t in tasks]}
+            out = []
+            for t in tasks:
+                d = _task_to_dict(t, include_last_run_result=include_last_run)
+                d["running"] = task_scheduler.is_running(t.id)
+                out.append(d)
+            return {"tasks": out}
         finally:
             db.close()
 
@@ -420,7 +425,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     # Actions that execute shell/SSH commands — restricted to admins.
     # Non-admin users cannot create tasks with these action types via the
     # API. See review CRIT-C.
-    _ADMIN_ONLY_ACTIONS = {"run_local", "run_script", "ssh_command"}
+    _ADMIN_ONLY_ACTIONS = {"run_local", "run_script", "ssh_command", "prune_stale_models"}
 
     def _is_admin(user: str | None) -> bool:
         if not user:

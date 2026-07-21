@@ -31,7 +31,7 @@ function _setTaskFailurePending(active) {
 
 async function _fetchTasks() {
   try {
-    const res = await fetch(`${API_BASE}/api/tasks`, { credentials: 'same-origin' });
+    const res = await fetch(`${API_BASE}/api/tasks?include_last_run=true`, { credentials: 'same-origin' });
     const data = await res.json();
     _tasks = data.tasks || [];
   } catch (e) {
@@ -731,10 +731,20 @@ function _renderList() {
     if (task.status !== 'completed') {
       const runBtn = document.createElement('button');
       runBtn.className = 'task-status-badge task-run-now-badge task-card-run-btn';
-      runBtn.title = 'Run now';
       runBtn.style.cssText = 'position:relative;top:1px;margin-right:4px;';
-      runBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>Run</span>';
-      runBtn.addEventListener('click', (e) => { e.stopPropagation(); _doRunNow(task.id); });
+      if (task.running) {
+        // Server-side the scheduler 409s a second trigger anyway — this makes
+        // that state visible instead of surfacing as an error after the click.
+        runBtn.disabled = true;
+        runBtn.classList.add('task-run-btn-running');
+        runBtn.title = 'Task is currently running';
+        runBtn.innerHTML = '<svg class="task-run-spinner" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg><span>Running…</span>';
+        _startRunStatusPolling();
+      } else {
+        runBtn.title = 'Run now';
+        runBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>Run</span>';
+        runBtn.addEventListener('click', (e) => { e.stopPropagation(); _doRunNow(task.id); });
+      }
       actionsWrap.insertBefore(runBtn, menuBtn);
     }
     titleRow.appendChild(actionsWrap);
@@ -753,6 +763,18 @@ function _renderList() {
     meta.className = 'memory-item-meta';
     meta.style.cssText = 'font-size:10px;opacity:0.4;margin-top:-1px;';
     meta.textContent = metaParts.join(' · ');
+    // Live run status chip — mirrors the Activity tab states on the card itself.
+    const chipStatus = task.running ? 'running' : (task.last_run_status || '');
+    if (chipStatus) {
+      const chip = document.createElement('span');
+      chip.className = 'task-last-run-chip ' + chipStatus;
+      chip.textContent = task.running ? 'running…' : chipStatus;
+      chip.title = task.running
+        ? 'Task is currently running'
+        : (task.last_run_result || `Last run: ${chipStatus}`);
+      meta.appendChild(document.createTextNode(' · '));
+      meta.appendChild(chip);
+    }
     content.appendChild(meta);
 
     const statusPill = titleRow.querySelector('[data-task-status-action]');
@@ -1620,11 +1642,49 @@ async function _doResume(id) {
   } catch (e) { if (uiModule) uiModule.showError(e.message); }
 }
 
+// Poll the task list while any task is running so the card's Run button and
+// status chip track the live state (running → success/error/skipped). The
+// 30s notification poller handles toasts; this one only refreshes the cards.
+let _runStatusInterval = null;
+let _runStatusDeadline = 0;
+
+function _startRunStatusPolling() {
+  if (_runStatusInterval) return;
+  _runStatusDeadline = Date.now() + 15 * 60 * 1000; // safety cap
+  _runStatusInterval = setInterval(async () => {
+    const before = _tasks.filter(t => t.running).map(t => t.id).sort().join(',');
+    await _fetchTasks();
+    const running = _tasks.filter(t => t.running);
+    const after = running.map(t => t.id).sort().join(',');
+    // Only re-render when the running set actually changed — a blanket
+    // re-render every tick would close open kebab menus mid-click.
+    if (after !== before && _open) _renderMainView();
+    if (!running.length || Date.now() > _runStatusDeadline) {
+      clearInterval(_runStatusInterval);
+      _runStatusInterval = null;
+    }
+  }, 3000);
+}
+
+function _markTaskRunning(id) {
+  const t = _tasks.find(t => t.id === id);
+  if (t) t.running = true;
+  if (_open) _renderMainView();
+  _startRunStatusPolling();
+}
+
 async function _doRunNow(id, force = false) {
   try {
     await _runNow(id, force);
     if (uiModule) uiModule.showToast(force ? 'Task triggered in parallel' : 'Task triggered');
+    _markTaskRunning(id);
   } catch (e) {
+    if (/already running/i.test(e.message || '')) {
+      // Not an error worth alarming about — reflect the state on the card.
+      _markTaskRunning(id);
+      if (uiModule) uiModule.showToast('Task is already running');
+      return;
+    }
     // Mirror the polling notification surface so the user sees the same kind
     // of feedback they get for finished/failed tasks — a real browser
     // Notification when permission is granted, toast fallback otherwise.

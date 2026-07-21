@@ -6,6 +6,15 @@ services:
     volumes:
       - ${APP_DATA_DIR:-./data}:/app/data:z
       - ${APP_LOGS_DIR:-./logs}:/app/logs:z
+      # Quick Proposal editable prompts live in the source tree (git-tracked)
+      # and are written at runtime when the user saves a prompt edit. Bind-mount
+      # so those writes land on the host repo (and stay git-visible) instead of
+      # the container's ephemeral layer, which vanishes on rebuild (build+start.sh
+      # removes & recreates the container every run).
+      # (The case library used to be bind-mounted here too, but TODO_YY moved job
+      # storage to the DB — case_library/*.json is now one-time seed data only,
+      # never written at runtime, so it no longer needs a bind mount.)
+      - ./src/quick_proposal/prompts:/app/src/quick_proposal/prompts:z
       # Cookbook remote-server SSH identity. Odysseus can generate a key here;
       # add the shown public key to each remote server's authorized_keys.
       - ${APP_DATA_DIR:-./data}/ssh:/app/.ssh:z

@@ -109,3 +109,7 @@ graphify-out/
 temp
 src/quick_proposal/case_library/
 src/quick_proposal/knowledge_pack
+
+# QP baseline re-run scripts (local only)
+scripts/qp_baselines/
+solara.log

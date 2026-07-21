@@ -135,6 +135,18 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         user = _owner(request)
         return {"memory": memory_manager.load(owner=user)}
 
+    @router.get("/global")
+    def api_get_global_memory(request: Request):
+        """Return the owner's Tier-1 global memory document.
+
+        Machine-maintained (rewritten by the Memory Tidy task), so this is
+        read-only — there is deliberately no PUT counterpart. Must stay
+        registered before the /{memory_id} catch-all route below.
+        """
+        user = _owner(request)
+        from src.global_memory import load_global_memory_entry
+        return load_global_memory_entry(user)
+
     @router.post("/search")
     def search_memories(request: Request, query: str = Form(...), session_id: str = Form(None), category: str = Form(None)):
         """Search across all memories with optional filters."""

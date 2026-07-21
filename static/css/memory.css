@@ -1,0 +1,58 @@
+/* Memories modal — new/override styles (global-memory tab, memory bubbles).
+   Actively loaded via <link> from index.html AFTER style.css, so equal-specificity
+   rules here win over the legacy style.css memory rules. */
+
+/* Long memories scroll inside the bubble instead of being clipped. style.css
+   caps .memory-item at 200px and the synapse-sweep rule adds overflow:hidden
+   (#memory-list .memory-item, ~:11049), which silently truncated long entries.
+   The scrollbar goes on the text span only, so the category/source badge row
+   below it stays visible and the sweep ring keeps its overflow:hidden. */
+#memory-list .memory-item .memory-item-text {
+  max-height: 150px; /* item cap (200) − padding (16) − meta row (~24) − gaps */
+  overflow-y: auto;
+  padding-right: 4px; /* keep the scrollbar off the text */
+}
+
+.memory-global-updated {
+  font-size: 11px;
+  opacity: 0.55;
+  white-space: nowrap;
+}
+
+.memory-global-doc {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.25));
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.memory-global-heading {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent, var(--red));
+}
+
+.memory-global-heading:first-child {
+  margin-top: 0;
+}
+
+.memory-global-list {
+  margin: 2px 0 8px;
+  padding-left: 18px;
+}
+
+.memory-global-list li {
+  margin: 3px 0;
+}
+
+.memory-global-p {
+  margin: 4px 0;
+}

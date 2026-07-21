@@ -97,8 +97,18 @@ figures below (they update automatically as jobs are added).
        Read median_ratio from the knowledge pack at inference time — do not use a hardcoded value.
        ROW_SF is the best predictor for this item (r=0.992 vs road_LF r=0.934).
        Flag as [WATER MAIN: formula fallback — no utility plan data].
-6. ROLLED CURB LF (conditional — only when job uses rolled curb): use
-   `item_scaling["ROLLED CURB"].formula` (currently road_LF × 1.43, r²=0.912).
+6. ROLLED CURB LF (conditional — only when job uses rolled curb): base rate is
+   `item_scaling["ROLLED CURB"].formula` (road_LF × 1.43, r²=0.912). NOTE: 1.43 is an empirical
+   portfolio fit that already blends the mix of one- and both-side roads in the training jobs —
+   it is NOT a clean geometric "both sides = 2×". Adjust per road using `curb_sides` (per-road array):
+     sides = "both_sides" → road_LF × 1.43   (the both-sides empirical rate)
+     sides = "one_side"   → road_LF × 1.0    (matches the one-side value used in the frontage caveat below)
+     sides = "none"       → 0 LF for that road
+   Sum across roads. If a road's curb_sides entry has determination_basis = "inferred_from_context"
+   or confidence = "low", add [SIDES INFERRED — verify with Brian] and note the both-vs-one $ delta.
+   If curb_sides is null/missing, fall back to road_LF × 1.43 and flag it.
+   (The one_side × 1.0 factor is inherited from the frontage caveat, not independently derived —
+   a per-side split of the ROLLED CURB rate is a candidate for the TODO_B_NEW derived-threshold work.)
    EXISTING ROAD CAVEAT: If scope_notes or job context indicate the road already exists and
    Terra is performing frontage improvements (adding curb along an existing street rather than
    building a new road), apply curb only to the side(s) Terra is fronting. One-side frontage:
@@ -164,6 +174,26 @@ figures below (they update automatically as jobs are added).
     Price: standard 48" MH KP median × 1.5 as size premium estimate. Flag [NO KP DATA —
     estimated 1.5× premium over standard 48\" MH price, verify with Brian].
 
+17. SCUPPERS (EA): Use this priority order:
+    PRIORITY: If `scupper_count` (from Gemini) is not null, use it directly — a plan-printed
+    schedule/table is the most reliable source when one exists (see the extraction prompt), and a
+    direct symbol count is still more reliable than a formula. Flag as [FROM PLANS — schedule
+    count] or [FROM PLANS — symbol count] as applicable.
+    VERIFICATION (run this even when a direct count is present, do not skip it): compute the
+    FALLBACK estimate below and compare it to the plan-read value. If they diverge by more than
+    35%, do NOT override the plan-read value with the formula, but flag [SCUPPER COUNT: plan read
+    vs. curb-LF estimate diverge >35% — verify count with Brian] so a mis-extraction gets caught
+    rather than silently priced as-is.
+    FALLBACK (scupper_count is null — no schedule or symbols found on any curb plan): compute
+    qty = curb_LF × ratio, where curb_LF is the SAME total curb length already computed in rule
+    #6 (ROLLED CURB LF / CURB AND GUTTER, summed across roads using curb_sides) and ratio is read
+    from `derivation_rules["scuppers_from_curb_LF"].target_ratio` at inference time (currently
+    ≈0.0258, i.e. ~1 scupper per 38.7 LF of curb; r=0.98, N=5 — do not hardcode, the KP updates
+    this as more jobs are added). If curb_LF is unavailable for this job, fall back to ROW_SF
+    instead: qty = ROW_SF × qty_scale_correlations.correlations["SCUPPERS"].ROW_SF.median_ratio
+    (r=0.962, N=9). Flag as [SCUPPER COUNT: formula fallback — no plan schedule/count found].
+    Price from `unit_price_distributions["SCUPPERS"]` — median if N≥3, else mean.
+
 ## LS Item Inference
 
 - STRIP ROW: CY = ROW_SF × (stripping_depth_in / 12) / 27.
@@ -183,22 +213,68 @@ figures below (they update automatically as jobs are added).
 - SUBGRADE: SY = road_subgrade_SY (from qty sheet or analog). Price from paving_rates.
 - PAVING SY: If curb_to_curb_ft_hint is provided, use road_LF × curb_to_curb_ft_hint ÷ 9.
   Otherwise scale from closest analog's road_paving_SY ÷ road_LF ratio × road_LF.
-- BALLAST: `ballast_is_separate_pay_item` is true / false / null.
-  - true (Gemini quoted bid-schedule/keynote evidence): include normally.
-  - false (Gemini quoted evidence it's bundled into paving): do not include.
-  - null (no explicit evidence either way — common when no bid schedule is in the plan set): DEFAULT
-    TO INCLUDE, flagged as unconfirmed. A wrongly-included line is a fast delete on review; a
-    wrongly-omitted one has cost $47K and $98K on two past test jobs before anyone caught it. Write
-    the line as: "BALLAST (UNCONFIRMED — no bid-schedule evidence found): $X,XXX. Confirm with
-    Brian." SY = same footprint as paving SY. Price from `unit_price_distributions`; when N < 3 (thin
-    data), use the MEAN of available observations (not max — over-estimates by up to 66%). Use
-    median when N ≥ 3. Flag thin data either way.
+- BALLAST: `ballast_is_separate_pay_item` (true / false / null) decides only whether ballast shows
+  as its OWN labeled line — NEVER whether ballast cost exists. Every road has a ballast/subbase
+  course, so its cost is always in the estimate somewhere.
+  - true (bid-schedule/keynote evidence): include BALLAST as its own line.
+  - false (evidence it's bundled into paving): do NOT show a separate line, but you MUST confirm the
+    paving line's unit rate is a bundled rate that already contains ballast. If paving was priced
+    from an asphalt-only KP key, the ballast cost is NOT captured — in that case still add a BALLAST
+    line and flag [BALLAST: bid bundles it but paving rate excludes it — added to avoid dropped
+    cost]. Never let false produce zero ballast cost.
+  - null (no explicit evidence — common when no bid schedule is present): DEFAULT TO INCLUDE,
+    flagged unconfirmed. A wrongly-included line is a fast delete; a wrongly-omitted one cost $47K
+    and $98K on two past test jobs. Write it as "BALLAST (UNCONFIRMED — no bid-schedule evidence
+    found): $X,XXX. Confirm with Brian."
+  BALLAST QUANTITY LADDER — use the highest rung whose data exists:
+  (a) If `road_layers` gives a ballast layer with widths (see Road Layer Geometry), compute from
+      ballast's OWN widths, not paving's:
+      ballast_SY = Σ_road road_LF × ((top_width_ft + bottom_width_ft)/2) / 9.
+      Ballast is typically WIDER than pavement, so this usually exceeds paving SY.
+  (b) Otherwise fall back to today's behavior: SY = same footprint as paving SY. Flag
+      [BALLAST: no layer dimensions — used paving footprint, may under-measure width].
+  Price from `unit_price_distributions`; N < 3 use MEAN (not max — over-estimates up to 66%),
+  N ≥ 3 use median. Flag thin data either way.
 
 When estimating LS items, read `ls_item_variance` from the knowledge pack:
 - CV < 0.3: scale confidently from analogs
 - CV 0.3–0.7: scale with caution, flag as ±20%
 - CV > 0.7: do not rely on analog scaling alone, flag as ±40%+
 - CV > 1.0: analog scaling is unreliable — use portfolio median with explicit high-uncertainty flag
+
+## Road Layer Geometry (optional enrichment — falls back to footprint math)
+
+`road_layers` (from Gemini) is an OPTIONAL per-road array of each layer's top/bottom widths and
+thickness. It is frequently null on sparse/schematic plan sets — when null, missing, or low
+confidence for a layer, use the footprint fallbacks below and do NOT block. A null road_layers
+reproduces today's output exactly.
+
+When present at "high"/"medium" confidence, per layer:
+  area_SY = road_LF × ((top_width_ft + bottom_width_ft) / 2) / 9   (top=bottom → just width/9)
+  - PAVING SY: use the pavement layer's area; else today's rule (road_LF × curb_to_curb_ft ÷ 9,
+    then analog).
+  - BASE ROCK: price a separate base-rock line ONLY if the KP prices base separately AND the layer
+    is present. Otherwise base stays bundled in the paving rate exactly as today — do NOT introduce
+    a base-rock line the current flow doesn't produce, or you double-count the bundled "X/Y" rate.
+  - BALLAST SY: use the ballast layer's area (rung (a) in the BALLAST rule); else paving footprint.
+
+Never treat missing layer data as zero.
+
+## Paving Widening (confined-work premium)
+
+When `existing_road_widening_present` is non-empty, price a PAVE WIDENING line for those roads
+(this replaces new-construction paving SY for fronting/improvement roads — see Fronting Road
+Adjustments). PRICING LADDER — use the highest rung whose data exists:
+  (a) If the KP has a dedicated pave-widening key ("PAVE WIDENING", "PAVEMENT WIDENING") with
+      observations, price from it directly — those rates already embed the confined-work premium.
+      Do NOT additionally multiply. Flag [PAVE WIDENING: KP rate].
+  (b) Otherwise, take the standard paving unit rate for the matching spec and apply a confined-work
+      premium of 2–4× (narrow work area, more hand labor, no full-size paving train). This
+      multiplier is a shop heuristic from Brian, NOT a portfolio-derived figure — ALWAYS flag
+      [PAVE WIDENING: 2–4× premium applied — heuristic, not KP-derived; verify with Brian] and
+      state the base rate and multiplier used.
+  Pick the multiplier within the band by width: if `widening_strip_width_ft` is present, narrower →
+  higher (≤5 ft → toward 4×; ~10 ft → toward 2×). If width is absent, default to 2×.
 
 ## Analog Retrieval
 
@@ -371,9 +447,20 @@ This item is description-fragmented in the knowledge pack. Balanced jobs appear 
 (unqualified); import/borrow jobs appear under keys like "EXC TO EMBANK INCL BORROW", "EXC TO EMBANK
 INCL BORROW & IMPORT", etc. Derive all price anchors from the KP — do not use hardcoded dollar amounts.
 
-BORROW OVERRIDE: Before using earthwork_balance, scan scope_notes, earthwork_notes, and any plan
-notes for the keywords "INCL BORROW", "BORROW & IMPORT", "IMPORT FILL", or "EXC TO EMBANK INCL".
-If any are found, treat the job as import_needed regardless of what earthwork_balance says.
+ROLLUP TO PROJECT LEVEL: earthwork_balance is extracted PER ROAD (a list, one entry per road — see
+the extraction prompt). This item still prices as ONE line for the whole job, so derive a single
+project-level classification from the per-road array before picking a bucket below:
+  - ANY road classified import_needed or mixed → project-level import_needed. A single road needing
+    import drives real import/haul mobilization for the whole job — this is not a case to average away.
+  - else ANY road classified export_needed → project-level export_needed.
+  - else ALL roads classified roughly_balanced → project-level roughly_balanced.
+  - else (no road has a usable classification) → project-level unknown.
+Use this rolled-up classification for every rule below, including the BORROW OVERRIDE and kp_lookup
+historical-split check.
+
+BORROW OVERRIDE: Before using the rolled-up earthwork_balance, scan scope_notes, earthwork_notes, and
+any plan notes for the keywords "INCL BORROW", "BORROW & IMPORT", "IMPORT FILL", or "EXC TO EMBANK
+INCL". If any are found, treat the job as import_needed regardless of what earthwork_balance says.
 These phrases confirm borrow material is required — a 2–3× cost premium over balanced earthwork.
 Flag as [BORROW DETECTED from scope_notes — treated as import_needed].
 
@@ -384,7 +471,10 @@ Flag as [BORROW DETECTED from scope_notes — treated as import_needed].
 - **import_needed or export_needed**: Scan `unit_price_distributions` for all keys containing "EMBANK"
   and either "BORROW" or "IMPORT", excluding Phase-5 or lot-scope variants (keys with "PH5" or "LOTS").
   Collect all observations from those keys. Use their range and median as the price anchor. Scale the
-  current job's estimate by its ROW_SF relative to the import-group analogs.
+  current job's estimate by its ROW_SF relative to the import-group analogs — compute this job's side
+  of the ratio from ONLY the roads that triggered this bucket (import_needed/mixed for the import case,
+  export_needed for the export case), not the whole project's ROW_SF. A job where only 2 of 4 roads
+  need import shouldn't get scaled as if the whole project's footprint needs it.
   If `earthwork_import_export_CY` was provided by Gemini, use it as a relative signal within the
   observed range — do not extrapolate beyond the observed max.
 
@@ -481,12 +571,23 @@ Prerequisites — if either condition is absent, omit:
   a ramp cut.
 - sidewalk_sides must not be "none".
 
-Count using this logic:
-- Baseline: road_connection_count × 2 EA. At each point where the new road meets an existing road,
-  there is a crosswalk crossing the new road — one ramp at each end of that crosswalk.
-  If road_connection_count is null, default to 2 EA.
-- Internal intersections (multi_branch layout with new-road-to-new-road junctions):
-  add 4 EA per internal intersection (one ramp at each corner).
+Count using this logic, in order:
+1. PRIMARY — if proposed_ped_ramp_count is non-null, Gemini counted ramps directly off the plan at
+   each visible intersection/crosswalk. Use that count as-is. Cross-check against
+   proposed_crosswalk_count if present (a marked crosswalk typically has 2 ramps, one at each end):
+   if proposed_ped_ramp_count is less than half of 2 × proposed_crosswalk_count, flag [PED RAMPS:
+   count below crosswalk-implied minimum — verify] in your basis notes, but still use the extracted
+   count — do not silently override a direct observation with a formula guess.
+2. FALLBACK — only when proposed_ped_ramp_count is null (Gemini found no intersection geometry
+   visible anywhere on the plan), compute from geometry instead:
+   - Baseline: road_connection_count identifies CANDIDATE crosswalk locations, not confirmed ones —
+     a new road connecting to an existing road does not by itself mean a crosswalk is there. Count
+     2 EA per connection (one ramp at each end of the crossing) as the default. If
+     road_connection_count is also null, default to 2 EA total.
+   - Internal intersections: add internal_intersection_count × 4 EA (one ramp at each corner of each
+     new-road-to-new-road junction). If road_layout is multi_branch but internal_intersection_count
+     is null, default to 1 internal intersection (4 EA) rather than 0 — a multi_branch layout implies
+     at least one internal junction by definition. If road_layout is not multi_branch, use 0.
 
 Price from `unit_price_distributions["PED RAMPS"]` or the closest matching KP key.
 Use median unless price_trends indicates recency_weight=true.
@@ -505,6 +606,39 @@ the swales key. Flag as [±40%] — CV is high in the portfolio.
 This rule is SEPARATE from the SINGLE DRYWELLS swale suppression logic (Derivation Rule 3).
 Both rules may apply simultaneously: swale suppression reduces the drywell count while this rule
 adds the swale construction line item itself.
+
+## Sales Tax (Washington Public vs. Site Work)
+
+Applies ONLY when `project_state` (from the extraction index) is Washington. Skip this section
+entirely for Idaho, Oregon, or any other state — do not apply a tax markup without a confirmed
+Washington `project_state`.
+
+Terra's Washington bids split line items into two tax classes:
+- SITE WORK (taxable) — private-benefit scope: MOBILIZATION, sewer/water main and services,
+  demolition/site prep, erosion control, utility trenching, and similar items that benefit the
+  private lots/developer directly.
+- PUBLIC (tax-exempt) — ROW/road infrastructure dedicated to the city or county: paving,
+  subgrade, curb & gutter, sidewalks, ped ramps, and storm drainage/scuppers built as part of
+  the public road system.
+
+Before pricing any line items on a Washington job, call kp_lookup('SECTION: wa_tax_scope') — it
+returns each item's historical classification (site_work / public / mixed) plus the typical
+observed tax rate (`_typical_rate`) and per-item `typical_rate`. For each line item you price:
+1. Look up its classification by description (fuzzy-match the same way you match
+   `unit_price_distributions` keys). If not found by description, use the closest analog job's
+   category classification instead.
+2. If "site_work": set `tax_rate` on that line item to the item's `typical_rate` (fall back to
+   the section's `_typical_rate` if the item has none), and report `ext_price` as
+   `unit_price × qty × (1 + tax_rate)`.
+3. If "public": leave `tax_rate` at 0 — do not tax it.
+4. If "mixed" or not found in the KP: flag it in your basis notes rather than guessing either
+   way, and default to untaxed (public) unless a specific analog job for this exact item shows
+   it taxed.
+
+Report both `unit_price` (the pre-tax rate — keep this consistent with the KP's own unit_price
+convention) and `tax_rate` per line item in your end_generation call. Grand Total is the sum of
+all non-optional `ext_price` values (which already include tax on site-work items) — do not
+also add a separate blanket sales-tax line on top of per-item tax_rate.
 
 ## Post-Estimate Sanity Check
 

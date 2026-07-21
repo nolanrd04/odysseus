@@ -50,10 +50,26 @@ async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monke
         lambda *args, **kwargs: [("http://llm", "model", {})],
     )
 
+    import src.global_memory as gm
+    saved_global_docs = {}
+    monkeypatch.setattr(gm, "load_global_memory", lambda owner: "")
+    monkeypatch.setattr(gm, "save_global_memory", lambda owner, doc: saved_global_docs.__setitem__(owner, doc))
+
     prompts = []
+    global_prompts = []
 
     async def fake_llm_call_async(_candidates, **kwargs):
         prompt = kwargs["messages"][0]["content"]
+        # Tier-1 global-memory update pass (runs once per owner after the tidy).
+        # Must also stay owner-isolated: it carries memory texts, not ids.
+        if "GLOBAL MEMORY" in prompt:
+            global_prompts.append(prompt)
+            if "Alice" in prompt:
+                assert "Bob secret" not in prompt
+            else:
+                assert "Bob secret" in prompt
+                assert "Alice" not in prompt
+            return "## Identity & Preferences\n- test"
         prompts.append(prompt)
         if "alice-long" in prompt:
             assert "bob-keep" not in prompt
@@ -82,6 +98,8 @@ async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monke
     assert ok is True
     assert "removed 1" in message
     assert len(prompts) == 2
+    assert len(global_prompts) == 2
+    assert set(saved_global_docs) == {"alice", "bob"}
     saved = {m["id"]: m for m in _read_memories(data_dir)}
     assert set(saved) == {"alice-long", "alice-short", "bob-keep"}
     assert saved["alice-long"]["text"] == long_alice_text

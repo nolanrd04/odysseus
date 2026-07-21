@@ -1084,6 +1084,13 @@ class TaskScheduler:
                 self._set_run_progress(run_id, message)
 
             kwargs = {"owner": task.owner, "task_name": task.name, "progress_cb": _progress}
+            # Per-task Model override (Tasks UI "Model" field) — action functions
+            # that make their own LLM calls (e.g. consolidate_memory) read these
+            # to take priority over the Background Tasks/Utility/Default chain.
+            if task.model:
+                kwargs["model"] = task.model
+            if task.endpoint_url:
+                kwargs["endpoint_url"] = task.endpoint_url
             if task.action in ("run_script", "run_local", "ssh_command") and task.prompt:
                 kwargs["script" if task.action in ("run_script", "run_local") else "command"] = task.prompt
             # cookbook_serve carries its JSON config in task.prompt — feed it
@@ -2040,6 +2047,14 @@ class TaskScheduler:
                 )
         except Exception as e:
             logger.error(f"Task {task.id} MCP delivery failed: {e}")
+
+    def is_running(self, task_id: str) -> bool:
+        """True while a task is queued or executing (scheduled, chained, or manual).
+
+        Reads _executing without the lock — a racy read is fine for UI status
+        display, and this must stay sync-callable from route handlers.
+        """
+        return task_id in self._executing
 
     async def run_task_now(self, task_id: str, *, force: bool = False):
         """Manually trigger a task execution."""

@@ -38,8 +38,14 @@ read_index(section)
     do not price roads, lots, or infrastructure this analysis flags as out-of-contract or a
     future phase.
 
-kp_lookup(item)
-  → Five query forms:
+kp_lookup(item) OR kp_lookup(items=[...])
+  → Batch form (PREFERRED for Phase B pricing): pass items=[<name>, <name>, …] to price many
+    line items in ONE call. Returns {priced: {...stats-only...}, possibly_relevant: [...]}.
+    `possibly_relevant` lists co-occurring items you did NOT ask for (each with its strongest
+    related item, co_occurrence_rate, and support = how many of your items pull it in) — use it
+    to catch items Gemini may have missed, then price the ones you want in a follow-up batch.
+    The batch form omits per-job observations; call the single-item form to see those.
+  → Single form (item=<string>) returns FULL detail incl. per-job observations. Query forms:
     • item name e.g. '8" SEWER MAIN' — returns unit price distribution + price trend
     • 'item_pairs: <item name>' e.g. 'item_pairs: ROLLED CURB' — returns full pair metadata
       (r, n_shared_jobs, median_ratio_a_to_b, shared_jobs) for all pairs involving that item.
@@ -49,9 +55,57 @@ kp_lookup(item)
     • 'PREVALENCE_FILTER' — returns all KP items with portfolio prevalence scores, sorted
       highest first. Use this during Phase A to build the Gemini scope-item detection list.
     • 'SECTION: <name>' — retrieves a full KP section deferred from opening context.
-      Must fetch these five before pricing anything in Phase B (see Phase B KP Setup below).
+      Must fetch these five (plus wa_tax_scope, conditionally, if project_state is Washington)
+      before pricing anything in Phase B (see Phase B KP Setup below).
     Use PREVALENCE_FILTER during Phase A for scope item detection, item name during Phase B
     for every line item you price — do NOT guess prices from memory.
+
+create_memory(text, confirms_run=false)
+  → Saves a durable memory about this estimator or job to the persistent memory system,
+    recalled in future proposals and in regular chat. Use it sparingly — only for facts worth
+    remembering beyond this run:
+    • The estimator states a standing preference or rule (e.g. "always price Road 1-style
+      collector roads with 3" asphalt", "never include street lights unless the plans call
+      them out"). Save it with confirms_run=false. Write the text so it is self-contained
+      outside this conversation: include the job name, the item, and the specific values.
+    • The estimator EXPLICITLY CORRECTS a value in this run's proposal (a price, quantity,
+      or line item is wrong and they give the right one). Save the corrected summary with
+      confirms_run=true — this updates the run's auto-generated snapshot memory, removes its
+      provisional caveat, and marks it estimator-confirmed.
+    • The estimator SUPPLIES ACTUAL VALUES for this job — real bid line items, real unit
+      prices, or the real grand total — even when framed as "compare against these",
+      "validation", or "here's what we actually bid". Estimator-supplied actuals ARE
+      corrected values. MANDATORY: in the SAME turn as your comparison/analysis, also call
+      create_memory(confirms_run=true) with a self-contained summary of the actuals and the
+      largest divergences from your estimate (item, your value vs. actual). Do not skip this
+      because the message asked for analysis rather than a correction.
+    A follow-up question or a bare "looks good" does NOT qualify — leave the snapshot
+    provisional in that case, and do not call create_memory at all.
+    Do NOT save routine extraction results, values already in the index, or anything the
+    estimator did not state or confirm themselves.
+
+create_job(job_name, client, job_type, ...)
+  → Phase 6 (post-generation chat) ONLY — not available during Phase A/B. Adds this run's
+    priced proposal to the case-library knowledge base as a new job record (TODO_ZZ), for when
+    the estimator says something like "add this job to the knowledge base" or "save this one to
+    the case library". Deterministic data — this run's priced line items and extracted scale
+    metrics — is pulled from the run automatically; do not retype quantities/prices/scale numbers.
+    High-Stakes Field Rules pattern applies: before calling this tool, restate and confirm with
+    the estimator (do not guess or silently default):
+      • job_name, client — these have no pipeline source at all.
+      • job_type — no pipeline source has the case-library's exact vocabulary, but this run's
+        extracted project_type maps to a suggested default for the unambiguous cases (see the
+        create_job tool's job_type parameter description for the specific suggestion, if any,
+        on this run). Propose the suggestion to the estimator and confirm it rather than picking
+        blind; if there's no suggestion for this run's project_type, ask outright which vocabulary
+        value fits.
+      • any line item that should be flagged is_optional, via line_item_overrides.
+      • any line item whose category you're unsure of (a historical-most-common default is
+        applied automatically for anything you don't override — only override where it's wrong).
+      • if this run used the Washington tax split (wa_tax_scope), confirm the "mixed"-classified
+        items were resolved correctly — those are the ones most likely to need a human call.
+    Only call create_job after the estimator has confirmed these — a bare "yes add it" without
+    you first restating job_name/client/job_type back to them is not sufficient confirmation.
 
 ### Scope Item Detection — MUST complete before calling send_to_gemini
 
@@ -183,8 +237,9 @@ CRITICAL (block Phase B if missing):
                              For commercial/rural jobs, replace with building_count (IMPORTANT)
                              and proceed without blocking if lot_count is null.
   3.  curb_type            — "rolled", "standard", or "mixed"
-  4.  sidewalk_sides       — per-road array with at least one entry
+  4.  sidewalk_sides       — per-road array with at least one entry, each with determination_basis
                              (for rural, "none" entries are valid — do not re-request)
+      curb_sides           — per-road array (which sides have curb), same shape as sidewalk_sides
   5.  ROW_width_ft         — array of objects with 'roads' list and 'width'
   6.  stripping_depth_in   — integer or null-confirmed
   7.  project_type         — read from index (set by Phase 1 or UI picker); if absent, default to residential_subdivision
@@ -203,6 +258,49 @@ IMPORTANT (request if not present, but do not block Phase B if confirmed absent)
   18. strip_haul_off_required
   19. existing_road_widening_present
   20. building_count        — IMPORTANT for commercial jobs (lot_count_applicable = false)
+  21. pavement_spec          — surface spec as written from the typical section; null-confirmed if none
+  22. road_layers            — OPTIONAL per-road layer geometry; never blocks Phase B, null is fine
+  23. widening_strip_width_ft — OPTIONAL; only when existing_road_widening_present is non-empty
+  24. scupper_count           — prefer a plan-printed schedule/table if one exists; see the
+                                Scuppers derivation rule in system_prompt.txt for the curb-LF
+                                fallback used when this is null
+  25. project_state           — the US state the project is in (not just city/county); read
+                                from a cover-sheet address block, vicinity map, or municipality
+                                name. Needed to decide whether the Washington public-vs-site-work
+                                sales tax split applies (see the Sales Tax rule in
+                                system_prompt.txt). Do not block Phase B on this — if genuinely
+                                not determinable from any sheet, proceed without the tax split
+                                rather than guessing a state.
+
+### High-Stakes Field Rules (Reinforcement Table)
+
+Some fields above carry a specific extraction RULE in gemini_phase3.txt (an evidence
+requirement, a method Gemini must state, a schedule-first preference) beyond simple
+presence/absence. That rule is only installed in Gemini's STATIC system prompt — it is
+not automatically restated in your own dynamically-authored send_to_gemini messages, and
+Gemini volunteering it unprompted cannot be assumed. (Confirmed failure mode, session 17:
+a live 10,342-char Phase-A message covering ~20 fields never mentioned the ballast rule
+at all.) This table exists so a new high-stakes field gets ONE ROW here instead of a new
+hand-written Step 4 paragraph — add to this table first; only write bespoke prose (as
+earthwork_balance has below) when the logic genuinely can't be expressed as a satisfaction
+marker.
+
+Two obligations follow from being listed in this table:
+  (a) The FIRST send_to_gemini message that requests this field (Step 2a or Step 2b) must
+      include the Rule text below verbatim or in substance — not just the field name.
+  (b) Every read_index() pass (Step 1) checks any such field that IS present against its
+      Satisfaction Marker. A field can be "present" per the Required Fields Checklist and
+      still be RULE-UNSATISFIED — treat that the same as missing for QC purposes (Step 4a).
+
+| Field                          | Rule to restate on first request                                                                 | Satisfaction marker (what the write must contain to count)                                  |
+|---------------------------------|----------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
+| ballast_is_separate_pay_item    | "Only mark true if you can cite the specific bid-item note or spec callout treating ballast as its own pay item; otherwise false or null." | A quoted note/callout string, not a bare true/false.                                          |
+| sewer_main_LF / water_main_LF   | "State how you measured this — stationing arithmetic, scaled from a labeled dimension, or a plan-printed note — not a single unexplained number." | A stated method (stationing / scaled / note-stated) alongside the number.                     |
+| lot_grading_in_scope            | "If true, quote the exact grading note or callout. If false, confirm explicitly whether (a) no lot-grading/civil-site sheet exists at all, or (b) one exists but shows lots already at finished grade." | A quoted note (if true), or an explicit (a)/(b) confirmation (if false) — see Step 4 for the full false-handling rule. |
+| scupper_count                   | "Prefer a plan-printed schedule/table if one exists; state whether you used a schedule or counted symbols directly, and confirm you checked the curb plan even if the count is 0." | A stated source (schedule vs. symbol count) — not a bare number with no method noted.        |
+| sidewalk_thickness_spec         | "If this note describes more than one thickness (e.g. a driveway-approach thickening), also write a separate scope_items entry for the differing-thickness segment — do not let the spec text alone stand in for a scope line." | A scope_items entry exists for each distinct thickness the spec text names, OR an explicit statement that only one thickness applies project-wide. |
+| earthwork_balance               | See the full Step 4 paragraph below — this field's rule is per-road and mathematical (both-lines-required, stripping-depth threshold) and is enforced in code (end_generation is hard-rejected without a matching kp_lookup call). Listed here only so it isn't duplicated elsewhere. | See Step 4.                                                                                    |
+| project_state                   | "State the specific US state (not just city/county) — read it from a cover-sheet address block, vicinity map, or municipality name in the plan title block. This decides whether the Washington public-vs-site-work sales tax split applies. If genuinely not determinable from any sheet, say so explicitly rather than guessing." | A named US state, OR an explicit statement that no location text/address exists anywhere in the plan set. |
 
 ### Recognizing Gemini Activity (read this before judging Gemini "non-functional")
 
@@ -238,6 +336,10 @@ Step 2a — Go through the Required Fields Checklist above, field by field.
       sheet type where it should appear, and ask Gemini to look there now.
     → Example: "road_LF is still missing. Please check all plan_view pages for
       stationing labels or BEGIN/END CONSTRUCTION markers and write the road_LF array."
+  If the field you are requesting (CRITICAL or IMPORTANT) appears in the High-Stakes
+  Field Rules table above, your message must ALSO restate that field's Rule text — not
+  just the field name — on this first request. Do not wait for Step 4a to catch a rule
+  violation that a one-sentence addition here would have prevented.
 
 Step 2b — Check scope_items coverage.
   Call kp_lookup('PREVALENCE_FILTER') again to recall the full work-type list you sent
@@ -276,7 +378,15 @@ Step 4 — Check suspicious combinations (flag, send Gemini back once):
   not covered by the notes text and still require a live enhance_region redirect as described.
 
   - lot_count present but road_LF array empty → ask Gemini to check all plan_view pages
-  - any sidewalk_sides = "both_sides" AND curb_type = "rolled" → confirm on typical section
+  - sidewalk_sides / curb_sides where determination_basis = "inferred_from_context" (or
+    confidence = "low") → do NOT silently price it. In Phase B, carry the assumption forward
+    with a [SIDES INFERRED — verify with Brian] flag and state the $ impact of both/one/none,
+    rather than defaulting to both_sides and pricing 2× the SF.
+  - sidewalk_sides = "both_sides" AND determination_basis = "typical_section" only (never
+    confirmed on a plan view) → ask Gemini to confirm sides on a simple overall plat, since the
+    typical section is a template that may not match each road's actual extent.
+  - curb_sides disagrees with sidewalk_sides on a road (e.g. walk both sides but curb one side)
+    → allowed, but ask Gemini for a one-line reason so it isn't an extraction slip.
   - large_diameter_water_main_present = true AND water_main_LF < 200 → verify pipe labels
   - lot_grading_in_scope = true → ask Gemini to quote the exact note or callout it found
   - lot_grading_in_scope = false → this is NOT automatically a confident exclusion. Ask Gemini
@@ -290,25 +400,66 @@ Step 4 — Check suspicious combinations (flag, send Gemini back once):
     gets. A false accepted without this check has previously caused a six-figure missed scope
     item — see TODO_B_NEW in the session handoffs.
   - sewer_main_LF = water_main_LF exactly → ask Gemini to confirm these are truly equal
-  - earthwork_balance present (ANY confidence level, including "high") → call
-    kp_lookup('SECTION: earthwork_balance_prior') and check the entry for this job's
-    project_type. Do NOT skip this check just because confidence="high" — a wrong
-    high-confidence call is exactly what let a bad classification through unchallenged in a
-    past validated job. Ask Gemini to quote the exact cut/fill note, earthwork callout, or
-    import/export/haul-off language it found to support the classification. In the redirect,
-    cite the actual historical split for this project_type (e.g. "this portfolio's
+  - earthwork_balance present (ANY road entry with a non-null balance, at ANY confidence level
+    including "high" — this field is now a PER-ROAD list, not a single value; "present" means at
+    least one road entry qualifies) → call kp_lookup('SECTION: earthwork_balance_prior') and check
+    the entry for this job's project_type, comparing against the ROLLED-UP project-level
+    classification (same any-import-or-mixed-dominates rule as system_prompt.txt's Excavation to
+    Embankment section), not a single road's raw value. Do NOT skip this check just because
+    confidence="high" — a wrong high-confidence call is exactly what let a bad classification
+    through unchallenged in a past validated job. Ask Gemini to quote the exact cut/fill note,
+    earthwork callout, or import/export/haul-off language it found to support EACH road's
+    classification.
+    For EVERY road entry — including roughly_balanced ones, not just import_needed/export_needed —
+    that rests only on the profile line comparison (no explicit note), confirm two things: (a) BOTH
+    the existing-grade line and the proposed-grade line were actually visible for that road (a
+    roughly_balanced read from a view showing only the existing-grade line is missing data, not a
+    real classification — see the extraction prompt's BOTH LINES REQUIRED rule), and (b) the
+    proposed-vs-existing gap EXCEEDS the stripping depth over a sustained run before accepting
+    import_needed/export_needed/mixed — a strip-depth-sized offset is topsoil stripping, not
+    grading, and must be roughly_balanced. Checking roughly_balanced calls here matters just as
+    much as checking import/export ones: a confident roughly_balanced from an incomplete view is
+    how a real job's earthwork got underpriced by ~7x in a past validated job (see TODO_B_NEW in
+    the session handoffs) — do not assume "balanced" is the safe default that needs less scrutiny.
+    In the redirect, cite the actual historical split for this project_type (e.g. "this portfolio's
     subdivision_road jobs split roughly 5 import / 3 export / 2 balanced — there is no
     dominant pattern to lean on, so confirm this job's classification against its own plan
     notes rather than a portfolio default"). This field has proven unreliable across
     confidence levels in past validated jobs — see TODO_B_NEW in the session handoffs.
+    This check is enforced in code, not just this prompt: if any road's earthwork_balance entry
+    is present, end_generation is hard-rejected with a tool error until a kp_lookup call containing
+    "earthwork_balance_prior" has been made this run. Do the check on the natural pass
+    through Step 4 rather than waiting to discover the rejection at the end.
+
+Step 4a — High-Stakes Field Rule Compliance (generalized check):
+  On every read_index() pass, for each field in the High-Stakes Field Rules table above
+  that is present in the index (non-null or explicitly confirmed absent):
+    → Check whether its Satisfaction Marker is actually met — not just whether the field
+      has a value. A ballast field with a bare `true` and no cited note, a scupper_count
+      with a number but no stated source, or a sidewalk_thickness_spec describing two
+      thicknesses with only one scope_items entry, are all RULE-UNSATISFIED even though
+      the Required Fields Checklist would call them "present."
+    → For each RULE-UNSATISFIED field, send Gemini back ONCE, restating the Rule text
+      from the table (the same text you were supposed to include on the first request —
+      if it's still unsatisfied after being stated twice, that is itself worth noting in
+      Phase B, not just silently retried a third time).
+    → This redirect counts toward the same 2-round statistical re-check cap as Step 3/Step 4
+      (see below) — it is a check against an already-written value, not a missing-field
+      pursuit. If still unsatisfied after 2 rounds, accept the value at reduced confidence
+      and apply the corresponding Phase B fallback (flag it, do not price it silently).
+    → Do not treat a field newly added to the table (no existing Step 4 prose written for
+      it) as lower-priority than a field with a hand-written paragraph — the table carries
+      the same enforcement weight as prose; prose is only kept where the underlying logic
+      is too specific to compress into a marker (currently only earthwork_balance).
 
 ### QC Round Limit and Acceptance Rules
 
-The 2-round cap below applies ONLY to statistical re-checks: Step 3 (impossible values) and
-Step 4 (suspicious combinations) — cases where Gemini HAS already written a value and you are
-double-checking it because it looks implausible. It does NOT apply to Step 2a (pursuing a
-CRITICAL/IMPORTANT field that has never been extracted at all). These are different
-activities with different limits — do not collapse them into one shared counter.
+The 2-round cap below applies ONLY to statistical re-checks: Step 3 (impossible values),
+Step 4 (suspicious combinations), and Step 4a (high-stakes field rule compliance) — cases
+where Gemini HAS already written a value and you are double-checking it because it looks
+implausible or rule-unsatisfied. It does NOT apply to Step 2a (pursuing a CRITICAL/IMPORTANT
+field that has never been extracted at all). These are different activities with different
+limits — do not collapse them into one shared counter.
 
 MISSING-FIELD PURSUIT (Step 2a) — no fixed round cap:
   - Keep redirecting Gemini toward a still-missing CRITICAL field across as many
@@ -326,7 +477,7 @@ MISSING-FIELD PURSUIT (Step 2a) — no fixed round cap:
     NOT count as a failed attempt by itself — check read_index() first; if the field is
     still missing, that's when a redirect attempt counts.
 
-STATISTICAL RE-CHECK CAP (Step 3 / Step 4) — 2 rounds per flagged value:
+STATISTICAL RE-CHECK CAP (Step 3 / Step 4 / Step 4a) — 2 rounds per flagged value:
   CONFIRMATION ACCEPTANCE RULE — when to stop pushing back on a value:
     - If Gemini returns the same value on a re-check from the SAME source region: accept it.
       Do not ask again from the same source. Mark it [CONFIRMED BY GEMINI] in Phase B basis.
@@ -384,6 +535,10 @@ can reference them:
   kp_lookup('SECTION: ls_earthwork_rates')      — earthwork rate table for STRIP ROW / EXC TO EMBANK
   kp_lookup('SECTION: paving_rates')            — subgrade and paving unit rates
 
+If project_state is Washington, ALSO fetch (skip for every other state):
+  kp_lookup('SECTION: wa_tax_scope')            — public-vs-site-work sales tax classification;
+                                                   see the Sales Tax rule in system_prompt.txt
+
 ### Scope Items → Line Items
 
 Before writing any line items, read `scope_items` from the extraction index. For each entry:
@@ -400,9 +555,14 @@ Before writing any line items, read `scope_items` from the extraction index. For
 
 ### Pricing
 
-For every line item you price, call kp_lookup(item_name) to retrieve the current unit price
-distribution. Do not estimate prices from memory. The full distribution (median, mean, N,
-observations with dates) is available on demand — always fetch it before pricing each item.
+To retrieve current unit price distributions, call kp_lookup with a BATCH — pass
+items=[<name>, <name>, …] with all the line items you are about to price, in one call,
+rather than one call per item. Review the returned `possibly_relevant` list for co-occurring
+items Gemini may have missed and price the ones that apply (plus universals like MOBILIZATION
+that never appear in extraction) via a follow-up batch. Do not estimate prices from memory.
+The batch returns stats only (median, mean, N, date_range); if you need a specific item's raw
+per-job observations to reason about an outlier or a quantity effect, call the single-item form
+kp_lookup(item_name) for that one item.
 
 Use the estimator rules from the system_prompt (derivation rules, analog selection, pricing,
 sanity check) exactly as written. The extracted index values replace what Gemini would have
@@ -412,6 +572,7 @@ returned in the original single-pass pipeline:
   extracted["road_LF"]                      ← index["road_LF"]  (array — sum lengths for total road_LF)
   extracted["curb_type"]                    ← index["curb_type"]
   extracted["sidewalk_sides"]               ← index["sidewalk_sides"]  (per-road array)
+  extracted["curb_sides"]                   ← index["curb_sides"]      (per-road array)
   extracted["ROW_width_ft_hint"]            ← index["ROW_width_ft"]
   extracted["curb_to_curb_ft_hint"]         ← index["curb_to_curb_ft"]
   extracted["stripping_depth_in"]           ← index["stripping_depth_in"]
@@ -419,6 +580,7 @@ returned in the original single-pass pipeline:
   extracted["proposed_fire_hydrant_count"]  ← index["proposed_fire_hydrant_count"]
   extracted["proposed_manhole_count"]       ← index["proposed_manhole_count"]
   extracted["proposed_ped_ramp_count"]      ← index["proposed_ped_ramp_count"]
+  extracted["proposed_crosswalk_count"]     ← index["proposed_crosswalk_count"]
   extracted["sewer_main_LF"]               ← index["sewer_main_LF"]  (actual LF from plans)
   extracted["water_main_LF"]               ← index["water_main_LF"]  (actual LF from plans)
   extracted["existing_road_widening_present"] ← index["existing_road_widening_present"]
@@ -452,10 +614,15 @@ After the estimate, add one section:
 
 Once the full proposal is written (all sections above complete), call:
 
-  end_generation(grand_total=<dollar amount>)
+  end_generation(grand_total=<dollar amount>, line_items=[<one entry per priced line>])
 
-Pass the Grand Total as a number (e.g. 1234567.89). This is the required final step —
-do not call it before the complete proposal is written.
+Pass the Grand Total as a number (e.g. 1234567.89). Pass `line_items` as the same rows
+from your Line Item Budget table, structured as
+{description, unit, qty, unit_price, ext_price} per line — one entry per priced line,
+skip subtotal/header rows. This structured copy feeds automated accuracy testing against
+real bid actuals, so it must match the written table exactly, not a rounded or summarized
+version of it. This is the required final step — do not call it before the complete
+proposal is written.
 
 ---
 

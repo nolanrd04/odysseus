@@ -47,8 +47,68 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _pendingContinue = null; // Stores the stopped AI element to merge with new response
   let _proposalRunId = null;     // set when the active session is a proposal session
   let _proposalSessionId = null; // session ID paired with _proposalRunId
+  let _proposalCompactionChoice = null; // null = not yet asked; 'compacted' | 'skipped' once decided (TODO_QQ part 3)
   let _proposalCloseStream = null; // closes the active proposal EventSource from outside the closure
   let _proposalInvocationId = 0; // incremented each call; guard against concurrent EventSources
+
+  // True while a QP phase-6 continuation turn owns the current session. These
+  // turns have long *legitimate* silent gaps (no tool heartbeat, no thinking
+  // deltas — just Anthropic prefill latency, worse right after a compaction
+  // invalidates the prompt cache) that regularly exceed the 20s/60s thresholds
+  // the tab-recovery and stall-watchdog below were tuned for on ordinary chat.
+  // Both are already skipped for QP via the wall-clock response timeout (see
+  // _isProposalContinuation above it) — this extends that same exemption to
+  // them, since neither can meaningfully recover a QP turn anyway (tab-recovery
+  // reattaches via /api/chat/stream_status, which knows nothing about QP's
+  // separate _active_continuations tracking) and both are actively destructive
+  // here: tab-recovery wipes #chat-history via selectSession() mid-turn, and
+  // the stall banner's Stop button cancels the real backend generation.
+  function _isQpContinuationActive() {
+    return !!(_proposalRunId && sessionModule.getCurrentSessionId() === _proposalSessionId);
+  }
+
+  // Tears down the "Waiting for the manager…" bridge notice (spinner + elapsed
+  // timer + element) set up around the QP chat-stream fetch. Shared by
+  // _appendQpMessage (cleared on the first real event) and the reader loop's
+  // own end-of-turn cleanup (safety net if a turn errors before any event).
+  function _clearQpWaitNotice(box) {
+    if (!box) return;
+    if (box._qpWaitTimer) { clearInterval(box._qpWaitTimer); box._qpWaitTimer = null; }
+    if (box._qpWaitSpinner) { box._qpWaitSpinner.destroy(); box._qpWaitSpinner = null; }
+    if (box._qpWaitNotice) { box._qpWaitNotice.remove(); box._qpWaitNotice = null; }
+  }
+
+  // Spawns the "Waiting for the manager…" spinner + elapsed-time notice. Used both
+  // right after a QP chat turn is sent, and again after a retry_notice — a retry
+  // notice is itself a real SSE event, so _appendQpMessage's unconditional
+  // _clearQpWaitNotice() at its top already tore down the original spinner by the
+  // time the notice renders. Without spawning a fresh one here, the actual retried
+  // request's own prefill latency would render as a dead gap with nothing on
+  // screen until real content finally arrives.
+  function _showQpWaitNotice(box) {
+    if (!box) return;
+    _clearQpWaitNotice(box); // guard in case a previous notice was somehow left behind
+    const notice = document.createElement('div');
+    notice.className = 'msg msg-ai qp-retry-notice';
+    notice.innerHTML = '<div class="body"></div>';
+    const body = notice.querySelector('.body');
+    const spinner = spinnerModule.create('Waiting for the manager…', 'right', 'wave');
+    body.appendChild(spinner.createElement());
+    spinner.start();
+    box.appendChild(notice);
+    box._qpWaitNotice = notice;
+    box._qpWaitSpinner = spinner;
+    const start = Date.now();
+    box._qpWaitTimer = setInterval(() => {
+      const secs = Math.round((Date.now() - start) / 1000);
+      let msg;
+      if (secs < 20) msg = 'Waiting for the manager…';
+      else if (secs < 90) msg = `Still waiting (${secs}s) — this can take 1-2 minutes, especially right after compacting…`;
+      else msg = `Still working (${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s) — long responses can take a few minutes…`;
+      spinner.updateMessage(msg);
+    }, 1000);
+    uiModule.scrollHistory();
+  }
   const _chatClassifications = new Map(); // pageIdx → { sheet_type, importance, description, regions }
   let _chatClassifyRunId = null; // runId for the currently displayed proposal run
   const _IMPORTANCE_COLOR = { high: '#22c55e', medium: '#f59e0b', low: '#6b7280' };
@@ -989,9 +1049,98 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // --- Proposal mode: route to QP continuation endpoint ---
       if (_proposalRunId && sessionModule.getCurrentSessionId() === _proposalSessionId) {
         const _qpRunId = _proposalRunId;
+
+        // Kill the generic "processing" spinner/placeholder immediately — nothing
+        // should look like it's happening in the background while we wait on the
+        // compaction prompt below (previously this ran only after the prompt
+        // resolved, so the spinner kept animating underneath the modal).
         if (spinner) { spinner.destroy(); spinner = null; currentSpinner = null; }
         const _bodyDiv = holder ? holder.querySelector('.body') : null;
         if (_bodyDiv) _bodyDiv.innerHTML = '';
+
+        // TODO_QQ part 3: one-time, opt-in context compaction. Nothing happens
+        // automatically when a run finishes generating — the first time you send
+        // a phase-6 message for this run, ask whether to compact its persisted
+        // history first (large one-time extraction dumps the manager already
+        // consumed) before anything goes to the LLM. _proposalCompactionChoice
+        // is set from server state on load, or from this call, so it's asked at
+        // most once per run. This whole block runs BEFORE any fetch to the
+        // manager, so no network request happens until the prompt resolves.
+        if (_proposalCompactionChoice === null) {
+          const _qpChoice = await uiModule.styledChoice(
+            "Compact this proposal's context before continuing? This replaces large " +
+            "one-time extraction data (already used to build the proposal) with short " +
+            "placeholders in the conversation history, reducing token cost on this and " +
+            "every future message. Cancel sends nothing — your message is left in the box.",
+            { title: 'Compact context?', buttons: [
+                { label: 'Compact', value: 'compact', variant: 'primary' },
+                { label: 'Skip',    value: 'skip',    variant: 'secondary' },
+                { label: 'Cancel',  value: 'cancel',  variant: 'danger' },
+            ] }
+          );
+
+          if (_qpChoice === 'cancel' || _qpChoice === null) {
+            // Full abort — nothing was ever sent to the manager, nothing is
+            // persisted server-side. Undo the optimistic UI so no trace of this
+            // turn remains, and give the estimator their text back to resend later.
+            if (holder) holder.remove();
+            if (_userMsgEl) _userMsgEl.remove();
+            currentHolder = null;
+            messageInput.value = msg;
+            if (uiModule.autoResize) uiModule.autoResize(messageInput);
+            return;
+          }
+
+          const _wantsCompaction = _qpChoice === 'compact';
+
+          // Real-time status bubble for the compaction step itself — previously
+          // this ran silently, so a click on Compact/Skip looked identical to
+          // nothing happening at all until the manager call (separately) started
+          // streaming, if it ever visibly did.
+          const _compactNotice = document.createElement('div');
+          _compactNotice.className = 'msg msg-ai qp-retry-notice';
+          _compactNotice.style.cssText = 'opacity:0.6;font-style:italic;font-size:0.85em;padding:2px 0;';
+          _compactNotice.textContent = _wantsCompaction ? 'Compacting context…' : 'Skipping compaction…';
+          box.appendChild(_compactNotice);
+          uiModule.scrollHistory();
+
+          try {
+            const _compactRes = await fetch(`${API_BASE}/api/quick_proposal/runs/${_qpRunId}/compact-context`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ apply: _wantsCompaction }),
+            });
+            const _compactData = _compactRes.ok ? await _compactRes.json() : null;
+            _proposalCompactionChoice = _compactData?.choice || (_wantsCompaction ? 'compacted' : 'skipped');
+            if (_proposalCompactionChoice === 'compacted') {
+              const _n = _compactData?.rows_compacted ?? 0;
+              const _c = _compactData?.chars_saved ?? 0;
+              _compactNotice.textContent = _n
+                ? `Compacted ${_n} item${_n === 1 ? '' : 's'} (≈${_c.toLocaleString()} characters removed from context).`
+                : 'Nothing to compact — sending your message as-is.';
+            } else {
+              _compactNotice.textContent = 'Compaction skipped — sending your message as-is.';
+            }
+          } catch (e) {
+            console.warn('[proposal-mode] compaction request failed:', e);
+            _proposalCompactionChoice = _wantsCompaction ? 'compacted' : 'skipped';
+            _compactNotice.textContent = 'Compaction request failed — sending your message as-is.';
+          }
+          uiModule.scrollHistory();
+        }
+
+        // Bridge notice between "message sent" and the first live SSE event —
+        // first-token latency can be a lot longer than usual right after a
+        // compaction (it invalidates the prompt cache for this turn) or an
+        // extended-thinking retry, and with the spinner gone there was
+        // otherwise nothing at all on screen during that gap. Claude models
+        // that don't support extended thinking (e.g. claude-sonnet-5) never
+        // produce a "thinking" bubble either, so this is the ONLY visible sign
+        // of life during a long prefill — a live spinner + elapsed-time
+        // counter, not just static text, so it's visibly still running rather
+        // than looking identical to a dead page. _appendQpMessage clears this
+        // (spinner, timer, and element) the moment any real event arrives.
+        _showQpWaitNotice(box);
 
         // Rendering is delegated entirely to _appendQpMessage — the same
         // per-round-bubble renderer the live pipeline SSE panel already uses
@@ -1096,6 +1245,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         clearResponseTimeout();
         if (holder) { holder.remove(); holder = null; }
         currentHolder = null;
+        // Safety net: normally cleared by the first extraction_message (see
+        // _appendQpMessage), but a turn that errors before any event arrives
+        // would otherwise leave "Waiting for the manager…" stuck on screen.
+        _clearQpWaitNotice(document.getElementById('chat-history'));
         uiModule.scrollHistory();
         return; // finally block handles isStreaming=false and button/input reset
       }
@@ -3402,6 +3555,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // focus transition to fire at all. Poll _lastReaderActivity continuously
     // so a genuinely silent stream gets a visible "still working?" banner
     // with a manual Nudge/Stop, instead of looking cut off forever.
+    if (_isQpContinuationActive()) return; // see _isQpContinuationActive for why
     if (_stallWatchdog) { clearInterval(_stallWatchdog); _stallWatchdog = null; }
     _removeStallBanner();
     _lastReaderActivity = Date.now();
@@ -3896,6 +4050,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
       if (!isStreaming) return;
+      if (_isQpContinuationActive()) return; // see _isQpContinuationActive for why
 
       // Stream claims to be running — check if reader is actually alive
       const staleSince = Date.now() - _lastReaderActivity;
@@ -5553,6 +5708,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (rerunTrigger) {
         const rRunId = rerunTrigger.dataset.runId;
         if (!rRunId) return;
+        const _isContinue = rerunTrigger.dataset.resumeDefault === '1';
+        const _continueLabel = rerunTrigger.dataset.continueLabel || 'Extraction';
         const form = document.createElement('div');
         form.className = 'qp-chat-rerun-form';
         form.innerHTML = `
@@ -5565,15 +5722,22 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         rerunTrigger.replaceWith(form);
         const geminiSel = form.querySelector('[data-role="gemini"]');
         const managerSel = form.querySelector('[data-role="manager"]');
+        if (_isContinue) {
+          // Continuing an interrupted run: resume so prior values/log/chat are preserved and the
+          // pipeline picks up from where it left off rather than truncating.
+          form.querySelector('.qp-chat-rerun-resume').checked = true;
+          form.querySelector('.qp-chat-rerun-go').textContent = `Continue: ${_continueLabel}`;
+        }
         if (window.quickProposalModule?.loadModels) {
           window.quickProposalModule.loadModels(geminiSel, { preferClaude: false });
           window.quickProposalModule.loadModels(managerSel, { preferClaude: true });
         }
         form.querySelector('.qp-chat-rerun-cancel').onclick = () => {
           const btn = document.createElement('button');
-          btn.className = 'qp-chat-rerun-btn';
+          btn.className = _isContinue ? 'qp-chat-rerun-btn qp-chat-continue-btn' : 'qp-chat-rerun-btn';
           btn.dataset.runId = rRunId;
-          btn.textContent = 'Re-run extraction';
+          if (_isContinue) { btn.dataset.resumeDefault = '1'; btn.dataset.continueLabel = _continueLabel; }
+          btn.textContent = _isContinue ? `Continue: ${_continueLabel} →` : 'Re-run extraction';
           form.replaceWith(btn);
         };
         form.querySelector('.qp-chat-rerun-go').onclick = async () => {
@@ -5738,6 +5902,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   function _appendQpMessage(data) {
     const box = document.getElementById('chat-history');
     if (!box) return;
+    _clearQpWaitNotice(box);
     if (!box._qpToolNodes) box._qpToolNodes = new Map();
     if (!box._qpPendingMetrics) box._qpPendingMetrics = {};
     const esc = uiModule.esc;
@@ -5851,7 +6016,23 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       uiModule.scrollHistory();
       return;
 
-    } else if (data.role === 'retry_notice' || data.role === 'region_preview') {
+    } else if (data.role === 'retry_notice') {
+      // Previously a silent no-op — a multi-second gap with literally nothing
+      // rendered (spinner already torn down by this point) looked identical
+      // to a hung/dead turn. Render a small transient status line instead.
+      const notice = document.createElement('div');
+      notice.className = 'msg msg-ai qp-retry-notice';
+      notice.style.cssText = 'opacity:0.6;font-style:italic;font-size:0.85em;padding:2px 0;';
+      notice.textContent = data.text || 'Retrying…';
+      box.appendChild(notice);
+      // The retry/model-swap itself is a fresh request with its own prefill delay —
+      // re-spawn the loading spinner so there's still visible life on screen while
+      // it runs. The next real event (thinking/text/error/etc.) clears it as usual
+      // via _clearQpWaitNotice at the top of this function.
+      _showQpWaitNotice(box);
+      return;
+
+    } else if (data.role === 'region_preview') {
       return;
 
     } else if (data.role === 'tool_call') {
@@ -5909,6 +6090,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     const _myInvId = ++_proposalInvocationId; // stamp this call; any earlier concurrent call is now stale
     _proposalRunId = null;
     _proposalSessionId = null;
+    _proposalCompactionChoice = null; // re-hydrated below from server state; re-ask if a fetch fails
     // Close any previous EventSource immediately so it can't compete for SSE events
     if (_proposalCloseStream) { _proposalCloseStream(); _proposalCloseStream = null; }
     if (sessionModule.getCurrentSessionId() !== sessionId) return;
@@ -5967,6 +6149,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             if (sessionModule.getCurrentSessionId() !== sessionId) return;
             if (res.ok) {
               const results = await res.json();
+              _proposalCompactionChoice = results.compaction_choice || null;
               const root = _buildChatPipelineRoot();
               _rebuildFromServerResults(root, results, runId);
               if (cached) {
@@ -6048,6 +6231,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const _phaseRows = new Map();     // phase key → row DOM element
         const _classifiedPages = new Map(); // pageIdx → classification data
         const _seededPhases = new Set();  // phases already rendered as ✓ from server seed
+        // Label for the resume/Continue button = the next phase this run picks up at, set from the
+        // reconstructed phase state below (mirrors the live gate-button labels).
+        let _resumeNextLabel = 'Extraction';
 
         const box = document.getElementById('chat-history');
         const _livePanel = document.getElementById('qp-pipeline-panel');
@@ -6071,8 +6257,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               // where SSE events for already-completed phases were consumed by the previous client.
               const _ev = _run.extracted_values || {};
               const _allClassified = _pages.length > 0 && _pages.every(p => p.sheet_type);
-              const _someClassified = !_allClassified && _pages.some(p => p.sheet_type);
+              const _anyClassified = _pages.some(p => p.sheet_type);
               const _phase3Done = _ev.plan_completeness != null;
+              // A phase5-only rerun (_run_phase5_only) never revisits phase2 — it requires
+              // classifications to already be saved and just imports them. So once phase3 is
+              // done, classification MUST already be finalized (imported from the prior run),
+              // even if a page or two never classified successfully (e.g. a failed Gemini call
+              // that was never individually reclassified). Only treat classification as
+              // "still mid-flight" when phase3 hasn't run yet — that's the one case where a
+              // partial classification set could mean the original sweep is still in progress.
+              const _someClassified = _anyClassified && !_allClassified && !_phase3Done;
               // Whether phase5 (extraction) has actually finished — NOT the same as "has produced
               // at least one value". Phase5 can run up to 60 tool-call turns after its first value
               // lands, so using Object.keys(extracted_values).length as a done-proxy (the old bug,
@@ -6081,6 +6275,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               // `if (status !== 'complete')` guard above), so phase5 must never be seeded ✓ here —
               // only "not started" (no row) or "running" (spinner) are valid states in this branch.
               const _phase45Done = _run.status === 'complete';
+              _resumeNextLabel = _phase3Done ? 'Extraction' : 'Completeness Scoring';
               const _phase5Running = _phase3Done && !_phase45Done;
               const _seedPhaseLabels = {
                 load: 'Rendering pages…', index: 'Loading knowledge base…',
@@ -6092,7 +6287,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               const _seedDonePhases = [];
               if (_pages.length > 0) _seedDonePhases.push('load', 'index');
               if (_ev.project_type != null) _seedDonePhases.push('phase1');
-              if (_allClassified) _seedDonePhases.push('phase2');
+              // Same reasoning as _someClassified above: any classification data (not
+              // necessarily every page) plus phase3 already done means classification is
+              // over and done with, not something this rerun will touch again.
+              if (_allClassified || (_anyClassified && _phase3Done)) _seedDonePhases.push('phase2');
               if (_phase3Done) _seedDonePhases.push('phase3');
               // phase4 (building the extraction index) reliably finishes near-instantly once phase3
               // is done and before phase5 starts (see _run_phase5_only) — safe to seed done from _phase3Done.
@@ -6152,7 +6350,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
               // Render classification grid now — placed correctly below the ✓ phase rows added above.
               // For live fresh runs (seed has no pages) the grid renders at phase2_complete via SSE instead.
-              if (_allClassified && _classifiedPages.size > 0) {
+              // Deliberately not gated on _allClassified — a run with one or two pages that never
+              // classified successfully should still show the grid for every page that did (see
+              // _someClassified above for why classification is treated as "done" in that case).
+              if (_classifiedPages.size > 0) {
                 const _seedClassifyWrap = _liveMain.querySelector('.qp-chat-classify-wrap');
                 if (_seedClassifyWrap && !_seedClassifyWrap.querySelector('.qp-chat-classify-grid')) {
                   _renderClassificationGrid(_seedClassifyWrap, _classifiedPages, runId);
@@ -6178,7 +6379,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   _pipelinePanel?.appendChild(_gateBtn);
                   _gateBtn.onclick = () => { _gateBtn.disabled = true; _gateBtn.textContent = '…'; _doAdvance().then(() => _gateBtn.remove()); };
                 }
-              } else if (_allClassified && !_phase3Done && !_phase45Done) {
+              } else if (_allClassified && !_phase3Done && !_phase45Done && _run.status === 'running') {
                 if (_autoMode) {
                   _doAdvance();
                 } else {
@@ -6188,7 +6389,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   _pipelinePanel?.appendChild(_gateBtn);
                   _gateBtn.onclick = () => { _gateBtn.disabled = true; _gateBtn.textContent = '…'; _doAdvance().then(() => _gateBtn.remove()); };
                 }
-              } else if (_phase3Done && !_phase45Done) {
+              } else if (_phase3Done && !_phase45Done && _run.status === 'running') {
                 if (_autoMode) {
                   _doAdvance();
                 } else {
@@ -6246,6 +6447,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           });
           const _phasesList = _liveMain?.querySelector('.qp-chat-phases-list');
           if (_phasesList && runId) {
+            // Continue-from-checkpoint: reuses saved classifications and picks the pipeline back up
+            // (completeness → notes → scope → extraction) via the phase5-only rerun with resume
+            // defaulted on — so no completed work is lost. Distinct from a fresh "Re-run extraction".
+            const _contBtn = document.createElement('button');
+            _contBtn.className = 'qp-chat-rerun-btn qp-chat-continue-btn';
+            _contBtn.dataset.runId = runId;
+            _contBtn.dataset.resumeDefault = '1';
+            _contBtn.dataset.continueLabel = _resumeNextLabel;
+            _contBtn.textContent = `Continue: ${_resumeNextLabel} →`;
+            _phasesList.appendChild(_contBtn);
+
             const _rerunBtn = document.createElement('button');
             _rerunBtn.className = 'qp-chat-rerun-btn';
             _rerunBtn.dataset.runId = runId;
@@ -6312,6 +6524,23 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             if (sessionModule.getCurrentSessionId() !== sessionId) { _close(); return; }
             try {
               const d = JSON.parse(e.data);
+              // A phase actively starting means we are NOT paused at a gate — clear any stale
+              // "Continue →" advance button (a seed-created one for a gate this resume path doesn't
+              // stop at, or a prior gate we've since advanced past). The real gate re-creates it
+              // via the phase_gate handler below.
+              _liveMain?.querySelector('.qp-chat-advance-btn')?.remove();
+              // A phase past classification starting means classification is finalized. A resume
+              // imports saved classifications and never re-runs phase2, so its phase_complete for
+              // phase2 never arrives — resolve any stuck "Classifying pages" spinner here.
+              if (!['load', 'index', 'phase1', 'phase2'].includes(d.phase)) {
+                const _p2 = _phaseRows.get('phase2');
+                if (_p2 && _p2.classList.contains('running')) {
+                  _p2.classList.remove('running');
+                  _p2.classList.add('done');
+                  _p2.querySelector('.qp-chat-phase-spinner')?.replaceWith(
+                    Object.assign(document.createElement('span'), { className: 'qp-chat-phase-check', textContent: '✓' }));
+                }
+              }
               // Skip phases already shown as ✓ by the server seed (avoid duplicate rows)
               if (_seededPhases.has(d.phase)) return;
               // Skip phase2/phase5 if seed already added a running spinner for it

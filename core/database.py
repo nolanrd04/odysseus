@@ -1,6 +1,7 @@
 import os
 import logging
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, Float, ForeignKey, JSON, Index, func, text
@@ -285,6 +286,164 @@ class QpGeneration(Base):
     __table_args__ = (
         Index('ix_qp_generations_run', 'run_id', 'generation_index'),
     )
+
+
+class QpActual(Base):
+    """Real bid/contract actuals for a QP run, entered by hand (pasted by the
+    estimator, written by Claude) for proposal-vs-actual comparison — TODO_B_NEW.
+    One row per run_id: the real-world outcome is a single fact even when a run
+    has multiple QpGeneration attempts.
+    """
+    __tablename__ = "qp_actuals"
+
+    id             = Column(String, primary_key=True, index=True)
+    run_id         = Column(String, nullable=False, unique=True, index=True)
+    actual_total   = Column(Float, nullable=True)
+    actual_values  = Column(JSON, nullable=True)  # field_name -> value, mirrors extracted_values shape
+    notes          = Column(Text, nullable=True)
+    created_at     = Column(DateTime, default=utcnow_naive, nullable=False)
+    updated_at     = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
+
+
+class QpJobData(Base):
+    """Root of the Quick Proposal case-library job record — the canonical library
+    that backs the brain-window Jobs tab and the knowledge-pack derivation.
+
+    Migrated from the per-file JSON store at src/quick_proposal/case_library/*.json
+    (TODO_YY): those files were baked into the Docker image and their runtime writes
+    were ephemeral/stale on the macOS bind mount. The record is normalized across
+    five tables (this + details/scale_metrics/revisions/line_items); each table keeps
+    an ``extra`` JSON column for keys not promoted to typed columns so the full
+    document round-trips losslessly (the job form and the derivation both consume the
+    whole reassembled dict). See ``src/quick_proposal/case_store.py`` for shred /
+    reassemble. ``job_name`` doubles as the id everywhere (run selection, KP scoping,
+    actuals pairing) so it is unique; ``slug`` is the old filename stem / route key.
+
+    ``extra`` here holds the un-modeled root sections: ``quantities_dwg``,
+    ``quantities_qty_sheet``, ``derived.dollar_per_unit``, ``derived.rollups``,
+    ``flags``, ``links``, and any future top-level keys.
+    """
+    __tablename__ = "qp_job_data"
+
+    slug                   = Column(String, primary_key=True, index=True)
+    job_name               = Column(String, nullable=False, unique=True, index=True)
+    schema_version         = Column(String, nullable=True)
+    built_at               = Column(String, nullable=True)
+    primary_proposal_index = Column(Integer, default=0)
+    extra                  = Column(JSON, nullable=True)
+    created_at             = Column(DateTime, default=utcnow_naive, nullable=False)
+    updated_at             = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
+
+    details   = relationship("QpJobDetails", uselist=False, back_populates="job",
+                             cascade="all, delete-orphan")
+    scale     = relationship("QpJobScaleMetrics", uselist=False, back_populates="job",
+                             cascade="all, delete-orphan")
+    revisions = relationship("QpJobRevision", back_populates="job",
+                             cascade="all, delete-orphan", order_by="QpJobRevision.revision_index")
+
+
+class QpJobDetails(Base):
+    """Per-job identity + classification (1:1 with QpJobData). ``identity_extra`` /
+    ``classification_extra`` carry any keys of those two sub-objects not promoted
+    to columns (e.g. a duplicated ``job_name`` inside identity)."""
+    __tablename__ = "qp_job_details"
+
+    job_slug             = Column(String, ForeignKey("qp_job_data.slug", ondelete="CASCADE"),
+                                  primary_key=True)
+    # identity.*
+    client               = Column(String, nullable=True)
+    client_location      = Column(String, nullable=True)
+    local_folder         = Column(String, nullable=True)
+    true_job_number      = Column(String, nullable=True)
+    proposal_numbers     = Column(JSON, nullable=True)
+    identity_extra       = Column(JSON, nullable=True)   # engineering_firm, job_location, etc.
+    # classification.*
+    job_type             = Column(String, nullable=True, index=True)
+    job_type_source      = Column(String, nullable=True)
+    classification_extra = Column(JSON, nullable=True)
+
+    job = relationship("QpJobData", back_populates="details")
+
+
+class QpJobScaleMetrics(Base):
+    """Per-job ``derived.scale_metrics`` (1:1 with QpJobData). The numeric metrics
+    are promoted to columns for cross-job querying; the ``*_source`` / ``*_labeled``
+    / ``*_crosscheck`` provenance fields live in ``extra``."""
+    __tablename__ = "qp_job_scale_metrics"
+
+    job_slug           = Column(String, ForeignKey("qp_job_data.slug", ondelete="CASCADE"),
+                                primary_key=True)
+    lot_count          = Column(Integer, nullable=True)
+    lot_area_sf        = Column(Integer, nullable=True)
+    road_LF            = Column(Float, nullable=True)
+    ROW_SF             = Column(Integer, nullable=True)
+    stripping_depth_in = Column(Integer, nullable=True)
+    road_subgrade_SY   = Column(Integer, nullable=True)
+    road_paving_SY     = Column(Integer, nullable=True)
+    ballast_CY         = Column(Float, nullable=True)
+    fronting_LF        = Column(Float, nullable=True)
+    extra              = Column(JSON, nullable=True)
+
+    job = relationship("QpJobData", back_populates="scale")
+
+
+class QpJobRevision(Base):
+    """One proposal/revision of a job (1:many under QpJobData), ordered by
+    ``revision_index``. ``extra`` carries ``proposal_number``, ``parse_warnings``
+    and any keys not promoted; line items live in QpLineItem."""
+    __tablename__ = "qp_job_revisions"
+
+    id                          = Column(String, primary_key=True, index=True,
+                                         default=lambda: uuid.uuid4().hex)
+    job_slug                    = Column(String, ForeignKey("qp_job_data.slug", ondelete="CASCADE"),
+                                         nullable=False, index=True)
+    revision_index              = Column(Integer, nullable=False, default=0)
+    is_primary                  = Column(Boolean, default=False)
+    has_optional_items          = Column(Boolean, default=False)  # was the `optional_items` key present (even if empty)
+    source_file                 = Column(String, nullable=True)
+    revision_label              = Column(String, nullable=True)
+    estimate_label              = Column(String, nullable=True)
+    proposal_date               = Column(String, nullable=True)
+    total_reconciled            = Column(Float, nullable=True)
+    grand_total                 = Column(Float, nullable=True)
+    grand_total_raw             = Column(Float, nullable=True)
+    grand_total_mismatch        = Column(Boolean, nullable=True)
+    total_unreconciled_delta    = Column(Float, nullable=True)
+    line_items_sum              = Column(Float, nullable=True)
+    line_items_sum_matches_total = Column(Boolean, nullable=True)
+    exclusions_text             = Column(Text, nullable=True)
+    extra                       = Column(JSON, nullable=True)
+
+    job        = relationship("QpJobData", back_populates="revisions")
+    line_items = relationship("QpLineItem", back_populates="revision",
+                              cascade="all, delete-orphan", order_by="QpLineItem.position")
+
+
+class QpLineItem(Base):
+    """One line item of a revision (1:many under QpJobRevision), ordered by
+    ``position``. ``list_kind`` distinguishes the record's ``line_items`` array
+    from its ``optional_items`` array so both reassemble in place. ``extra`` carries
+    the ``*_raw`` provenance fields."""
+    __tablename__ = "qp_line_items"
+
+    id          = Column(String, primary_key=True, index=True,
+                         default=lambda: uuid.uuid4().hex)
+    revision_id = Column(String, ForeignKey("qp_job_revisions.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    position    = Column(Integer, nullable=False, default=0)
+    list_kind   = Column(String, nullable=False, default="line_item")  # 'line_item' | 'optional'
+    description = Column(Text, nullable=True, index=True)
+    category    = Column(String, nullable=True)
+    unit        = Column(String, nullable=True)
+    qty         = Column(Float, nullable=True)
+    unit_price  = Column(Float, nullable=True)
+    ext_price   = Column(Float, nullable=True)
+    tax_rate    = Column(Float, nullable=True)
+    is_optional = Column(Boolean, nullable=True)
+    mismatch    = Column(Boolean, nullable=True)
+    extra       = Column(JSON, nullable=True)
+
+    revision = relationship("QpJobRevision", back_populates="line_items")
 
 
 class GalleryAlbum(TimestampMixin, Base):
@@ -1818,6 +1977,53 @@ def _migrate_seed_email_account():
 # Any future migrations or schema changes that temporarily violate foreign-key
 # constraints will fail. To perform such operations, foreign_keys must be
 # temporarily disabled around the migration workflow.
+def _migrate_seed_qp_case_library():
+    """One-time (idempotent) seed of the qp_case_library tables from the legacy
+    per-file JSON store (src/quick_proposal/case_library/*.json). Runs only when
+    the qp_job_data table is empty, so it imports the shipped starter jobs on first
+    boot and then never touches user edits again. After this, the DB is
+    authoritative and the JSON files are frozen seed data (git history); TODO_YY.
+    Safe to call every startup — a non-empty table short-circuits before any file
+    read. Each file is shredded into the five normalized tables via case_store."""
+    import json as _json
+    from pathlib import Path as _Path
+    db = SessionLocal()
+    try:
+        if db.query(QpJobData).count() > 0:
+            return
+        case_dir = _Path(__file__).resolve().parent.parent / "src" / "quick_proposal" / "case_library"
+        if not case_dir.is_dir():
+            return
+        from src.quick_proposal.case_store import build_job_rows
+        seeded = 0
+        seen_names: set[str] = set()
+        for path in sorted(case_dir.glob("*.json")):
+            try:
+                content = _json.loads(path.read_text(encoding="utf-8"))
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"qp_case_library seed: skip {path.name}: {e}")
+                continue
+            if not isinstance(content, dict):
+                continue
+            job_name = (content.get("job_name") or path.stem).strip()
+            key = job_name.lower()
+            if not job_name or key in seen_names:
+                logging.getLogger(__name__).warning(
+                    f"qp_case_library seed: skip {path.name}: missing/duplicate job_name '{job_name}'")
+                continue
+            seen_names.add(key)
+            db.add(build_job_rows(path.stem, content))
+            seeded += 1
+        if seeded:
+            db.commit()
+            logging.getLogger(__name__).info(f"qp_case_library seed: imported {seeded} jobs from {case_dir}")
+    except Exception as e:
+        db.rollback()
+        logging.getLogger(__name__).warning(f"qp_case_library seed failed: {e}")
+    finally:
+        db.close()
+
+
 def init_db():
     """
     Initialize the database by creating all tables.
@@ -1871,6 +2077,7 @@ def init_db():
     _migrate_backfill_task_folders()
     _migrate_add_proposal_run_id_column()
     _migrate_externalize_chat_attachment_blobs()
+    _migrate_seed_qp_case_library()
 
 
 def _migrate_externalize_chat_attachment_blobs():

@@ -4,7 +4,10 @@
 
 These files were extracted from `/static/style.css` as a modularization effort. However, **`/static/index.html` still only loads `/static/style.css`** (37k lines, no `@import`). These individual files are not yet referenced by any HTML or JS — they exist as reference/future use.
 
-**Exception**: `quick_proposal.css` IS actively loaded — injected dynamically by `static/js/quick_proposal/ui.js:injectStyles()`.
+**Exceptions**:
+- `quick_proposal.css` IS actively loaded — injected dynamically by `static/js/quick_proposal/ui.js:injectStyles()`.
+- `memory.css` IS actively loaded — `<link>` in `index.html` after `style.css`. Holds Memories-modal additions/overrides (Global Memories tab, scrollable memory bubbles).
+- `tasks_run_status.css` IS actively loaded — `<link>` in `index.html`. Task-card live run status chip + Run-button running state (distinct from the unwired `tasks.css` extract).
 
 ## To complete the modularization
 - Either add `@import "./css/file.css"` entries to `style.css`, OR

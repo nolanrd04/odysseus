@@ -65,10 +65,14 @@ Multiple instances of the same `element_type` are allowed on one page.
 Annotate ALL of the following when visible — do not skip them:
 
 TYPICAL SECTION:
-  - ROW width dimension label (the full right-of-way arrow with number)
+  - ROW width dimension label (the full right-of-way arrow with number). If the label or a
+    nearby callout describes the corridor as a combined roadway/drainage/utility easement
+    (e.g. "80' ROADWAY, DRAINAGE & UTILITY EASEMENT"), use that full labeled width as the ROW
+    width — the utility easement is included in ROW, not additional to it.
   - Curb type detail (rolled/mountable vs vertical curb & gutter profile)
   - Pavement spec callout (e.g. "4in HMA over 4in base over 12in ballast")
-  - Sidewalk slab (one side or both sides of road)
+  - Sidewalk & curb slab — note if the section template shows them on one or both sides
+    (this is the DESIGN template; actual per-road sides are confirmed on the plan view)
   - Stripping depth callout ("STRIP 6in TOPSOIL", "6in STRIP AND STOCKPILE")
   - Curb-to-curb width label (B-B dimension, travel lane width)
 
@@ -79,6 +83,9 @@ PLAN VIEW / PLAT:
   - Lot number labels (to count buildable lots)
   - Road connection points to existing roads (each point where new road meets existing pavement)
   - Cul-de-sac bulb or loop closure geometry
+  - Curb & sidewalk line visibility — on a SIMPLE overall plat, note whether a curb line
+    (parallel to pavement edge) and a sidewalk line (offset outward from it) appear on both,
+    one, or neither side of each road. Prefer the cleanest overall plat for this read.
 
 UTILITY PLAN:
   - Pipe labels (8in WATER MAIN, 8in SEWER MAIN, 12in SEWER MAIN, etc.)
@@ -95,6 +102,9 @@ COVER:
 
 PROFILE:
   - Proposed grade line vs existing grade line (which is consistently above the other)
+  - Note the APPROXIMATE vertical gap between them: a small offset (~stripping depth) is just
+    topsoil stripping, while a large sustained gap indicates real cut/fill grading — this
+    distinction drives the earthwork balance call downstream
   - Any earthwork balance note ("IMPORT FILL", "EXPORT", "BORROW")
 
 GRADING:

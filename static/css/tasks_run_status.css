@@ -1,0 +1,60 @@
+/* Tasks tab — live run status on task cards (chip + Run button running state).
+   Actively loaded via <link> from index.html AFTER style.css. Mirrors the
+   Activity tab's status colors so both views read the same. */
+
+.task-last-run-chip {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  vertical-align: 1px;
+}
+
+.task-last-run-chip.success {
+  color: #7dc87d;
+  background: color-mix(in srgb, #7dc87d 14%, transparent);
+}
+
+.task-last-run-chip.error {
+  color: var(--red, #e06c75);
+  background: color-mix(in srgb, var(--red, #e06c75) 14%, transparent);
+}
+
+.task-last-run-chip.skipped,
+.task-last-run-chip.aborted {
+  color: var(--fg);
+  opacity: 0.7;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+.task-last-run-chip.running {
+  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  animation: task-chip-pulse 1.6s ease-in-out infinite;
+}
+
+.task-card-run-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
+}
+
+.task-run-spinner {
+  animation: task-run-spin 0.9s linear infinite;
+}
+
+@keyframes task-run-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes task-chip-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-run-spinner { animation: none; }
+  .task-last-run-chip.running { animation: none; }
+}

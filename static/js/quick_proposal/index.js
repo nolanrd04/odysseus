@@ -84,5 +84,8 @@ async function openPrompts() {
 document.getElementById('qp-new-proposal-btn')?.addEventListener('click', open);
 document.getElementById('qp-runs-btn')?.addEventListener('click', openRuns);
 document.getElementById('qp-prompts-btn')?.addEventListener('click', openPrompts);
+document.getElementById('qp-jobs-btn')?.addEventListener('click', () => {
+    import('../qp_jobs.js').then(m => m.openJobsTab && m.openJobsTab());
+});
 
 window.quickProposalModule = { open, close, appendExtractionMessage, loadModels };

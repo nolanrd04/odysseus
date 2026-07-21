@@ -22,6 +22,7 @@ import memoryModule from './js/memory.js';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
+import qpGenerationsModule from './js/qp_generations.js';
 import tasksModule from './js/tasks.js';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
@@ -887,6 +888,19 @@ function initializeEventListeners() {
       if (!Modals.toggle('gallery-modal')) {
         if (galleryModule.isGalleryOpen()) galleryModule.closeGallery();
         else galleryModule.openGallery();
+      }
+    });
+  }
+
+  // QP Generations tool button (TODO_B_NEW pairing infra — read-only browse)
+  const toolQpGenerationsBtn = el('qp-generations-btn');
+  if (toolQpGenerationsBtn) {
+    toolQpGenerationsBtn.addEventListener('click', async () => {
+      if (!qpGenerationsModule) return;
+      const Modals = await import('./js/modalManager.js');
+      if (!Modals.toggle('qp-generations-modal')) {
+        if (qpGenerationsModule.isQpGenerationsOpen()) qpGenerationsModule.closeQpGenerations();
+        else qpGenerationsModule.openQpGenerations();
       }
     });
   }

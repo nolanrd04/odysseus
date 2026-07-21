@@ -25,3 +25,4 @@ docker/entrypoint.sh text eol=lf
 *.ico  binary
 *.woff binary
 *.woff2 binary
+graphify-out/graph.json merge=graphify

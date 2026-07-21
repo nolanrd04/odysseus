@@ -31,6 +31,7 @@ def test_omitted_memory_survives_only_explicit_drop(monkeypatch):
     import src.memory
     import src.llm_core
     import src.task_endpoint
+    import src.global_memory
 
     _FakeMM.saved = None
     monkeypatch.setattr(src.memory, "MemoryManager", _FakeMM)
@@ -38,6 +39,9 @@ def test_omitted_memory_survives_only_explicit_drop(monkeypatch):
         src.task_endpoint, "resolve_task_candidates",
         lambda owner=None: [("http://x/v1", "model", {})],
     )
+    # Keep the Tier-1 global-memory pass away from the real data dir.
+    monkeypatch.setattr(src.global_memory, "load_global_memory", lambda owner: "")
+    monkeypatch.setattr(src.global_memory, "save_global_memory", lambda owner, doc: None)
 
     async def fake_llm(_candidates, **kwargs):
         # Model keeps 'a', drops 'b', and OMITS 'c' entirely.

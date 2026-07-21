@@ -3,6 +3,9 @@ uvicorn
 python-multipart
 python-dotenv
 httpx
+# Salvages malformed Gemini phase-1 classification JSON (missing/trailing commas,
+# unescaped quotes/control chars) instead of re-running the vision call (TODO_DD).
+json-repair
 # PDF → JPEG rendering for quick_proposal (requires poppler-utils in the system).
 pdf2image
 PyMuPDF

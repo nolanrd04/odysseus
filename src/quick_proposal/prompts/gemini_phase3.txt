@@ -36,11 +36,17 @@ enhance_subregion(parent_bbox_id, x1, y1, x2, y2, dpi=300)
     specific callout, dimension label, or note within an already-enhanced image — no
     coordinate math required on your part.
 
-index_write(key, value, source_bbox_id, confidence)
-  → Writes an extracted value to the index.
+index_write(key, value, source_bbox_id, confidence)  — or  index_write(writes=[{key, value, source_bbox_id, confidence}, ...])
+  → Writes extracted values to the index.
     source_bbox_id: the bbox_id of the region you read this from (e.g. "p4_r2").
     confidence: "high", "medium", or "low".
     Always record the source so the manager can verify.
+    BATCH YOUR WRITES: once you have viewed a region (or a few regions) and read every
+    value you can from them, record them all in ONE call via
+    index_write(writes=[{...}, {...}, ...]) instead of a separate call per value. Only fall
+    back to a single-value write for a one-off. Each write-call resends the full image
+    context, so batching several values per call is significantly cheaper and faster. The
+    same confidence-enforcement rule below applies to every entry in the batch.
 
 list_images()
   → Returns a JSON array of all images already available in this session.
@@ -65,7 +71,7 @@ Work through the plan in this order — highest-yield sheets first:
 
 1. TYPICAL SECTION pages (importance=high)
    Extract: ROW_width_ft (array of objects with 'roads' list and 'width'), curb_to_curb_ft, curb_type, pavement_spec,
-            sidewalk_sides (per-road array — see schema below),
+            curb_sides and sidewalk_sides (per-road arrays, each entry with determination_basis — see schema below),
             stripping_depth_in, ballast_is_separate_pay_item
    Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and 
             which note the callouts correspond to. These are particularly helpful for getting EA items but can be used
@@ -73,7 +79,8 @@ Work through the plan in this order — highest-yield sheets first:
 
 2. PLAN VIEW pages with stationing (importance=high)
    Extract: road_LF (per-road array — see schema below), road_layout, road_connection_count,
-            construction_limits (begin/end station), lot_count (if lots are numbered on the plan),
+            internal_intersection_count, construction_limits (begin/end station),
+            lot_count (if lots are numbered on the plan),
             existing_road_widening_present (list of road names where widening is in scope)
   Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and 
             which note the callouts correspond to. These are particularly helpful for getting EA items but can be used
@@ -81,6 +88,7 @@ Work through the plan in this order — highest-yield sheets first:
 
 3. UTILITY PLAN pages (importance=high)
    Extract: proposed_fire_hydrant_count, proposed_manhole_count, proposed_ped_ramp_count,
+            proposed_crosswalk_count,
             sewer_main_LF (actual total LF of sewer main from plan labels/stationing),
             water_main_LF (actual total LF of water main from plan labels/stationing),
             large_diameter_water_main_present, large_diameter_sewer_main_present,
@@ -194,20 +202,67 @@ road_LF — Write as a JSON array. NEVER return null if stationing or dimension 
 lot_count — count ONLY individually numbered buildable lots INSIDE the project boundary.
   Prefer the lot table on the cover sheet. Exclude tracts, easements, ROW, and adjacent parcels.
 
-curb_type:
+road_connection_count — count of distinct points where a NEW/proposed road ties into an EXISTING
+  (already-built, off-site) road. Look for stub-out symbols, match-line callouts to existing
+  pavement, or a station label like "STA 0+00 = EXISTING EDGE OF PAVEMENT" where the new road
+  terminates at the project boundary.
+  Do NOT count intersections between two NEW roads inside the subdivision — those are internal
+  intersections (see internal_intersection_count below), not connections to the existing network.
+  If you cannot find enough information to determine this with reasonable confidence, return null
+  rather than guessing — do not default to 1.
+
+internal_intersection_count — count of distinct points where two NEW/proposed roads meet each
+  other INSIDE the subdivision (a road_layout="multi_branch" job typically has one or more of
+  these; cul_de_sac, arc_loop, and straight_through layouts normally have zero). Count each
+  junction once regardless of whether it's a T or a 4-way — do not multiply by corners here, that
+  happens downstream in pricing.
+  Do NOT count road_connection_count points here — those are ties to the EXISTING road network,
+  a different concept.
+  If road_layout is multi_branch but you cannot determine the count with reasonable confidence,
+  return null rather than guessing — do not default to 1.
+
+## Determining curb & sidewalk SIDES (reasoning, not a single lookup)
+
+Which sides of a road have curb and sidewalk is a CONCLUSION you reason to from the drawings,
+not a value copied from one sheet. Work in this order and record which basis you used:
+
+  1. OBSERVE the plan view first. Find a SIMPLE, uncluttered overall plat/plan view (not a
+     data-heavy per-road profile sheet — those are hard to read for this). Read sides visually:
+       • A CURB is a continuous line running parallel to and slightly offset from each pavement
+         edge — a curb on a side means such a line on that side.
+       • A SIDEWALK is a further line offset OUTWARD from the curb, not touching it, usually with
+         a gap (landscape/buffer strip) between curb and walk.
+     Note, per road, whether curb / sidewalk appear on both, one, or neither side.
+  2. CONFIRM against the typical section (the design template). If the plan view and the typical
+     section disagree, trust the PLAN VIEW for which sides / how much, and say so in comments.
+  3. If sides are NOT visibly drawn (schematic plat, small scale, no typical section): REASON
+     from context and mark it inferred. Default expectations you MAY override:
+       • A residential subdivision with numbered lots typically has sidewalks — pedestrians
+         should not be routed across private lots.
+       • Where there is a sidewalk there is usually a curb, and often a grass buffer between them.
+       • Override these when the drawings show otherwise — e.g. a rural or commercial section
+         running pavement → grass with no curb, or a road with no pedestrian access.
+     State the default you applied and use medium/low confidence — never "high" for an inference.
+
+curb_type: (overall curb PROFILE, job level)
   "rolled"   — rounded/mountable profile on ALL residential streets
   "standard" — vertical curb & gutter on all roads
   "mixed"    — rolled on local streets AND C&G on collector or at major intersections
 
 curb_type_comments: Text to add additional information on the curb type selection. Additional information supplied to the manager could be greatly beneficial.
 
-sidewalk_sides — Write as a JSON array, one entry per road. Read from each road's typical section.
-  Each object has:
-    road_name          — name of the road
-    sides              — "both_sides", "one_side", or "none"
-    sheet_references   — list of bbox_ids you read (e.g. ["4_r4"])
-    confidence         — "high", "medium", or "low"
-    additional_comments— any notes (e.g. "sidewalk runs ~85% of road length", "fronting only one side")
+curb_sides — JSON array, one entry per road: which sides have curb. Same object shape and same
+  determination method (steps 1–3 above) as sidewalk_sides.
+
+sidewalk_sides — Write as a JSON array, one entry per road. Each object has:
+    road_name           — name of the road
+    sides               — "both_sides", "one_side", or "none"
+    determination_basis — "observed_plan_view", "typical_section", or "inferred_from_context"
+    sheet_references    — list of bbox_ids you read (e.g. ["4_r4"])
+    confidence          — "high", "medium", or "low" (never "high" when determination_basis = "inferred_from_context")
+    additional_comments — what you actually saw or the default you applied (e.g. "walk both sides
+                          visible on overall plat", "schematic plat, walk not drawn — inferred
+                          one_side from residential lots, verify", "fronting only one side")
 
   MULTI-USE TRAIL WARNING: If a road has a paved multi-use trail (asphalt MUP, shared-use
   path, greenway) instead of a concrete sidewalk, that trail is NOT a sidewalk. Do NOT count
@@ -217,13 +272,15 @@ sidewalk_sides — Write as a JSON array, one entry per road. Read from each roa
 
   Example:
   [
-    {"road_name": "Road 1", "sides": "both_sides", "sheet_references": ["4_r4"],
-     "confidence": "high", "additional_comments": "none"},
-    {"road_name": "Road 2", "sides": "none", "sheet_references": ["7_r2"],
-     "confidence": "high", "additional_comments": "Paved multi-use trail on south side — not concrete sidewalk; see pathway_paving_roads"}
+    {"road_name": "Road 1", "sides": "both_sides", "determination_basis": "observed_plan_view",
+     "sheet_references": ["3_r1"], "confidence": "high",
+     "additional_comments": "curb + walk lines both sides on overall plat"},
+    {"road_name": "Road 2", "sides": "one_side", "determination_basis": "inferred_from_context",
+     "sheet_references": ["2_r0"], "confidence": "low",
+     "additional_comments": "schematic plat, sides not drawn — residential subdivision, defaulted one_side, verify"}
   ]
 
-  If a road has no readable typical section, write null for that road's entry with confidence "low".
+  If a road has no readable drawing at all, write null for that road's entry with confidence "low".
 
 pathway_paving_present — Write true if ANY road in the plan set has a paved multi-use trail,
   shared-use path, asphalt MUP, or greenway path (as opposed to a concrete sidewalk).
@@ -235,6 +292,38 @@ pathway_paving_roads — Write as a JSON array of road names where a paved multi
   exists. Example: ["Road 1"]. Write [] if pathway_paving_present is false or null.
   For each road listed here, ensure the sidewalk_sides entry for that road excludes the
   trail side (write "none" or note the exclusion in additional_comments).
+
+pavement_spec — the road surface spec, read from the TYPICAL SECTION. Roads are commonly labeled
+  in "X/Y" shorthand where X = inches of asphalt (HMA/pavement) over Y = inches of base rock
+  (e.g. "2/4\"" = 2in asphalt over 4in base; "3/6\"" = 3in asphalt over 6in base). The callout may
+  instead spell each layer out ("4in HMA over 4in BASE over 12in BALLAST"). Read and report the
+  spec EXACTLY as written — do not convert, normalize, or infer. If only the X/Y form is shown,
+  write it as-is (e.g. "3/6\""). Source: typical section only — do not read this off a plan-view
+  callout. If no pavement spec is visible on any typical section, write null.
+
+road_layers — OPTIONAL enrichment. The cross-section is a stack, top-to-bottom: pavement (asphalt/
+  HMA), base rock, ballast (aggregate subbase). Each layer has a thickness and a width; a layer's
+  TOP width can differ from its BOTTOM width where the section steps out in a slope. A simple
+  residential section (curb + swale + sidewalk) often shares one width across layers; a paving-only
+  section commonly steps out (pavement 60ft; base 60 top / 70 bottom; ballast 70 top / 80 bottom).
+  Read from the TYPICAL SECTION callouts. Sections vary — some label every width, some show one,
+  some spell out inches, some use "X/Y". Do NOT assume a layout. Report each number EXACTLY as
+  printed, with its bbox. Rules:
+    - Layer dimensioned once (no separate top/bottom) → write that value for BOTH top and bottom.
+    - Can't read a layer's width → null for that width; do NOT guess or copy another layer.
+    - Section doesn't resolve into layers at all → write null for road_layers entirely. This is
+      expected on sparse plan sets and is NOT a failure.
+  Confidence "high" only when read directly; "low" when small/ambiguous.
+  Per-road JSON array:
+  [
+    {"road_name": "Road 1",
+     "layers": [
+       {"name": "pavement",  "thickness_in": 3,  "top_width_ft": 60, "bottom_width_ft": 60},
+       {"name": "base_rock", "thickness_in": 6,  "top_width_ft": 60, "bottom_width_ft": 70},
+       {"name": "ballast",   "thickness_in": 12, "top_width_ft": 70, "bottom_width_ft": 80}],
+     "sheet_references": ["2_r1"], "confidence": "high",
+     "additional_comments": "paving-only section, lower layers step out"}
+  ]
 
 stripping_depth_in — the numeric depth in inches (e.g. 6, 8, 12). Do NOT guess.
 
@@ -282,25 +371,108 @@ sewer_main_LF — Read the ACTUAL total length of sewer main from the utility pl
 water_main_LF — Same approach and the same CONFIDENCE rule as sewer_main_LF, applied to water main.
   Write as a number. If no public water main, write 0.
 
-existing_road_widening_present — Write as a JSON array of road names where the scope includes
-  widening or pavement addition to an already-built road (e.g. adding a turn lane, widening a
-  collector, pave widening for frontage). Example: ["Road 1", "Road 2"].
-  Write [] if no widening scope exists. This triggers separate paving widening line items.
+existing_road_widening_present — JSON array of road names where scope adds pavement to an
+  already-built road. A road qualifies if EITHER trigger is met:
+    (a) CALLOUT: "ROAD WIDENING", "RIGHT TURN LANE", "WIDEN TO MATCH", "PAVE WIDENING", or
+    (b) NARROW STRIP: the NEW paving strip against the existing road is ≤ 10 ft wide (measure the
+        new paving only — do NOT count an adjacent pathway, trail, or sidewalk). A narrow new strip
+        tight against existing pavement is widening even when unlabeled.
+  Example: ["Road 1", "Road 2"]. Write [] if neither trigger is met on any road. This triggers
+  separate paving widening line items.
 
-proposed_ped_ramp_count — Count of ADA pedestrian curb ramps explicitly shown or called out on
-  the plan sheets. Look for: ramp symbols at intersection corners, notes like "ADA RAMP", "PED
-  RAMP", "TRUNCATED DOME", or a ramp detail/quantity table. Write the total as a number (e.g. 4).
-  Write null if no ramps are called out — do NOT infer a count.
+widening_strip_width_ft — OPTIONAL companion. For each widening road whose new-strip width you can
+  read, write {"road_name": ..., "width_ft": ...}. Omit a road (or the whole field) if width is not
+  readable — the estimator falls back to a default multiplier. Do NOT guess a width.
 
-earthwork_balance:
-  "import_needed"    — proposed grade consistently ABOVE existing (fill required)
-  "export_needed"    — proposed grade consistently BELOW existing (cut surplus)
-  "roughly_balanced" — alternating cut and fill zones of comparable depth
-  "unknown"          — profile not readable, or balance note says "coordinate with engineer"
+proposed_ped_ramp_count — Count of ADA pedestrian curb ramps AT EACH VISIBLE INTERSECTION OR
+  CROSSWALK on the plan — do not wait for an explicit text callout, intersections are normally
+  visible directly on the plan view. For each road_connection_count and internal_intersection_count
+  location you identified, look at that corner for: a ramp symbol (small quarter-circle/wedge mark
+  at the curb return), truncated-dome hatching, or a ramp detail reference tied to that corner. Count
+  what you can actually see per corner — do NOT extrapolate a count to corners where nothing is
+  shown just because other corners on the same plan have ramps.
+  Write the total as a number (e.g. 4). Write null only if NO intersection/crosswalk geometry is
+  visible at all on any page (e.g. no civil sheet shows the intersections) — a plan that shows
+  intersections but no ramp markings at them should be counted as 0, not null, since that's a real
+  observation (absence of shown ramps), not a missing-data case.
+
+proposed_crosswalk_count — Count of marked crosswalks visible at road intersections — striping,
+  hatching, or a paved crossing area between curb returns that's visually distinct from the travel
+  lane. This is a corroborating signal for proposed_ped_ramp_count (a marked crosswalk typically has
+  a ramp at each end) — record what you see independently of your ramp count, do not force them to
+  match. Write null only if no intersection geometry is visible at all.
+
+scupper_count — Count of curb scuppers (drainage openings through the curb face). PREFER a printed
+  schedule/table if one exists (some plan sets have a "SCUPPER SCHEDULE" or a callout table listing
+  scupper stations/locations) — read the row count directly, far more reliable than counting symbols.
+  No schedule → count scupper symbols directly on the curb/road-plan sheets (a scupper is typically
+  a small gap-in-curb symbol or callout along the curb line, distinct from a drywell or catch basin
+  symbol). Write the total as a number. Write null only if no curb plan showing scupper locations is
+  visible anywhere in the set — a curb plan that shows no scupper symbols/schedule at all should be
+  counted as 0, not null, since that's a real observation.
+
+earthwork_balance — PER-ROAD classification of the ROAD-PRISM cut/fill balance from each road's own
+  profile sheet, CALIBRATED against stripping depth. Different roads on the same job routinely have
+  different balances — a through-road can sit flat and balanced while a cul-de-sac at a different
+  elevation needs fill — so this must be judged separately for EACH road, not once for the whole
+  project. Use the same road list you built for road_LF: for every road, find its own profile sheet
+  and classify it independently before writing the final value.
+  On a road profile the proposed grade line normally sits BELOW existing ground by roughly the
+  STRIPPING DEPTH even on a perfectly balanced job — that offset is topsoil stripping (which always
+  happens), NOT grading cut/fill. Do NOT read a strip-depth-sized offset as export. Judge the
+  SUSTAINED vertical gap between existing ground and proposed grade against a deadband equal to
+  stripping_depth_in:
+    "roughly_balanced" — proposed tracks existing within the deadband (± stripping depth) for most
+                         of the run (strip topsoil, rebuild the section in place; no mass grading).
+                         This is the DEFAULT for a road profile that only shows a strip-depth offset.
+    "export_needed"    — proposed runs FAR BELOW existing, DEEPER than the deadband over a sustained
+                         length (real cut into subgrade → surplus to haul).
+    "import_needed"    — proposed runs ABOVE existing ground over a sustained length (embankment
+                         above natural grade → borrow/import fill).
+    "mixed"             — proposed crosses BOTH above and below the deadband along the run — genuine
+                         cut in one stretch and fill in another, not a wash. Still requires handling
+                         material in both directions even if the two roughly net out — do NOT collapse
+                         this into roughly_balanced just because the net looks close to zero.
+    "unknown"          — this road's profile not readable, or a balance note says "coordinate with
+                         engineer".
+  BOTH LINES REQUIRED: this judgment needs BOTH the existing-grade line AND the proposed-grade line
+  visible on the same station range for THIS road — profile sheets sometimes draw them in separate
+  panels or spread across a wider sheet than one view. If your current view shows only the
+  existing-grade line, that is MISSING DATA, not evidence of balance — do NOT default to
+  roughly_balanced just because no deviation is visible. Use crop_page or enhance_region to pan the
+  rest of the same sheet for the proposed grade line before classifying that road. Only write
+  "unknown" for a road if its proposed line genuinely cannot be found anywhere on the sheet after
+  panning.
+  If stripping_depth_in is null, use a default deadband of 18in.
+  SCOPE: a road profile shows ROAD grading only, at the centerline. Mass/lot grading (building
+  pads, whole-site cut/fill) lives on a grading sheet, not the road profile — do NOT infer lot
+  grading from a road profile, and do NOT let a strip-depth offset imply grading is in scope.
+  WRITING THE VALUE: visit every road's profile sheet first, THEN write earthwork_balance ONCE as a
+  list — index_write overwrites rather than merges, so do not write this field per-road as you go.
+  value = [{"road_name": <matches road_LF's road_name>, "balance": <one of the categories above>,
+  "source_bbox_id": <this road's own profile bbox>, "confidence": <this road's own confidence>,
+  "basis": <one-line reason, e.g. "proposed 3-4ft above existing sta 1+00-6+00">}, ...]. Every road
+  in road_LF should have a corresponding entry here, including "unknown" ones — do not omit a road
+  just because its profile was hard to read.
 
 grading_information: Text of information relating to grading images or notes you have seen in the images.
 It is best to NOT just write the raw notes sections but to summarize them. It is also best to provide numeric
 values along side descriptions for actual grading work presented in the plans.
+
+earthwork_import_export_CY / cut-fill quantities — PREFER a printed EARTHWORK / CUT-FILL SUMMARY
+  table if one exists on a grading or profile sheet (TOTAL CUT CY, TOTAL FILL CY, NET IMPORT/EXPORT
+  CY). Read those totals directly — far more reliable than interpreting contours. Do NOT attempt to
+  compute cut/fill by reading existing vs proposed contour elevations off the drawing; that is not
+  reliably readable. No summary table → leave earthwork_import_export_CY null and rely on
+  earthwork_balance (categorical) as today.
+
+GRADING SCOPE vs GRADING VALUES — contours or earthwork values on a plan do NOT by themselves mean
+  lot grading is in Terra's scope. Subdivision lot grading is frequently done by the home builder,
+  not the site contractor (no reason to grade a lot a builder will re-excavate for a foundation).
+    - ROAD grading (road prism / ROW earthwork) — normally in scope; feeds earthwork_balance.
+    - LOT grading (individual building-pad grading) — often OUT of scope even when drawn.
+  Set lot_grading_in_scope only from explicit scope language (a note, keynote, or bid item assigning
+  lot grading to THIS contract), not from the mere presence of contours on lots.
 
 ---
 
@@ -319,7 +491,8 @@ You are done when:
 - road_LF (array), lot_count, curb_type, ROW_width_ft, sidewalk_sides (array) are filled
   (or confirmed unreadable after checking all relevant pages)
 - sewer_main_LF and water_main_LF are filled (or confirmed absent — no utility sheets)
-- proposed_ped_ramp_count is filled or confirmed null (no explicit ramp callouts found)
+- proposed_ped_ramp_count and proposed_crosswalk_count are filled (0 if intersections are visible
+  with no ramps/crosswalks shown, null only if no intersection geometry is visible at all)
 - Any visible scope flags have been checked
 
 When done, call index_write("extraction_complete", true, null, "high").

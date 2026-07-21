@@ -149,6 +149,7 @@ const _LABELS = {
   // Virtual id — the doc editor pane isn't a modal, but it minimizes to a
   // chip via the same dock infrastructure.
   'doc-panel':         { label: 'Document', icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8' },
+  'qp-generations-modal': { label: 'QP Generations', icon: 'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11' },
 };
 
 function _ensureDock() {
@@ -1408,6 +1409,7 @@ const _AUTO_WIRE = {
   'tasks-modal':          { rail: 'rail-tasks',     sidebar: 'tool-tasks-btn' },
   'doclib-modal':         { rail: 'rail-archive',   sidebar: 'tool-library-btn' },
   'memory-modal':         { rail: null,             sidebar: 'tool-memory-btn' },
+  'qp-generations-modal': { rail: null,             sidebar: 'qp-generations-btn' },
   'notes-panel':          { rail: 'rail-notes',     sidebar: 'tool-notes-btn' },
   // Email already has its own #email-unread-dot inline next to the title —
   // don't add a second modalManager badge that lands at the right edge.

@@ -278,8 +278,10 @@ _PROVIDER_CURATED = {
         "accounts/fireworks/models/deepseek-r1",
     ],
     "google": [
-        "gemini-3.5", "gemini-3.1", "gemini-3",
-        "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash",
+        "gemini-3.1-pro-preview", "gemini-3-pro-preview",
+        "gemini-3.5-flash", "gemini-3.1-flash-lite",
+        "gemini-pro-latest", "gemini-flash-latest",
+        "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
     ],
     "xai": [
         "grok-4.3", "grok-4", "grok-4-fast", "grok-3", "grok-3-fast",

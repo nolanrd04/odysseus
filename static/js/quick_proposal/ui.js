@@ -422,6 +422,11 @@ const STYLES = `
 .qp-run-controls-toggle:hover { color: var(--fg); }
 .qp-run-controls-settings { display: none; flex-direction: column; gap: 8px; }
 .qp-run-controls-settings.open { display: flex; }
+.qp-advanced-models {
+    display: flex; flex-direction: column; gap: 8px;
+    padding-left: 10px; margin-left: 2px;
+    border-left: 2px solid var(--border);
+}
 `;
 
 function injectStyles() {
@@ -447,6 +452,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
         <div class="qp-header">
             <span class="qp-title">Quick Proposal</span>
             <div class="qp-run-meta" id="qp-run-meta"></div>
+            <button class="qp-jobs-btn qp-header-jobs-btn" title="Manage the case library of reference jobs" type="button">Jobs</button>
             <label class="qp-auto-mode-label qp-header-auto-mode" id="qp-header-auto-mode" style="display:none">
                 <input type="checkbox" id="qp-auto-mode-header" checked> Auto
             </label>
@@ -479,9 +485,50 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                         <option value="">Loading models…</option>
                     </select>
                 </div>
+                <div class="qp-auto-mode-row">
+                    <label class="qp-auto-mode-label">
+                        <input type="checkbox" id="qp-advanced-mode">
+                        Advanced: per-phase models
+                        <span class="qp-import-hint">Override the model used for individual phases instead of one model for everything</span>
+                    </label>
+                </div>
+                <div class="qp-advanced-models" id="qp-advanced-models" style="display:none">
+                    <div class="qp-model-row">
+                        <label class="qp-model-label" for="qp-pm-phase1">Job Type Detection</label>
+                        <select class="qp-model-select" id="qp-pm-phase1"><option value="">Use Classifying Model</option></select>
+                    </div>
+                    <div class="qp-model-row">
+                        <label class="qp-model-label" for="qp-pm-phase2">Page Classification <span style="opacity:0.5;font-weight:400;font-size:11px">(Gemini-family only)</span></label>
+                        <select class="qp-model-select" id="qp-pm-phase2"><option value="">Use Classifying Model</option></select>
+                    </div>
+                    <div class="qp-model-row">
+                        <label class="qp-model-label" for="qp-pm-phase3">Completeness Scoring</label>
+                        <select class="qp-model-select" id="qp-pm-phase3"><option value="">Use Classifying Model</option></select>
+                    </div>
+                    <div class="qp-model-row">
+                        <label class="qp-model-label" for="qp-pm-notes">Notes Transcription</label>
+                        <select class="qp-model-select" id="qp-pm-notes"><option value="">Use Classifying Model</option></select>
+                    </div>
+                    <div class="qp-model-row">
+                        <label class="qp-model-label" for="qp-pm-scope">Scope Analysis</label>
+                        <select class="qp-model-select" id="qp-pm-scope"><option value="">Use Classifying Model</option></select>
+                    </div>
+                    <div class="qp-model-row">
+                        <label class="qp-model-label" for="qp-pm-phase5_gemini">Extraction — Vision Model</label>
+                        <select class="qp-model-select" id="qp-pm-phase5_gemini"><option value="">Use Classifying Model</option></select>
+                    </div>
+                    <div class="qp-model-row">
+                        <label class="qp-model-label" for="qp-pm-phase5_manager">Extraction — Manager Model</label>
+                        <select class="qp-model-select" id="qp-pm-phase5_manager"><option value="">Use Manager Model</option></select>
+                    </div>
+                </div>
                 <div class="qp-retry-row">
                     <label class="qp-model-label" for="qp-retry-attempts">Gemini Retries</label>
                     <input type="number" class="qp-retry-input" id="qp-retry-attempts" value="3" min="1" max="10">
+                </div>
+                <div class="qp-retry-row">
+                    <label class="qp-model-label" for="qp-memory-recall-count">Memories Recalled</label>
+                    <input type="number" class="qp-retry-input" id="qp-memory-recall-count" value="12" min="0" max="50">
                 </div>
                 <div class="qp-fallback-section">
                     <div class="qp-model-label">Gemini Fallbacks <span style="opacity:0.5;font-weight:400;font-size:11px">(tried in order)</span></div>
@@ -494,8 +541,13 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                     <div class="qp-fallback-list" id="qp-fallback-list"></div>
                 </div>
                 <div class="qp-jobs-section" id="qp-jobs-section">
-                    <div class="qp-model-label">Reference Jobs</div>
-                    <div class="qp-jobs-grid" id="qp-jobs-grid"><span style="opacity:0.5;font-size:11px">Loading…</span></div>
+                    <div class="qp-model-label">Reference Jobs <span id="qp-jobs-count" class="qp-jobs-count"></span></div>
+                    <div class="qp-jobs-toolbar">
+                        <input type="text" id="qp-jobs-search" class="qp-jobs-search" placeholder="Search jobs…" autocomplete="off">
+                        <button type="button" class="qp-jobs-bulk-btn" id="qp-jobs-all">All</button>
+                        <button type="button" class="qp-jobs-bulk-btn" id="qp-jobs-none">None</button>
+                    </div>
+                    <div class="qp-jobs-list" id="qp-jobs-grid"><span style="opacity:0.5;font-size:11px">Loading…</span></div>
                     <div class="qp-holdout-notice" id="qp-holdout-notice" style="display:none"></div>
                 </div>
                 <div class="qp-model-row">
@@ -512,6 +564,13 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                     <label class="qp-auto-mode-label">
                         <input type="checkbox" id="qp-auto-mode" checked>
                         Auto-advance phases
+                    </label>
+                </div>
+                <div class="qp-auto-mode-row">
+                    <label class="qp-auto-mode-label">
+                        <input type="checkbox" id="qp-auto-memory">
+                        Save memory snapshot
+                        <span class="qp-import-hint">Write a provisional memory of this proposal (job, total, key items) when the run completes</span>
                     </label>
                 </div>
                 <div class="qp-import-section" id="qp-import-section">
@@ -602,10 +661,32 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
         localStorage.setItem(AUTO_MODE_KEY, autoModeToggle.checked ? 'true' : 'false');
     });
 
+    // Advanced mode: per-phase model overrides. Off by default — regular mode is
+    // unaffected (phase_models stays empty, every phase uses modelSelect/managerSelect).
+    const advancedToggle = overlay.querySelector('#qp-advanced-mode');
+    const advancedPanel  = overlay.querySelector('#qp-advanced-models');
+    const ADVANCED_MODE_KEY = 'qp_advanced_mode';
+    const PHASE_MODEL_KEYS = ['phase1', 'phase2', 'phase3', 'notes', 'scope', 'phase5_gemini', 'phase5_manager'];
+    const phaseModelSelects = {};
+    PHASE_MODEL_KEYS.forEach(key => {
+        const sel = overlay.querySelector(`#qp-pm-${key}`);
+        phaseModelSelects[key] = sel;
+        loadModels(sel, { preferClaude: key === 'phase5_manager', includeBlank: true,
+                           blankLabel: key === 'phase5_manager' ? 'Use Manager Model' : 'Use Classifying Model',
+                           excludeAnthropic: key === 'phase2' });
+    });
+    advancedToggle.checked = localStorage.getItem(ADVANCED_MODE_KEY) === 'true';
+    advancedPanel.style.display = advancedToggle.checked ? 'flex' : 'none';
+    advancedToggle.addEventListener('change', () => {
+        localStorage.setItem(ADVANCED_MODE_KEY, advancedToggle.checked ? 'true' : 'false');
+        advancedPanel.style.display = advancedToggle.checked ? 'flex' : 'none';
+    });
+
     loadModels(modelSelect, { preferClaude: false });
     loadModels(managerSelect, { preferClaude: true });
 
     const retryInput     = overlay.querySelector('#qp-retry-attempts');
+    const memoryRecallInput = overlay.querySelector('#qp-memory-recall-count');
     const fallbackSelect = overlay.querySelector('#qp-fallback-select');
     const fallbackAddBtn = overlay.querySelector('#qp-fallback-add-btn');
     const fallbackList   = overlay.querySelector('#qp-fallback-list');
@@ -630,7 +711,11 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
     });
 
     // Fetch and render the reference jobs list up front so the selection is fixed before the run starts.
-    const jobsGrid = overlay.querySelector('#qp-jobs-grid');
+    // Unchecking any subset now makes the server derive a run-scoped knowledge pack from the
+    // checked jobs (dynamic KP) — the old prebuilt-holdout activation is gone from this form.
+    const jobsGrid   = overlay.querySelector('#qp-jobs-grid');
+    const jobsSearch = overlay.querySelector('#qp-jobs-search');
+    const jobsCount  = overlay.querySelector('#qp-jobs-count');
     fetch('/api/quick_proposal/jobs', { credentials: 'same-origin' })
         .then(r => r.ok ? r.json() : [])
         .then(jobs => {
@@ -640,29 +725,45 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                 return;
             }
             const holdoutNotice = overlay.querySelector('#qp-holdout-notice');
-            const updateHoldoutNotice = () => {
-                const unchecked = [...jobsGrid.querySelectorAll('input[type=checkbox]:not(:checked)')];
-                const withHoldout = unchecked.filter(cb => cb.dataset.holdoutPath);
-                if (unchecked.length === 1 && withHoldout.length === 1) {
-                    holdoutNotice.textContent = `Holdout KP active for: ${unchecked[0].value}`;
-                    holdoutNotice.style.display = 'block';
-                } else if (unchecked.length > 0) {
-                    holdoutNotice.textContent = withHoldout.length
-                        ? `Holdout KP available for ${withHoldout.length} job(s) — uncheck exactly one to activate`
-                        : '';
-                    holdoutNotice.style.display = withHoldout.length ? 'block' : 'none';
-                } else {
+            const updateSelectionNotice = () => {
+                const boxes   = [...jobsGrid.querySelectorAll('input[type=checkbox]')];
+                const checked = boxes.filter(cb => cb.checked);
+                if (jobsCount) jobsCount.textContent = `${checked.length}/${boxes.length}`;
+                if (checked.length === boxes.length) {
                     holdoutNotice.style.display = 'none';
+                } else if (checked.length === 0) {
+                    holdoutNotice.textContent = 'No jobs selected — check at least one reference job';
+                    holdoutNotice.style.display = 'block';
+                } else {
+                    holdoutNotice.textContent = `A knowledge pack will be built from the ${checked.length} selected job${checked.length === 1 ? '' : 's'} for this run`;
+                    holdoutNotice.style.display = 'block';
                 }
             };
             jobs.forEach(job => {
-                const chip = document.createElement('label');
-                chip.className = 'qp-job-chip';
-                const holdoutAttr = job.holdout_kp_path ? ` data-holdout-path="${_esc(job.holdout_kp_path)}"` : '';
-                chip.innerHTML = `<input type="checkbox" value="${_esc(job.id)}"${holdoutAttr} checked> ${_esc(job.name)}`;
-                chip.querySelector('input').addEventListener('change', updateHoldoutNotice);
-                jobsGrid.appendChild(chip);
+                const row = document.createElement('label');
+                row.className = 'qp-job-row';
+                row.dataset.name = (job.name || '').toLowerCase();
+                row.innerHTML = `<input type="checkbox" value="${_esc(job.id)}" checked> <span class="qp-job-row-name">${_esc(job.name)}</span>`;
+                row.querySelector('input').addEventListener('change', updateSelectionNotice);
+                jobsGrid.appendChild(row);
             });
+            updateSelectionNotice();
+            if (jobsSearch) jobsSearch.addEventListener('input', () => {
+                const q = jobsSearch.value.trim().toLowerCase();
+                jobsGrid.querySelectorAll('.qp-job-row').forEach(row => {
+                    row.style.display = !q || row.dataset.name.includes(q) ? '' : 'none';
+                });
+            });
+            const setAllVisible = (state) => {
+                // bulk buttons act on the rows currently visible under the search filter
+                jobsGrid.querySelectorAll('.qp-job-row').forEach(row => {
+                    if (row.style.display === 'none') return;
+                    row.querySelector('input').checked = state;
+                });
+                updateSelectionNotice();
+            };
+            overlay.querySelector('#qp-jobs-all')?.addEventListener('click', () => setAllVisible(true));
+            overlay.querySelector('#qp-jobs-none')?.addEventListener('click', () => setAllVisible(false));
         })
         .catch(() => { jobsGrid.innerHTML = '<span style="opacity:0.5;font-size:11px">Could not load jobs</span>'; });
 
@@ -683,7 +784,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                         const opt = document.createElement('option');
                         opt.value = run.id;
                         const ts = run.timestamp ? new Date(run.timestamp * 1000).toLocaleDateString() : '';
-                        opt.textContent = `${run.filename || run.id}${ts ? '  (' + ts + ')' : ''}`;
+                        opt.textContent = `${run.run_name || run.filename || run.id}${ts ? '  (' + ts + ')' : ''}`;
                         importSelect.appendChild(opt);
                     });
                 })
@@ -713,7 +814,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                         const opt = document.createElement('option');
                         opt.value = run.id;
                         const ts = run.timestamp ? new Date(run.timestamp * 1000).toLocaleDateString() : '';
-                        opt.textContent = `${run.filename || run.id}${ts ? '  (' + ts + ')' : ''}`;
+                        opt.textContent = `${run.run_name || run.filename || run.id}${ts ? '  (' + ts + ')' : ''}`;
                         importNotesSelect.appendChild(opt);
                     });
                 })
@@ -743,7 +844,7 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
                         const opt = document.createElement('option');
                         opt.value = run.id;
                         const ts = run.timestamp ? new Date(run.timestamp * 1000).toLocaleDateString() : '';
-                        opt.textContent = `${run.filename || run.id}${ts ? '  (' + ts + ')' : ''}`;
+                        opt.textContent = `${run.run_name || run.filename || run.id}${ts ? '  (' + ts + ')' : ''}`;
                         importScopeSelect.appendChild(opt);
                     });
                 })
@@ -784,12 +885,21 @@ export function buildPanel({ onClose, prefillUploadId = '', prefillFilename = ''
         onFileSelected(e.dataTransfer.files[0]);
     });
 
-    runBtn.addEventListener('click', () => handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename, parseInt(retryInput.value, 10) || 3, [...fallbackModels], importToggle.checked ? importSelect.value : '', projectTypeSelect.value, autoModeToggle.checked, importNotesToggle.checked ? importNotesSelect.value : '', importScopeToggle.checked ? importScopeSelect.value : ''));
+    runBtn.addEventListener('click', () => {
+        const phaseModels = {};
+        if (advancedToggle.checked) {
+            PHASE_MODEL_KEYS.forEach(key => {
+                const v = phaseModelSelects[key]?.value || '';
+                if (v) phaseModels[key] = v;
+            });
+        }
+        handleRun(overlay, chosenFile, modelSelect.value, managerSelect.value, prefillUploadId, prefillFilename, parseInt(retryInput.value, 10) || 3, [...fallbackModels], importToggle.checked ? importSelect.value : '', projectTypeSelect.value, autoModeToggle.checked, importNotesToggle.checked ? importNotesSelect.value : '', importScopeToggle.checked ? importScopeSelect.value : '', _intOrDefault(memoryRecallInput.value, 12), phaseModels);
+    });
 
     return overlay;
 }
 
-export async function loadModels(select, { preferClaude = false } = {}) {
+export async function loadModels(select, { preferClaude = false, includeBlank = false, blankLabel = '', excludeAnthropic = false } = {}) {
     try {
         // Same fetch pattern as the main model picker: cached (no refresh), with credentials.
         const res = await fetch('/api/models', { credentials: 'same-origin' });
@@ -798,6 +908,10 @@ export async function loadModels(select, { preferClaude = false } = {}) {
         const items = Array.isArray(data) ? data : (data.items ?? []);
         const models = [];
         for (const item of items) {
+            // Page classification (phase2) has no Anthropic-native request path (it uses
+            // response_format:"json_object", which Claude's API doesn't support) — keep
+            // Claude out of that picker's options rather than offer a choice that errors.
+            if (excludeAnthropic && (item.url || '').includes('anthropic.com')) continue;
             const displayNames = item.models_display || item.models || [];
             const extraDisplayNames = item.models_extra_display || item.models_extra || [];
             (item.models || []).forEach((mid, i) => {
@@ -812,6 +926,13 @@ export async function loadModels(select, { preferClaude = false } = {}) {
             select.innerHTML = '<option value="">No models found</option>';
             return;
         }
+        if (includeBlank) {
+            const blankOpt = document.createElement('option');
+            blankOpt.value = '';
+            blankOpt.textContent = blankLabel || '(default)';
+            blankOpt.selected = true;
+            select.appendChild(blankOpt);
+        }
         const defaultMid = preferClaude
             ? (models.find(m => m.mid === 'claude-sonnet-4-6')?.mid
                 || models.find(m => m.mid.toLowerCase().includes('claude'))?.mid
@@ -821,7 +942,7 @@ export async function loadModels(select, { preferClaude = false } = {}) {
             const opt = document.createElement('option');
             opt.value = mid;
             opt.textContent = label.split('/').pop();
-            opt.selected = mid === defaultMid;
+            opt.selected = !includeBlank && mid === defaultMid;
             select.appendChild(opt);
         });
     } catch (e) {
@@ -830,7 +951,7 @@ export async function loadModels(select, { preferClaude = false } = {}) {
     }
 }
 
-async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '', geminiRetryAttempts = 3, geminiFallbackModels = [], importFromRunId = '', projectType = '', autoMode = true, importNotesFromRunId = '', importScopeFromRunId = '') {
+async function handleRun(overlay, file, geminiModel = '', managerModel = '', existingUploadId = '', existingFilename = '', geminiRetryAttempts = 3, geminiFallbackModels = [], importFromRunId = '', projectType = '', autoMode = true, importNotesFromRunId = '', importScopeFromRunId = '', memoryRecallCount = 12, phaseModels = {}) {
     const runMetaState = {};
     const runBtn       = overlay.querySelector('#qp-run-btn');
     const cancelBtn    = overlay.querySelector('#qp-cancel-btn');
@@ -841,11 +962,11 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
     const mainOutput   = overlay.querySelector('#qp-main-output');
     const runName      = overlay.querySelector('#qp-run-name')?.value.trim() || '';
     const notes        = overlay.querySelector('#qp-notes').value;
+    const autoMemory   = !!overlay.querySelector('#qp-auto-memory')?.checked;
     const selectedJobs = [...overlay.querySelectorAll('#qp-jobs-grid input[type=checkbox]:checked')].map(cb => cb.value);
-    const uncheckedCbs = [...overlay.querySelectorAll('#qp-jobs-grid input[type=checkbox]:not(:checked)')];
-    const holdoutKpPath = (uncheckedCbs.length === 1 && uncheckedCbs[0].dataset.holdoutPath)
-        ? uncheckedCbs[0].dataset.holdoutPath
-        : '';
+    // Empty on purpose: a subset selection makes the server build a run-scoped
+    // dynamic KP; an explicit holdout path is only settable from the phase-3 modal.
+    const holdoutKpPath = '';
 
     runBtn.disabled = true;
     runBtn.textContent = 'Validating…';
@@ -906,7 +1027,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         const res = await fetch('/api/quick_proposal/start-proposal-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId, import_notes_from_run_id: importNotesFromRunId, import_scope_from_run_id: importScopeFromRunId, project_type: projectType }),
+            body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, phase_models: phaseModels, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId, import_notes_from_run_id: importNotesFromRunId, import_scope_from_run_id: importScopeFromRunId, project_type: projectType, auto_memory: autoMemory, memory_recall_count: memoryRecallCount }),
             credentials: 'same-origin',
         });
         if (!res.ok) throw new Error(`Run failed: ${res.status}`);
@@ -1709,6 +1830,11 @@ function _esc(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function _intOrDefault(value, fallback) {
+    const n = parseInt(value, 10);
+    return Number.isNaN(n) ? fallback : n;
+}
+
 function updateContextMeter(mainOutput, data) {
     const row = mainOutput.querySelector(`#qp-ctx-${data.role}`);
     if (!row) return;
@@ -1991,10 +2117,14 @@ function _escHtml(str) {
 }
 
 const PROMPT_DISPLAY_NAMES = {
-    'gemini_phase1':   'Phase 1 — Classification',
-    'gemini_phase3':   'Phase 3 — Extraction',
-    'manager_system':  'Manager System',
-    'system_prompt':   'System Prompt',
+    'gemini_phase1':      'Phase 1 — Classification',
+    'gemini_phase3':      'Phase 3 — Extraction',
+    'gemini_completeness': 'Extract Completeness',
+    'gemini_notes':        'Extract Notes',
+    'gemini_phase0_5':     'Detect Job Type',
+    'gemini_scope':        'Detect Scope',
+    'manager_system':      'Manager Guidance Prompt',
+    'system_prompt':       'System Prompt',
 };
 
 export async function buildPromptsPanel({ onClose }) {
@@ -2051,15 +2181,72 @@ export async function buildPromptsPanel({ onClose }) {
             const pane = document.createElement('div');
             pane.className = 'qp-prompt-pane';
             pane.dataset.name = p.name;
+            pane.dataset.mode = 'view';
             pane.style.display = 'none';
-            pane.innerHTML = `<pre class="qp-prompt-pre">${_escHtml(p.content)}</pre>`;
+            pane.innerHTML = `
+                <div class="qp-prompt-toolbar">
+                    <button class="qp-prompt-edit-btn">Edit</button>
+                    <span class="qp-prompt-status"></span>
+                    <button class="qp-prompt-save-btn" disabled>Save</button>
+                </div>
+                <div class="qp-prompt-markdown"></div>
+                <textarea class="qp-prompt-textarea" spellcheck="false">${_escHtml(p.content)}</textarea>
+            `;
             contentArea.appendChild(pane);
+
+            const markdownDiv = pane.querySelector('.qp-prompt-markdown');
+            const textarea    = pane.querySelector('.qp-prompt-textarea');
+            const editBtn      = pane.querySelector('.qp-prompt-edit-btn');
+            const saveBtn      = pane.querySelector('.qp-prompt-save-btn');
+            const status       = pane.querySelector('.qp-prompt-status');
+            let savedContent = p.content;
+
+            markdownDiv.innerHTML = markdownModule.mdToHtml(savedContent);
+
+            editBtn.addEventListener('click', () => {
+                if (pane.dataset.mode === 'view') {
+                    pane.dataset.mode = 'edit';
+                    editBtn.textContent = 'Preview';
+                    textarea.focus();
+                } else {
+                    markdownDiv.innerHTML = markdownModule.mdToHtml(textarea.value);
+                    pane.dataset.mode = 'view';
+                    editBtn.textContent = 'Edit';
+                }
+            });
+
+            textarea.addEventListener('input', () => {
+                const dirty = textarea.value !== savedContent;
+                saveBtn.disabled = !dirty;
+                status.textContent = dirty ? 'Unsaved changes' : '';
+            });
+
+            saveBtn.addEventListener('click', async () => {
+                saveBtn.disabled = true;
+                status.textContent = 'Saving…';
+                try {
+                    const res = await fetch(`/api/quick_proposal/prompts/${encodeURIComponent(p.name)}`, {
+                        method: 'PUT',
+                        credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content: textarea.value }),
+                    });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    savedContent = textarea.value;
+                    markdownDiv.innerHTML = markdownModule.mdToHtml(savedContent);
+                    status.textContent = 'Saved';
+                    setTimeout(() => { if (status.textContent === 'Saved') status.textContent = ''; }, 2000);
+                } catch (e) {
+                    status.textContent = `Error: ${e.message}`;
+                    saveBtn.disabled = false;
+                }
+            });
 
             tab.addEventListener('click', () => {
                 tabBar.querySelectorAll('.qp-prompt-tab').forEach(t => t.classList.remove('active'));
                 contentArea.querySelectorAll('.qp-prompt-pane').forEach(p => p.style.display = 'none');
                 tab.classList.add('active');
-                pane.style.display = 'block';
+                pane.style.display = 'flex';
                 activeTab = p.name;
             });
 
@@ -2083,6 +2270,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
         <div class="qp-header">
             <span class="qp-title">Quick Proposal</span>
             <div class="qp-run-meta" id="qp-run-meta"></div>
+            <button class="qp-jobs-btn qp-header-jobs-btn" title="Manage the case library of reference jobs" type="button">Jobs</button>
             <button class="qp-view-rerun-btn qp-run-rerun-btn" title="Re-run full pipeline">Re-run</button>
             <label class="qp-auto-mode-label qp-header-auto-mode" id="qp-header-auto-mode">
                 <input type="checkbox" id="qp-auto-mode-header" checked> Auto
@@ -2120,6 +2308,10 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
                 <div class="qp-phase5-row">
                     <span class="qp-phase5-label">Retries</span>
                     <input type="number" class="qp-retry-input" id="qp-p3-retry-attempts" value="3" min="1" max="10">
+                </div>
+                <div class="qp-phase5-row">
+                    <span class="qp-phase5-label">Memories Recalled</span>
+                    <input type="number" class="qp-retry-input" id="qp-p3-memory-recall-count" value="12" min="0" max="50">
                 </div>
                 <div class="qp-phase5-row">
                     <span class="qp-phase5-label" title="Leave blank to use the full knowledge pack">Holdout KP</span>
@@ -2205,6 +2397,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
     const geminiSelect   = overlay.querySelector('#qp-p3-gemini-select');
     const managerSelect  = overlay.querySelector('#qp-p3-manager-select');
     const p3RetryInput   = overlay.querySelector('#qp-p3-retry-attempts');
+    const p3MemoryRecallInput = overlay.querySelector('#qp-p3-memory-recall-count');
     const phase5RunBtn   = overlay.querySelector('#qp-p3-run-btn');
     const resumeBtn      = overlay.querySelector('#qp-p3-resume-btn');
     const holdoutInput      = overlay.querySelector('#qp-p3-holdout-kp');
@@ -2341,7 +2534,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
             const res = await fetch(`/api/quick_proposal/runs/${runId}/phase5`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], holdout_kp_path: holdoutInput?.value.trim() || '' }),
+                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], holdout_kp_path: holdoutInput?.value.trim() || '', memory_recall_count: _intOrDefault(p3MemoryRecallInput.value, 12) }),
                 credentials: 'same-origin',
             });
             if (!res.ok) throw new Error(`Phase 5 start failed: ${res.status}`);
@@ -2361,7 +2554,7 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
             const res = await fetch(`/api/quick_proposal/runs/${runId}/phase5`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], holdout_kp_path: holdoutInput?.value.trim() || '', resume: true }),
+                body: JSON.stringify({ manager_model: managerSelect.value, gemini_model: geminiSelect.value, gemini_retry_attempts: parseInt(p3RetryInput.value, 10) || 3, gemini_fallback_models: [], holdout_kp_path: holdoutInput?.value.trim() || '', resume: true, memory_recall_count: _intOrDefault(p3MemoryRecallInput.value, 12) }),
                 credentials: 'same-origin',
             });
             if (!res.ok) throw new Error(`Resume failed: ${res.status}`);
@@ -2580,3 +2773,13 @@ export function buildRunsPanel({ onClose, onSelectRun, onOpenRun }) {
     return overlay;
 }
 
+
+// TODO_WW: "Jobs" header button (present in both QP overlay headers) deep-links
+// to the brain window's Jobs tab. Delegated so it works for every overlay build.
+if (!window.__qp_jobs_btn_bound) {
+    window.__qp_jobs_btn_bound = true;
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest?.('.qp-header-jobs-btn')) return;
+        import('../qp_jobs.js').then(m => m.openJobsTab && m.openJobsTab());
+    });
+}

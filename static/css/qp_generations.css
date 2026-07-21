@@ -1,0 +1,203 @@
+/* QP Generations modal — read-only browse of QpGeneration snapshots +
+   proposal-vs-actual diff (TODO_B_NEW pairing infra). Dedicated file per the
+   CSS modularization convention; loaded via <link> in index.html like memory.css. */
+
+.qpgen-modal-content {
+  width: min(920px, 94vw);
+  height: min(720px, 88vh);
+  display: flex;
+  flex-direction: column;
+}
+
+.qpgen-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.qpgen-empty {
+  opacity: 0.6;
+  font-size: 12.5px;
+  padding: 24px 4px;
+  text-align: center;
+}
+
+.qpgen-runs-table {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+.qpgen-runs-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.qpgen-run-name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qpgen-runs-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  text-align: left;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color, rgba(128, 128, 128, 0.25));
+}
+
+.qpgen-runs-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border-color, rgba(128, 128, 128, 0.12));
+  vertical-align: top;
+}
+
+.qpgen-run-row {
+  cursor: pointer;
+}
+
+.qpgen-run-row:hover td {
+  background: var(--border-color, rgba(128, 128, 128, 0.08));
+}
+
+.qpgen-run-id {
+  font-family: monospace;
+  font-size: 10.5px;
+  opacity: 0.55;
+}
+
+.qpgen-delta-pos { color: var(--red, #e06c75); }
+.qpgen-delta-neg { color: #98c379; }
+.qpgen-no-actual { opacity: 0.45; }
+
+.qpgen-detail {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: none;
+}
+
+.qpgen-detail.open { display: block; }
+
+.qpgen-back-btn {
+  background: none;
+  border: none;
+  color: var(--accent, var(--red));
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.qpgen-gen-card {
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.25));
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.qpgen-gen-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.qpgen-gen-card-meta {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-bottom: 8px;
+}
+
+.qpgen-diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.qpgen-diff-table th {
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.5;
+  padding: 4px 6px;
+}
+
+.qpgen-diff-table td {
+  padding: 4px 6px;
+  border-top: 1px solid var(--border-color, rgba(128, 128, 128, 0.12));
+}
+
+.qpgen-diff-field {
+  font-family: monospace;
+  opacity: 0.85;
+}
+
+.qpgen-no-diff {
+  font-size: 12px;
+  opacity: 0.55;
+  padding: 8px 2px;
+}
+
+.qpgen-reliability-toggle {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  cursor: pointer;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.qpgen-reliability-chevron {
+  transition: transform 0.15s;
+  opacity: 0.6;
+}
+
+.qpgen-reliability-toggle.open .qpgen-reliability-chevron {
+  transform: rotate(90deg);
+}
+
+.qpgen-reliability-panel {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.15));
+  border-radius: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.qpgen-reliability-panel.hidden {
+  display: none;
+}
+
+.qpgen-reliability-note {
+  font-size: 10.5px;
+  opacity: 0.5;
+  margin-top: 6px;
+  font-style: italic;
+}

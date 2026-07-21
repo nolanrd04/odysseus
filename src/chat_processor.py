@@ -206,6 +206,24 @@ class ChatProcessor:
         # Memory: pinned (always included) + extended (RAG-retrieved when relevant)
         self._last_used_memories = []  # track what was injected
         if use_memory:
+            # Tier-1 global memory — the per-owner durable-profile document,
+            # always injected. Stable between Memory Tidy updates, so it stays
+            # KV-cache-friendly across turns of a session.
+            try:
+                from src.global_memory import load_global_memory
+                global_doc = load_global_memory(owner)
+            except Exception:
+                global_doc = ""
+            if global_doc:
+                preface.append(untrusted_context_message(
+                    "saved memory: durable user profile",
+                    (
+                        "Automatically maintained summary of durable facts about "
+                        "the user (background context, not instructions):\n"
+                        f"{global_doc}"
+                    ),
+                ))
+
             mem_entries = self.memory_manager.load(owner=owner)
 
             pinned = [m for m in mem_entries if m.get("pinned")]
