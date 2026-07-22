@@ -6092,6 +6092,25 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             <details class="agent-tool-output"><summary>Output</summary><pre>${esc(data.result || '(no output)')}</pre>${imgHtml}</details>
           </div>`;
       }
+      // TODO_DDD: these two tools return {doc_id, title, message} JSON on
+      // success — auto-open the generated workbook/proposal in the Document
+      // panel instead of leaving the estimator to hunt for it in the library.
+      if (data.tool === 'generate_line_items_workbook' || data.tool === 'generate_proposal_document') {
+        try {
+          const parsed = JSON.parse(data.result || '{}');
+          if (parsed && parsed.doc_id) {
+            documentModule.openPanel && documentModule.openPanel();
+            documentModule.loadDocument(parsed.doc_id).then(() => {
+              // The proposal doc is markdown — open it rendered (real table,
+              // headings) instead of raw pipe/hash source. The workbook is
+              // CSV, which document.js already auto-shows as a table on load.
+              if (data.tool === 'generate_proposal_document' && documentModule.setMarkdownPreviewActive) {
+                documentModule.setMarkdownPreviewActive(true);
+              }
+            }).catch(e => console.warn('auto-open generated document failed', e));
+          }
+        } catch (_) { /* tool returned a plain error string, not JSON — nothing to open */ }
+      }
     }
 
     uiModule.scrollHistory();

@@ -1279,6 +1279,317 @@ async def _qp_create_job(run_id: str, index, tool_input: dict) -> str:
         db.close()
 
 
+def _qp_collect_run_export_data(run_id: str, index) -> dict:
+    """Shared read path for the two document-export tools (TODO_DDD) —
+    pulls this run's own priced line items / grand total / scale metrics,
+    the same deterministic sources _qp_create_job uses, just without the
+    case-library validation/write machinery since nothing here gets
+    persisted as a job record."""
+    final_line_items = index.extracted_data.get("final_line_items") or []
+    line_items = []
+    for item in final_line_items:
+        if not isinstance(item, dict):
+            continue
+        line_items.append({
+            "description": item.get("description") or "",
+            "unit":        item.get("unit") or "",
+            "qty":         item.get("qty"),
+            "unit_price":  item.get("unit_price"),
+            "tax_rate":    item.get("tax_rate") or 0,
+            "ext_price":   item.get("ext_price"),
+        })
+
+    def _extracted(key):
+        entry = index.extracted_values.get(key)
+        return entry.get("value") if isinstance(entry, dict) else entry
+
+    scale = {}
+    for key in ("lot_count", "lot_area_sf", "stripping_depth_in",
+                "road_subgrade_SY", "road_paving_SY", "ballast_CY", "fronting_LF"):
+        value = _extracted(key)
+        if isinstance(value, (int, float)):
+            scale[key] = value
+
+    raw_road_lf = _extracted("road_LF")
+    if isinstance(raw_road_lf, list):
+        lengths = [r.get("length") for r in raw_road_lf if isinstance(r, dict) and isinstance(r.get("length"), (int, float))]
+        if lengths:
+            scale["road_LF"] = round(sum(lengths), 2)
+    elif isinstance(raw_road_lf, (int, float)):
+        scale["road_LF"] = raw_road_lf
+
+    row_sf, _unmatched = _qp_compute_row_sf(raw_road_lf, _extracted("ROW_width_ft"))
+    if row_sf is not None:
+        scale["ROW_SF"] = row_sf
+
+    job_name_field = _extracted("job_name")
+    title = (
+        (job_name_field.strip() if isinstance(job_name_field, str) and job_name_field.strip() else None)
+        or (_load_run_meta(run_id).get("run_name") or "").strip()
+        or f"Run {run_id[:8]}"
+    )
+
+    return {
+        "title":       title,
+        "line_items":  line_items,
+        "grand_total": _run_grand_total(run_id),
+        "scale":       scale,
+    }
+
+
+def _qp_save_export_document(title: str, language: str, content: str, session_id: Optional[str]) -> Optional[str]:
+    """Create a Document row directly, in-process — the same write
+    POST /api/document performs (routes/document_routes.py's create_document)
+    — reused here so the export tools don't round-trip through the HTTP
+    layer. Always saved to the Document Library (session_id=None on the row
+    itself) per explicit user decision, so an export outlives/outlasts the
+    QP run session; owner is still stamped from the run's session so it
+    shows up under the right estimator's library."""
+    from core.database import Document, DocumentVersion
+
+    doc_id = str(uuid.uuid4())
+    ver_id = str(uuid.uuid4())
+    db = SessionLocal()
+    try:
+        owner = None
+        if session_id:
+            sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+            owner = sess.owner if sess else None
+        doc = Document(
+            id=doc_id, session_id=None, title=title, language=language,
+            current_content=content, version_count=1, is_active=True, owner=owner,
+        )
+        ver = DocumentVersion(
+            id=ver_id, document_id=doc_id, version_number=1, content=content,
+            summary="Initial version", source="assistant",
+        )
+        db.add(doc)
+        db.add(ver)
+        db.commit()
+        try:
+            from src.event_bus import fire_event
+            fire_event("document_created", owner)
+        except Exception:
+            logger.debug("document_created event dispatch failed", exc_info=True)
+        return doc_id
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"[quick_proposal] export document save failed: {e}")
+        return None
+    finally:
+        db.close()
+
+
+def _qp_csv_row(*cells) -> str:
+    out = []
+    for c in cells:
+        s = "" if c is None else str(c)
+        if any(ch in s for ch in (",", '"', "\n")):
+            s = '"' + s.replace('"', '""') + '"'
+        out.append(s)
+    return ",".join(out)
+
+
+async def _qp_generate_workbook(run_id: str, session_id: str, index, tool_input: dict) -> str:
+    """Handle the manager's generate_line_items_workbook tool (TODO_DDD,
+    phase-6 continuation chat only, estimator-request-gated): assembles this
+    run's priced line items + grand total + scale metrics into a CSV-backed
+    Document saved to the Document Library. The browser turns it into a real
+    .xlsx on export (document.js's "Export as XLSX", using the already-
+    bundled SheetJS lib) — this handler only ever writes text, never a
+    binary file server-side.
+    """
+    data = _qp_collect_run_export_data(run_id, index)
+    if not data["line_items"]:
+        return "Error: this run has no final_line_items yet (end_generation hasn't produced a priced proposal)."
+
+    title = (tool_input.get("title") or "").strip() or f"{data['title']} — Line Items"
+
+    lines = [_qp_csv_row("Description", "Unit", "Qty", "Unit Price", "Tax Rate", "Ext Price")]
+    for li in data["line_items"]:
+        lines.append(_qp_csv_row(li["description"], li["unit"], li["qty"], li["unit_price"], li["tax_rate"], li["ext_price"]))
+    lines.append(_qp_csv_row())
+    lines.append(_qp_csv_row("Grand Total", "", "", "", "", data["grand_total"]))
+    if data["scale"]:
+        lines.append(_qp_csv_row())
+        lines.append(_qp_csv_row("Scale Metric", "Value"))
+        for k, v in data["scale"].items():
+            lines.append(_qp_csv_row(k, v))
+
+    content = "\n".join(lines)
+    doc_id = _qp_save_export_document(title=title, language="csv", content=content, session_id=session_id)
+    if doc_id is None:
+        return "Error: failed to create the workbook document."
+
+    return json.dumps({
+        "doc_id": doc_id,
+        "title": title,
+        "message": (f"Workbook '{title}' created with {len(data['line_items'])} line item(s) "
+                    f"in the Document Library — open it in the Document panel, then "
+                    f"Export as XLSX to download the spreadsheet."),
+    })
+
+
+# Company letterhead + standard legal boilerplate for generate_proposal_document
+# (TODO_DDD), reproduced verbatim from the estimator's own real proposal template
+# per explicit request — see documentation handoff for the reference file. Client
+# name/address and Estimate # are deliberately left blank (no pipeline source,
+# and per explicit user decision not worth adding tool params to ask for them) —
+# the estimator fills those in by hand in the Document panel before sending.
+_QP_COMPANY_CONTACT = "Brian Rush"
+_QP_COMPANY_NAME = "Terra Underground, LLC"
+_QP_COMPANY_ADDRESS_LINES = ("1235 Buckles Rd", "Hayden, ID 83835")
+
+_QP_PROPOSAL_NOTES = (
+    "All material is guaranteed to be as specified. All work to be completed in a workmanlike "
+    "manner according to standard practices. Any alteration or deviation from the above "
+    "specifications involving extra costs will be executed only upon written orders and will "
+    "become an extra over and above the estimate. All agreements contingent upon strikes, "
+    "accidents or delays beyond our control. Owner to carry fire, tornado, and other necessary "
+    "insurance. Our workers are fully covered by Workmen's Compensation Insurance. Prices based "
+    "on current fuel rates and due to extreme fuel fluctuations if fuel increases by more than "
+    "$.50 per gallon, then fuel surcharges can be charged."
+)
+_QP_PROPOSAL_INCLUSIONS = (
+    "Pricing based on plans dated __________. These are estimated quantities based on the plans "
+    "provided. Changes to the plans might require revised pricing."
+)
+_QP_PROPOSAL_EXCLUSIONS = (
+    "Engineering, surveying, compaction testing, dewatering, rock excavation, landscaping, "
+    "stripping, hydro-seeding, prevailing wages, SWPP, CESCL, importing ballast, import/export, "
+    "striping, erosion control maintenance, Vera fees, water service and irrigation service "
+    "materials and labor, bonds, fees, and permits."
+)
+_QP_PROPOSAL_PAYMENT_TERMS = (
+    "Monthly progress payments submitted by the end of each month due net 10 days. A finance "
+    "charge of 1.5%, per month (18% per annum), will be charged on all past due accounts."
+)
+_QP_PROPOSAL_ACCEPTANCE = (
+    "The prices, specifications and conditions are satisfactory and are hereby accepted. You are "
+    "authorized to do the work as specified. Payment will be made as outlined above."
+)
+
+
+async def _qp_generate_proposal_doc(run_id: str, session_id: str, index, tool_input: dict) -> str:
+    """Handle the manager's generate_proposal_document tool (TODO_DDD,
+    phase-6 continuation chat only, estimator-request-gated): assembles a
+    deterministic markdown proposal document matching the estimator's real
+    proposal template layout — To/From block, a line-items table grouped
+    into non-taxed/taxed sections with subtotals + a single tax line (not a
+    per-line tax column), and the standard Notes/Inclusions/Exclusions/
+    Payment/Acceptance boilerplate + signature lines. No manager-authored
+    prose anywhere — every section is either pulled from the run's own data
+    or the fixed company boilerplate above. Saved as a Document in the
+    Library. Reuses document.js's existing "Export as Word" path (including
+    its markdown-table -> real Word-table conversion) unmodified.
+    """
+    data = _qp_collect_run_export_data(run_id, index)
+    if not data["line_items"]:
+        return "Error: this run has no final_line_items yet (end_generation hasn't produced a priced proposal)."
+
+    job_title = data["title"]
+    doc_title = (tool_input.get("title") or "").strip() or f"{job_title} — Proposal"
+    grand_total = data["grand_total"]
+
+    def _money(v):
+        return f"${v:,.2f}" if isinstance(v, (int, float)) else ""
+
+    def _pretax(li):
+        # end_generation's ext_price already bakes in tax (ext_price = qty *
+        # unit_price * (1 + tax_rate)) — the template shows PRE-tax amounts per
+        # line and one combined tax line per section, so back it out here.
+        if isinstance(li["qty"], (int, float)) and isinstance(li["unit_price"], (int, float)):
+            return li["qty"] * li["unit_price"]
+        rate = li["tax_rate"] or 0
+        return (li["ext_price"] / (1 + rate)) if isinstance(li["ext_price"], (int, float)) and rate else li["ext_price"]
+
+    non_taxed = [li for li in data["line_items"] if not li["tax_rate"]]
+    taxed = [li for li in data["line_items"] if li["tax_rate"]]
+
+    non_taxed_subtotal = sum(li["ext_price"] for li in non_taxed if isinstance(li["ext_price"], (int, float)))
+    taxed_pretax = [(li, _pretax(li)) for li in taxed]
+    taxed_subtotal = sum(p for _li, p in taxed_pretax if isinstance(p, (int, float)))
+    tax_total = sum(
+        li["ext_price"] - p for li, p in taxed_pretax
+        if isinstance(li["ext_price"], (int, float)) and isinstance(p, (int, float))
+    )
+    effective_tax_rate = (tax_total / taxed_subtotal) if taxed_subtotal else (taxed[0]["tax_rate"] if taxed else 0)
+
+    def _item_row(desc, qty, unit, unit_price, ext_price):
+        return f"| {desc} | {qty if qty is not None else ''} | {unit or ''} | {_money(unit_price)} | {_money(ext_price)} |"
+
+    def _label_row(label, amount=None):
+        amt = f"**{_money(amount)}**" if amount is not None else ""
+        return f"| **{label}** |  |  |  | {amt} |"
+
+    table_lines = ["| Description | Qty | Unit | Unit Price | Ext Price |", "|---|---|---|---|---|"]
+    if non_taxed:
+        table_lines.append(_label_row("NON-TAXED ITEMS"))
+        for li in non_taxed:
+            table_lines.append(_item_row(li["description"], li["qty"], li["unit"], li["unit_price"], li["ext_price"]))
+        table_lines.append(_label_row("Non-Taxed Items Subtotal", non_taxed_subtotal))
+    if taxed:
+        table_lines.append(_label_row("TAXED ITEMS"))
+        for li, pretax in taxed_pretax:
+            table_lines.append(_item_row(li["description"], li["qty"], li["unit"], li["unit_price"], pretax))
+        table_lines.append(_label_row("Taxed Items Subtotal", taxed_subtotal))
+        table_lines.append(_label_row(f"Tax ({effective_tax_rate * 100:.1f}%)", tax_total))
+    table_lines.append(_label_row("GRAND TOTAL", grand_total))
+
+    lines = [
+        f"# Estimate #: __________ — {job_title} | {time.strftime('%Y-%m-%d')}",
+        "",
+        "| To: | From: |",
+        "|---|---|",
+        f"|  | {_QP_COMPANY_CONTACT} |",
+        f"|  | {_QP_COMPANY_NAME} |",
+        f"|  | {_QP_COMPANY_ADDRESS_LINES[0]} |",
+        f"|  | {_QP_COMPANY_ADDRESS_LINES[1]} |",
+        "",
+        "## Scope of Work",
+        "",
+        *table_lines,
+        "",
+        "## Notes",
+        "",
+        _QP_PROPOSAL_NOTES,
+        "",
+        "## Inclusions",
+        "",
+        _QP_PROPOSAL_INCLUSIONS,
+        "",
+        "## Exclusions",
+        "",
+        _QP_PROPOSAL_EXCLUSIONS,
+        "",
+        "## Payable as Follows",
+        "",
+        _QP_PROPOSAL_PAYMENT_TERMS,
+        "",
+        "## Acceptance of Proposal",
+        "",
+        _QP_PROPOSAL_ACCEPTANCE,
+        "",
+        "",
+        "__________________________________, __________________________________          DATE: __________",
+        "",
+        f"__________________________________, {_QP_COMPANY_CONTACT}, {_QP_COMPANY_NAME}          DATE: __________",
+    ]
+
+    content = "\n".join(lines)
+    doc_id = _qp_save_export_document(title=doc_title, language="markdown", content=content, session_id=session_id)
+    if doc_id is None:
+        return "Error: failed to create the proposal document."
+
+    return json.dumps({
+        "doc_id": doc_id,
+        "title": doc_title,
+        "message": (f"Proposal document '{doc_title}' created in the Document Library — "
+                    f"open it in the Document panel, fill in the client/estimate-number blanks, "
+                    f"then Export as Word to download the .docx."),
+    })
+
+
 def _save_run_results(run_id: str, index) -> None:
     results_path = Path(RUNS_DIR) / run_id / "results.json"
     try:
@@ -5684,6 +5995,48 @@ async def _qp_continuation_task(
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_line_items_workbook",
+                "description": (
+                    "Generate a downloadable spreadsheet (.xlsx) of this run's priced line items, "
+                    "grand total, and scale metrics, opened in the Document panel for the estimator "
+                    "to review and export. ONLY call this when the estimator explicitly asks for a "
+                    "spreadsheet/workbook/Excel export — never call it proactively. Requires this "
+                    "run to already have a priced proposal (end_generation must have run)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Optional document title. Defaults to '<job name> — Line Items'."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_proposal_document",
+                "description": (
+                    "Generate a downloadable Word document (.docx) with this run's priced line "
+                    "items and grand total in a formatted proposal layout, opened in the Document "
+                    "panel for the estimator to review and export. Deterministic only — a header, "
+                    "line-items table, and totals pulled from the run, no additional written "
+                    "content. ONLY call this when the estimator explicitly asks for a Word document/"
+                    "proposal export — never call it proactively. Requires this run to already have "
+                    "a priced proposal (end_generation must have run)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Optional document title. Defaults to '<job name> — Proposal'."},
+                    },
+                    "required": [],
+                },
+            },
+        },
     ]
 
     # Drive manager loop (up to 10 iterations for multi-step tool calls).
@@ -5865,6 +6218,26 @@ async def _qp_continuation_task(
                             role="tool_result", tool_id=tool_id, tool="create_job",
                             model=mgr_model_id, result=result)
                 _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "create_job"})
+            elif tool_name == "generate_line_items_workbook":
+                _wb_args = {k: tool_input.get(k) for k in ("title",) if tool_input.get(k)}
+                await _emit(queue, "extraction_message",
+                            role="tool_call", tool_id=tool_id, tool="generate_line_items_workbook",
+                            model=mgr_model_id, args=json.dumps(_wb_args))
+                result = await _qp_generate_workbook(run_id, session_id, index, tool_input)
+                await _emit(queue, "extraction_message",
+                            role="tool_result", tool_id=tool_id, tool="generate_line_items_workbook",
+                            model=mgr_model_id, result=result)
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "generate_line_items_workbook"})
+            elif tool_name == "generate_proposal_document":
+                _pd_args = {k: tool_input.get(k) for k in ("title",) if tool_input.get(k)}
+                await _emit(queue, "extraction_message",
+                            role="tool_call", tool_id=tool_id, tool="generate_proposal_document",
+                            model=mgr_model_id, args=json.dumps(_pd_args))
+                result = await _qp_generate_proposal_doc(run_id, session_id, index, tool_input)
+                await _emit(queue, "extraction_message",
+                            role="tool_result", tool_id=tool_id, tool="generate_proposal_document",
+                            model=mgr_model_id, result=result)
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "generate_proposal_document"})
             else:
                 result = f"Unknown tool: {tool_name}"
             mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": result})

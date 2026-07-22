@@ -8450,6 +8450,20 @@ import * as Modals from './modalManager.js';
     return _docxReady;
   }
 
+  let _xlsxReady = null;
+  function ensureXLSX() {
+    if (_xlsxReady) return _xlsxReady;
+    if (window.XLSX) return (_xlsxReady = Promise.resolve());
+    _xlsxReady = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/static/lib/xlsx.full.min.js';
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('Failed to load XLSX library'));
+      document.head.appendChild(s);
+    });
+    return _xlsxReady;
+  }
+
   let _html2pdfReady = null;
   function ensureHtml2Pdf() {
     if (_html2pdfReady) return _html2pdfReady;
@@ -8637,6 +8651,7 @@ import * as Modals from './modalManager.js';
       { label: 'Export Markdown', fn: exportDocument },
       { label: 'Print as PDF', fn: exportAsPdf },
       { label: 'Export as Word', fn: exportAsDocx },
+      { label: 'Export as XLSX', fn: exportAsXlsx },
     );
 
     options.forEach(opt => {
@@ -8736,6 +8751,29 @@ import * as Modals from './modalManager.js';
     if (uiModule) uiModule.showToast('Exporting PDF...');
   }
 
+  /** Inline markdown (bold/italic only) -> docx TextRuns, shared by plain
+   * paragraphs and table-cell paragraphs so both apply the same formatting. */
+  function _mdLineToRuns(TextRun, line) {
+    const runs = [];
+    const parts = line.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/);
+    for (const part of parts) {
+      if (!part) continue;
+      if (part.startsWith('**') && part.endsWith('**')) {
+        runs.push(new TextRun({ text: part.slice(2, -2), bold: true }));
+      } else if (part.startsWith('*') && part.endsWith('*')) {
+        runs.push(new TextRun({ text: part.slice(1, -1), italics: true }));
+      } else {
+        runs.push(new TextRun(part));
+      }
+    }
+    return runs.length ? runs : [new TextRun('')];
+  }
+
+  /** One markdown table row ("| a | b |") -> trimmed cell strings. */
+  function _mdTableRowCells(line) {
+    return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+  }
+
   async function exportAsDocx() {
     if (!activeDocId) return;
     const textarea = document.getElementById('doc-editor-textarea');
@@ -8746,33 +8784,50 @@ import * as Modals from './modalManager.js';
       if (uiModule) uiModule.showError('Failed to load DOCX library');
       return;
     }
-    const text = textarea.value || '';
-    const { Document, Packer, Paragraph, TextRun, HeadingLevel } = window.docx;
-    // Parse text into paragraphs, handle markdown headings
-    const paragraphs = text.split('\n').map(line => {
+    const { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType } = window.docx;
+    const lines = (textarea.value || '').split('\n');
+    // GFM header-separator row, e.g. "|---|:--:|---|" — marks the previous
+    // pipe-led line as a table header, and is itself dropped from the output.
+    const sepRe = /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+    const children = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      // A real markdown table needs its header-separator row right after the
+      // first pipe-led line — a lone "|" line elsewhere falls through to
+      // plain-paragraph handling instead of being (mis)treated as a table.
+      if (line.trim().startsWith('|') && lines[i + 1] !== undefined && sepRe.test(lines[i + 1])) {
+        const tableLines = [line];
+        let j = i + 1;
+        while (j < lines.length && lines[j].trim().startsWith('|')) {
+          tableLines.push(lines[j]);
+          j++;
+        }
+        const rows = tableLines.filter(l => !sepRe.test(l)).map(_mdTableRowCells);
+        const tableRows = rows.map((cells, rowIdx) => new TableRow({
+          children: cells.map(cell => new TableCell({
+            width: { size: Math.floor(100 / cells.length), type: WidthType.PERCENTAGE },
+            shading: rowIdx === 0 ? { fill: 'D9D9D9' } : undefined,
+            children: [new Paragraph({ children: _mdLineToRuns(TextRun, cell) })],
+          })),
+        }));
+        children.push(new Table({ rows: tableRows, width: { size: 100, type: WidthType.PERCENTAGE } }));
+        children.push(new Paragraph({ text: '' })); // spacing after the table
+        i = j;
+        continue;
+      }
       const h1 = line.match(/^# (.+)/);
       const h2 = line.match(/^## (.+)/);
       const h3 = line.match(/^### (.+)/);
-      if (h1) return new Paragraph({ text: h1[1], heading: HeadingLevel.HEADING_1 });
-      if (h2) return new Paragraph({ text: h2[1], heading: HeadingLevel.HEADING_2 });
-      if (h3) return new Paragraph({ text: h3[1], heading: HeadingLevel.HEADING_3 });
-      // Handle bold/italic
-      const runs = [];
-      const parts = line.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/);
-      for (const part of parts) {
-        if (part.startsWith('**') && part.endsWith('**')) {
-          runs.push(new TextRun({ text: part.slice(2, -2), bold: true }));
-        } else if (part.startsWith('*') && part.endsWith('*')) {
-          runs.push(new TextRun({ text: part.slice(1, -1), italics: true }));
-        } else {
-          runs.push(new TextRun(part));
-        }
-      }
-      return new Paragraph({ children: runs });
-    });
+      if (h1) children.push(new Paragraph({ text: h1[1], heading: HeadingLevel.HEADING_1 }));
+      else if (h2) children.push(new Paragraph({ text: h2[1], heading: HeadingLevel.HEADING_2 }));
+      else if (h3) children.push(new Paragraph({ text: h3[1], heading: HeadingLevel.HEADING_3 }));
+      else children.push(new Paragraph({ children: _mdLineToRuns(TextRun, line) }));
+      i++;
+    }
 
     const doc = new Document({
-      sections: [{ children: paragraphs }],
+      sections: [{ children }],
     });
     const blob = await Packer.toBlob(doc);
     const baseName = _getExportBaseName();
@@ -8782,6 +8837,70 @@ import * as Modals from './modalManager.js';
     a.click();
     URL.revokeObjectURL(a.href);
     if (uiModule) uiModule.showToast('Exported as DOCX');
+  }
+
+  /** Split one CSV line into cells, honoring quoted fields (RFC 4180-ish). */
+  function _parseCsvLine(line) {
+    const cells = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') { cur += '"'; i++; }
+          else inQuotes = false;
+        } else cur += ch;
+      } else if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        cells.push(cur);
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    cells.push(cur);
+    return cells;
+  }
+
+  /** Parse a document's raw text into a 2D array of rows for XLSX export.
+   * Markdown tables (lines starting with "|", separator row dropped) take
+   * priority since generate_proposal_document produces those; otherwise the
+   * content is treated as CSV, matching generate_line_items_workbook. */
+  function _parseTableRows(text) {
+    const rawLines = (text || '').split(/\r?\n/);
+    const mdLines = rawLines.filter(l => l.trim().startsWith('|'));
+    if (mdLines.length >= 2) {
+      const sepRe = /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+      return mdLines
+        .filter(l => !sepRe.test(l))
+        .map(l => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()));
+    }
+    return rawLines.filter(l => l.length > 0).map(_parseCsvLine);
+  }
+
+  async function exportAsXlsx() {
+    if (!activeDocId) return;
+    const textarea = document.getElementById('doc-editor-textarea');
+    if (!textarea) return;
+    try {
+      await ensureXLSX();
+    } catch (e) {
+      if (uiModule) uiModule.showError('Failed to load XLSX library');
+      return;
+    }
+    const rows = _parseTableRows(textarea.value || '');
+    if (!rows.length) {
+      if (uiModule) uiModule.showError('Nothing to export');
+      return;
+    }
+    const ws = window.XLSX.utils.aoa_to_sheet(rows);
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+    const baseName = _getExportBaseName();
+    window.XLSX.writeFile(wb, baseName + '.xlsx');
+    if (uiModule) uiModule.showToast('Exported as XLSX');
   }
 
   /** Delete the active document */
@@ -10081,6 +10200,7 @@ const documentModule = {
   openLibrary,
   closeLibrary,
   isLibraryOpen,
+  setMarkdownPreviewActive: _setMarkdownPreviewActive,
 };
 
 export default documentModule;
