@@ -3,6 +3,7 @@ uvicorn
 python-multipart
 python-dotenv
 httpx
+httpcore>=1.0,<2.0
 # Salvages malformed Gemini phase-1 classification JSON (missing/trailing commas,
 # unescaped quotes/control chars) instead of re-running the vision call (TODO_DD).
 json-repair

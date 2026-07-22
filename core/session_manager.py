@@ -14,11 +14,12 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 
-from src.chat_attachment_blobs import externalize_blobs as _externalize_blobs
 from src.chat_attachment_blobs import reinline_blobs as _reinline_blobs
 from src.chat_attachment_blobs import cleanup_blobs_for_messages as _cleanup_blobs_for_messages
 from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal, utcnow_naive
 from .models import Session, ChatMessage
+from src.attachment_refs import persistable_message_content
+from src.upload_handler import reserve_message_upload_references
 
 # Re-export singleton accessors from models for convenience
 from .models import set_session_manager_instance, get_session_manager_instance
@@ -43,7 +44,21 @@ def _parse_msg_content(raw):
     if isinstance(raw, str) and raw.startswith('[{') and '"type"' in raw:
         try:
             parsed = json.loads(raw)
-            if isinstance(parsed, list) and all(isinstance(p, dict) for p in parsed):
+            # Only treat as serialized multimodal content when EVERY element is
+            # a dict whose "type" is a recognized content-block kind. Otherwise a
+            # plain text message that merely *looks* like a JSON array of objects
+            # (e.g. a user pasting an API schema/sample with a "type" field) was
+            # silently parsed back into a list, destroying the original string.
+            _BLOCK_TYPES = {
+                "text", "image", "image_url", "audio", "input_audio",
+                "input_image", "document", "file",
+            }
+            if (isinstance(parsed, list) and parsed
+                    and all(isinstance(p, dict) and p.get("type") in _BLOCK_TYPES
+                            for p in parsed)):
+                # Legacy rows may still carry odysseus-blob: refs from before
+                # the attachment_refs migration — reinline is a no-op for
+                # anything else (data: URLs, attachment_ref blocks, etc).
                 return _reinline_blobs(parsed)
         except (json.JSONDecodeError, ValueError):
             pass
@@ -64,6 +79,7 @@ class SessionManager:
     def __init__(self, sessions_file: str = None):
         # sessions_file kept for backward compat, not used
         self.sessions: Dict[str, Session] = {}
+        self.upload_handler = None
         self.load_sessions()
 
     # ------------------------------------------------------------------
@@ -226,17 +242,26 @@ class SessionManager:
                 logger.warning("Dropping message for deleted session %s", session_id)
                 return
 
+            missing_upload_id = reserve_message_upload_references(
+                getattr(self, "upload_handler", None),
+                getattr(db_session, "owner", None),
+                message.content,
+                message.metadata,
+            )
+            if missing_upload_id:
+                raise ValueError(
+                    f"Referenced upload is no longer available: {missing_upload_id}"
+                )
+
             msg_id = str(uuid.uuid4())
             msg_time = datetime.utcnow()
             if message.metadata is None:
                 message.metadata = {}
             message.metadata.setdefault('timestamp', _message_timestamp_iso(msg_time))
-            # Multimodal content (image/audio attachments) is a list — serialize
-            # to JSON so the Text column can store it.  On reload, _db_to_session
-            # detects the JSON-array prefix and parses it back.
-            _content = message.content
-            if isinstance(_content, list):
-                _content = json.dumps(_externalize_blobs(_content, msg_id))
+            # Multimodal content may contain provider data URLs for the live
+            # model call. Persist only readable text plus attachment references
+            # so chat_messages/FTS do not duplicate upload bytes.
+            _content = persistable_message_content(message.content, message.metadata)
             db_message = DbChatMessage(
                 id=msg_id,
                 session_id=session_id,
@@ -325,6 +350,29 @@ class SessionManager:
                 row[0] for row in
                 db.query(DbChatMessage.id).filter(DbChatMessage.session_id == session_id).all()
             ]
+
+            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if db_session is None:
+                logger.warning("Cannot replace history for missing session %s", session_id)
+                return False
+
+            # Reserve every incoming attachment before removing any durable
+            # message row. reserve_upload() shares the upload lifecycle lock
+            # with cleanup, so an upload cannot be deleted between this
+            # ownership check/access touch and the replacement transaction.
+            # A failed reservation must leave the existing transcript intact.
+            for message in messages:
+                missing_upload_id = reserve_message_upload_references(
+                    getattr(self, "upload_handler", None),
+                    getattr(db_session, "owner", None),
+                    message.content,
+                    message.metadata,
+                )
+                if missing_upload_id:
+                    raise ValueError(
+                        f"Referenced upload is no longer available: {missing_upload_id}"
+                    )
+
             db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).delete()
             _cleanup_blobs_for_messages(old_ids)
             now = datetime.now(timezone.utc)
@@ -334,15 +382,9 @@ class SessionManager:
                     id=msg_id,
                     session_id=session_id,
                     role=message.role,
-                    # Multimodal content (image/audio attachments) is a list;
-                    # serialize to JSON so the Text column round-trips via
-                    # _parse_msg_content. Storing the raw list let SQLAlchemy
-                    # bind its single-quoted repr, which _parse_msg_content
-                    # cannot parse (it looks for double-quoted "type"), so the
-                    # attachment was destroyed on reload. Mirrors _persist_message.
-                    content=(json.dumps(_externalize_blobs(message.content, msg_id))
-                             if isinstance(message.content, list)
-                             else message.content),
+                    # Mirrors _persist_message: keep raw media bytes out of the
+                    # persisted transcript and search index.
+                    content=persistable_message_content(message.content, message.metadata),
                     meta_data=json.dumps(message.metadata) if message.metadata else None,
                     timestamp=now + timedelta(microseconds=i),
                 )
@@ -351,12 +393,10 @@ class SessionManager:
                     message.metadata = {}
                 message.metadata["_db_id"] = msg_id
 
-            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-            if db_session:
-                db_session.message_count = len(messages)
-                db_session.updated_at = now
-                db_session.last_accessed = now
-                db_session.last_message_at = now
+            db_session.message_count = len(messages)
+            db_session.updated_at = now
+            db_session.last_accessed = now
+            db_session.last_message_at = now
 
             db.commit()
             session.history = list(messages)
