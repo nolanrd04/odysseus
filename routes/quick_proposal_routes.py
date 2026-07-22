@@ -692,9 +692,64 @@ def _save_context_usage(run_id: str, role: str, payload: dict) -> None:
         logger.warning(f"[quick_proposal] context_usage save failed run={run_id}: {e}")
 
 
+# TODO_CCC: fallback $/1M-token rates, used only until the matching setting is read.
+# Neither Anthropic nor Google expose a pricing-lookup API — these are user-editable
+# via the Quick Proposal Prompts panel's Pricing tab (src.settings DEFAULT_SETTINGS
+# qp_pricing_<role>_*). Role-level (not per-model-id), matching cumulative_usage's own
+# granularity — re-tune when switching model tiers (e.g. Sonnet -> Opus).
+_QP_DEFAULT_PRICING = {
+    "claude": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
+    "gemini": {"input": 2.00, "output": 12.00, "cache_write": 0.00, "cache_read": 0.20},
+}
+
+
+def _qp_pricing_rates(role: str) -> dict:
+    """$-per-million-token rates for `role` ('claude' or 'gemini'), from settings."""
+    from src.settings import get_setting
+    defaults = _QP_DEFAULT_PRICING.get(role, _QP_DEFAULT_PRICING["claude"])
+    return {
+        "input":       get_setting(f"qp_pricing_{role}_input_per_million", defaults["input"]),
+        "output":      get_setting(f"qp_pricing_{role}_output_per_million", defaults["output"]),
+        "cache_write": get_setting(f"qp_pricing_{role}_cache_write_per_million", defaults["cache_write"]),
+        "cache_read":  get_setting(f"qp_pricing_{role}_cache_read_per_million", defaults["cache_read"]),
+    }
+
+
+def _qp_estimate_cost(role: str, usage: dict) -> float:
+    """Estimate $ cost of ONE call's token usage (not aggregated totals — see why below).
+
+    Claude and Gemini report cached tokens with different semantics, so they can't
+    share one formula: Anthropic's `input_tokens` is only the uncached remainder once
+    caching is active — cache_creation/cache_read are additive on top of it. Gemini's
+    `cached_tokens` is (normally) a subset of `prompt_tokens` for that same call — billing
+    the full `input_tokens` count AND the cache_read count would double-charge those
+    tokens, so the cached portion is carved back out of the full-price bucket first.
+
+    This MUST run per call, not on accumulated cumulative_usage totals: the subset
+    relationship only holds within a single Gemini call. A live run showed cumulative
+    cache_read exceeding cumulative input_tokens after enough calls (at least one call's
+    cached_tokens exceeded that same call's prompt_tokens — a real Gemini-reported
+    anomaly) — clamping the *aggregate* difference at zero then wiped out the "regular
+    input" billing for the entire run's worth of otherwise-normal calls, not just the
+    one anomalous call. Clamping per call instead contains the damage to that one call.
+    """
+    rates = _qp_pricing_rates(role)
+    input_tokens  = usage.get("prompt_tokens", 0) or 0
+    output_tokens = usage.get("completion_tokens", 0) or 0
+    cache_write   = usage.get("cache_creation_input_tokens", 0) or 0
+    cache_read    = usage.get("cache_read_input_tokens", 0) or 0
+    billable_input = input_tokens if role == "claude" else max(input_tokens - cache_read, 0)
+    return (
+        billable_input * rates["input"]
+        + output_tokens * rates["output"]
+        + cache_write * rates["cache_write"]
+        + cache_read * rates["cache_read"]
+    ) / 1_000_000
+
+
 def _add_cumulative_usage(run_id: str, role: str, usage: dict) -> dict:
     """Add one turn's token usage to the run's running total for `role`, persisted to
-    results.json, and return the updated total.
+    results.json, and return the updated total (including a running `cost_usd`).
 
     Kept strictly separate per role (`claude` manager turns vs. `gemini` extraction
     turns) rather than combined — their per-call costs are very different and the
@@ -721,6 +776,10 @@ def _add_cumulative_usage(run_id: str, role: str, usage: dict) -> dict:
         totals["cache_creation_input_tokens"] += usage.get("cache_creation_input_tokens", 0) or 0
         totals["cache_read_input_tokens"]      += usage.get("cache_read_input_tokens", 0) or 0
         totals["calls"] += 1
+        # Accumulated per-call (not recomputed from the aggregated totals above — see
+        # _qp_estimate_cost's docstring for why that silently zeroed out large swaths of
+        # legitimate spend). A rate edited mid-run only affects calls made after the edit.
+        totals["cost_usd"] = round(totals.get("cost_usd", 0) + _qp_estimate_cost(role, usage), 6)
         results_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
         return totals
     except Exception as e:
@@ -2995,23 +3054,41 @@ async def _run_gemini_with_tools(
 
         g_usage = resp_data.get("usage", {})
         if g_usage:
-            logger.info(f"[quick_proposal] gemini raw usage run={index.run_id} usage={json.dumps(g_usage)}")
-            _ctx_payload = dict(role="gemini",
-                                 model=gemini_state.get("model", ""),
-                                 input_tokens=g_usage.get("prompt_tokens", 0),
-                                 output_tokens=g_usage.get("completion_tokens", 0),
-                                 context_window=1048576,
-                                 cache_creation_input_tokens=g_usage.get("cache_creation_input_tokens", 0),
-                                 cache_read_input_tokens=g_usage.get("cache_read_input_tokens", 0))
-            await _emit(queue, "context_usage", **_ctx_payload)
-            _save_context_usage(index.run_id, "gemini", _ctx_payload)
-            logger.info(f"[quick_proposal] gemini call run={index.run_id} "
+            # This loop's own model is nominally Gemini, but Advanced Mode (TODO_AAA) can
+            # route an individual call to Claude via _gemini_call_with_retry's Anthropic
+            # branch — attribute cost/cumulative_usage to whichever provider actually
+            # served the call (TODO_CCC), not to the loop's nominal role.
+            _served_role = "claude" if resp_data.get("_anthropic_streamed") else "gemini"
+            logger.info(f"[quick_proposal] {_served_role} raw usage run={index.run_id} usage={json.dumps(g_usage)}")
+            if _served_role == "gemini":
+                # Gemini's cache-read count is nested (usage.prompt_tokens_details.cached_tokens),
+                # not a flat field like Claude's — extract it so cumulative_usage/cost don't
+                # silently treat every cached call as full-price input (TODO_CCC).
+                if not g_usage.get("cache_read_input_tokens"):
+                    g_usage["cache_read_input_tokens"] = (
+                        (g_usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
+                    )
+            # Computed before _ctx_payload so the running session cost (TODO_CCC) can ride
+            # along in the same context_usage event/snapshot as the context-% (TODO_BBB).
+            _cum = _add_cumulative_usage(index.run_id, _served_role, g_usage)
+            if _served_role == "gemini":
+                _ctx_payload = dict(role="gemini",
+                                     model=gemini_state.get("model", ""),
+                                     input_tokens=g_usage.get("prompt_tokens", 0),
+                                     output_tokens=g_usage.get("completion_tokens", 0),
+                                     context_window=1048576,
+                                     cache_creation_input_tokens=g_usage.get("cache_creation_input_tokens", 0),
+                                     cache_read_input_tokens=g_usage.get("cache_read_input_tokens", 0),
+                                     session_cost_usd=_cum.get("cost_usd", 0))
+                await _emit(queue, "context_usage", **_ctx_payload)
+                _save_context_usage(index.run_id, "gemini", _ctx_payload)
+            logger.info(f"[quick_proposal] {_served_role} call run={index.run_id} "
                         f"input={g_usage.get('prompt_tokens', '?')} output={g_usage.get('completion_tokens', '?')} "
                         f"cache_read={g_usage.get('cache_read_input_tokens', '?')} cache_creation={g_usage.get('cache_creation_input_tokens', '?')}")
-            _cum = _add_cumulative_usage(index.run_id, "gemini", g_usage)
-            logger.info(f"[quick_proposal] gemini cumulative run={index.run_id} calls={_cum.get('calls')} "
+            logger.info(f"[quick_proposal] {_served_role} cumulative run={index.run_id} calls={_cum.get('calls')} "
                         f"input={_cum.get('input_tokens')} output={_cum.get('output_tokens')} "
-                        f"cache_read={_cum.get('cache_read_input_tokens')} cache_creation={_cum.get('cache_creation_input_tokens')}")
+                        f"cache_read={_cum.get('cache_read_input_tokens')} cache_creation={_cum.get('cache_creation_input_tokens')} "
+                        f"cost_usd={_cum.get('cost_usd')}")
         choice     = resp_data.get("choices", [{}])[0]
         msg        = choice.get("message", {})
         tool_calls = msg.get("tool_calls") or []
@@ -4722,18 +4799,27 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
 
             _msg_metrics: dict = {}
             if usage:
+                # Occupied context = uncached input + cache writes + cache reads. Anthropic's
+                # own "input_tokens" field is only the tiny uncached remainder once caching is
+                # active, so the raw field alone understates real context usage (TODO_BBB).
+                _cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
+                _cache_read     = usage.get("cache_read_input_tokens", 0) or 0
+                # Computed before _ctx_payload so the running session cost (TODO_CCC) can
+                # ride along in the same context_usage event/snapshot as the context-% (TODO_BBB).
+                _cum = _add_cumulative_usage(index.run_id, "claude", usage)
                 _ctx_payload = dict(role="claude", model=mgr_model_id,
-                                     input_tokens=usage.get("prompt_tokens", 0),
+                                     input_tokens=usage.get("prompt_tokens", 0) + _cache_creation + _cache_read,
                                      output_tokens=usage.get("completion_tokens", 0),
                                      context_window=mgr_context_window,
-                                     cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
-                                     cache_read_input_tokens=usage.get("cache_read_input_tokens", 0))
+                                     cache_creation_input_tokens=_cache_creation,
+                                     cache_read_input_tokens=_cache_read,
+                                     session_cost_usd=_cum.get("cost_usd", 0))
                 await _emit(queue, "context_usage", **_ctx_payload)
                 _save_context_usage(index.run_id, "claude", _ctx_payload)
-                _cum = _add_cumulative_usage(index.run_id, "claude", usage)
                 logger.info(f"[quick_proposal] claude cumulative run={index.run_id} calls={_cum.get('calls')} "
                             f"input={_cum.get('input_tokens')} output={_cum.get('output_tokens')} "
-                            f"cache_read={_cum.get('cache_read_input_tokens')} cache_creation={_cum.get('cache_creation_input_tokens')}")
+                            f"cache_read={_cum.get('cache_read_input_tokens')} cache_creation={_cum.get('cache_creation_input_tokens')} "
+                            f"cost_usd={_cum.get('cost_usd')}")
                 _ctx_pct = (round(_ctx_payload["input_tokens"] / mgr_context_window * 100, 1)
                             if mgr_context_window else None)
                 # Persisted alongside the message (not just the run-level context_usage
@@ -5638,22 +5724,31 @@ async def _qp_continuation_task(
         # per-message metadata only ever had "model").
         _msg_metrics: dict = {}
         if usage:
+            # Occupied context = uncached input + cache writes + cache reads (TODO_BBB —
+            # see the matching comment in phase5_extraction_loop for why the raw
+            # "prompt_tokens" field alone understates real context usage once caching kicks in).
+            _cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
+            _cache_read     = usage.get("cache_read_input_tokens", 0) or 0
+            # Computed before _ctx_payload so the running session cost (TODO_CCC) can
+            # ride along in the same context_usage event/snapshot as the context-% (TODO_BBB).
+            _cum = _add_cumulative_usage(run_id, "claude", usage)
             _ctx_payload = dict(role="claude", model=mgr_model_id,
-                                 input_tokens=usage.get("prompt_tokens", 0),
+                                 input_tokens=usage.get("prompt_tokens", 0) + _cache_creation + _cache_read,
                                  output_tokens=usage.get("completion_tokens", 0),
                                  context_window=mgr_context_window,
-                                 cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
-                                 cache_read_input_tokens=usage.get("cache_read_input_tokens", 0))
+                                 cache_creation_input_tokens=_cache_creation,
+                                 cache_read_input_tokens=_cache_read,
+                                 session_cost_usd=_cum.get("cost_usd", 0))
             await _emit(queue, "context_usage", **_ctx_payload)
             _save_context_usage(run_id, "claude", _ctx_payload)
             logger.info(f"[qp_chat] claude call run={run_id} finish_reason={finish_reason} "
                         f"input={usage.get('prompt_tokens', '?')} output={usage.get('completion_tokens', '?')} "
                         f"cache_read={usage.get('cache_read_input_tokens', '?')} cache_creation={usage.get('cache_creation_input_tokens', '?')} "
                         f"cache_1h={usage.get('cache_creation_1h_input_tokens', '?')} cache_5m={usage.get('cache_creation_5m_input_tokens', '?')}")
-            _cum = _add_cumulative_usage(run_id, "claude", usage)
             logger.info(f"[qp_chat] claude cumulative run={run_id} calls={_cum.get('calls')} "
                         f"input={_cum.get('input_tokens')} output={_cum.get('output_tokens')} "
-                        f"cache_read={_cum.get('cache_read_input_tokens')} cache_creation={_cum.get('cache_creation_input_tokens')}")
+                        f"cache_read={_cum.get('cache_read_input_tokens')} cache_creation={_cum.get('cache_creation_input_tokens')} "
+                        f"cost_usd={_cum.get('cost_usd')}")
             _ctx_pct = (round(_ctx_payload["input_tokens"] / mgr_context_window * 100, 1)
                         if mgr_context_window else None)
             _msg_metrics = {
@@ -6420,6 +6515,14 @@ def setup_quick_proposal_routes(session_manager=None):
         saved_scope = (results.get("extracted_data") or {}).get("scope_analysis")
         if saved_scope:
             index.extracted_data["scope_analysis"] = saved_scope
+
+        # On a fresh rerun (not resume), reset accumulated cost/context tracking too —
+        # otherwise cumulative_usage (and its cost_usd) keeps summing on top of the
+        # previous attempt's totals forever, and a completed run's last context_usage
+        # snapshot would briefly show as this run's until the first new event arrives.
+        if not req.resume:
+            results.pop("cumulative_usage", None)
+            results.pop("context_usage", None)
 
         # Write the starting extracted_values to disk immediately so the frontend
         # seed fetch (which runs right after this request returns) sees the correct

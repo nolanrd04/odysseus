@@ -667,6 +667,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 except (TypeError, ValueError):
                     raise HTTPException(400, f"{key} must be an integer")
                 val = max(lo, min(val, hi))
+            elif key.startswith("qp_pricing_"):
+                try:
+                    val = max(0.0, float(val))
+                except (TypeError, ValueError):
+                    raise HTTPException(400, f"{key} must be a number")
             current[key] = val
         _save_settings(current)
         return current

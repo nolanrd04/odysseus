@@ -181,6 +181,20 @@ DEFAULT_SETTINGS = {
         "Newsletters, marketing, automated digests, and FYI-only updates are "
         "NOT urgent."
     ),
+    # Quick Proposal cost tracking (TODO_CCC): $ per 1M tokens, one rate table per role
+    # (manager/Claude, extractor/Gemini) — role-level, not per-model-id, matching the
+    # granularity `cumulative_usage` already tracks in routes/quick_proposal_routes.py.
+    # Neither Anthropic nor Google expose a pricing-lookup API (only token-counting
+    # endpoints), so these are user-editable via the Quick Proposal Prompts panel's
+    # Pricing tab and must be updated by hand when switching model tiers.
+    "qp_pricing_claude_input_per_million": 3.00,
+    "qp_pricing_claude_output_per_million": 15.00,
+    "qp_pricing_claude_cache_write_per_million": 3.75,
+    "qp_pricing_claude_cache_read_per_million": 0.30,
+    "qp_pricing_gemini_input_per_million": 2.00,
+    "qp_pricing_gemini_output_per_million": 12.00,
+    "qp_pricing_gemini_cache_write_per_million": 0.00,
+    "qp_pricing_gemini_cache_read_per_million": 0.20,
     # Keyboard shortcuts (action: key combination)
     "keybinds": {
         "search": "ctrl+k",

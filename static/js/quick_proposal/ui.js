@@ -1801,9 +1801,17 @@ function renderExtractionPanel(mainOutput) {
                     <span class="qp-ctx-tokens">—</span>
                 </div>
                 <div class="qp-context-row" id="qp-ctx-gemini">
-                    <span class="qp-ctx-label">Gemini</span>
+                    <span class="qp-ctx-label">Extractor</span>
                     <div class="qp-ctx-bar-wrap"><div class="qp-ctx-bar"></div></div>
                     <span class="qp-ctx-tokens">—</span>
+                </div>
+                <div class="qp-context-row qp-ctx-cost-row" id="qp-ctx-cost-claude">
+                    <span class="qp-ctx-label">Claude</span>
+                    <span class="qp-ctx-cost-text">—</span>
+                </div>
+                <div class="qp-context-row qp-ctx-cost-row" id="qp-ctx-cost-gemini">
+                    <span class="qp-ctx-label">Extractor</span>
+                    <span class="qp-ctx-cost-text">—</span>
                 </div>
             </div>
             <div class="qp-extraction-messages" id="qp-extraction-messages"></div>
@@ -1815,7 +1823,18 @@ function renderExtractionPanel(mainOutput) {
     `;
     previewArea.querySelector('#qp-export-log-btn').addEventListener('click', () => {
         const msgs = previewArea.querySelector('#qp-extraction-messages');
-        const text = _exportLogText(msgs);
+        let text = _exportLogText(msgs);
+        // Append the running session-cost summary (TODO_CCC) from the context meter above
+        // the log — read from its rendered text (one line per role) rather than a stored
+        // JS property, so this still works after a history reload with no live events.
+        const claudeCost = previewArea.querySelector('#qp-ctx-cost-claude .qp-ctx-cost-text')?.textContent?.trim();
+        const geminiCost = previewArea.querySelector('#qp-ctx-cost-gemini .qp-ctx-cost-text')?.textContent?.trim();
+        const costLines = [];
+        if (claudeCost && claudeCost !== '—') costLines.push(`Claude: ${claudeCost}`);
+        if (geminiCost && geminiCost !== '—') costLines.push(`Extractor: ${geminiCost}`);
+        if (costLines.length) {
+            text += `\n\n---\n\n[Cost]\n${costLines.join('\n')}`;
+        }
         navigator.clipboard.writeText(text).then(() => {
             const btn = previewArea.querySelector('#qp-export-log-btn');
             const orig = btn.textContent;
@@ -1837,14 +1856,26 @@ function _intOrDefault(value, fallback) {
 
 function updateContextMeter(mainOutput, data) {
     const row = mainOutput.querySelector(`#qp-ctx-${data.role}`);
-    if (!row) return;
-    const pct = Math.min(100, (data.input_tokens / data.context_window) * 100);
-    const bar = row.querySelector('.qp-ctx-bar');
-    bar.style.width = pct.toFixed(1) + '%';
-    bar.className = 'qp-ctx-bar' + (pct > 85 ? ' qp-ctx-bar-warn' : pct > 65 ? ' qp-ctx-bar-caution' : '');
-    const fmt = t => t >= 1000 ? (t / 1000).toFixed(1) + 'k' : String(t);
-    row.querySelector('.qp-ctx-tokens').textContent =
-        `${fmt(data.input_tokens)} / ${fmt(data.context_window)}`;
+    if (row) {
+        // No warn/caution color threshold here — `data.context_window` is only a
+        // best-effort default (e.g. hardcoded to 200k for Claude in several places
+        // server-side) that doesn't reflect actual model context windows (already
+        // 1M for some), and is expected to keep changing — a color threshold tied to
+        // a stale/guessed number is actively misleading, so the bar is neutral.
+        const pct = Math.min(100, (data.input_tokens / data.context_window) * 100);
+        const bar = row.querySelector('.qp-ctx-bar');
+        bar.style.width = pct.toFixed(1) + '%';
+        bar.className = 'qp-ctx-bar';
+        const fmt = t => t >= 1000000 ? (t / 1000000).toFixed(2) + 'M' : t >= 1000 ? (t / 1000).toFixed(1) + 'k' : String(t);
+        row.querySelector('.qp-ctx-tokens').textContent = fmt(data.input_tokens);
+    }
+
+    // Running session cost (TODO_CCC) — its own line per role, below both context rows.
+    const costRow = mainOutput.querySelector(`#qp-ctx-cost-${data.role}`);
+    if (costRow && data.session_cost_usd != null) {
+        const costText = costRow.querySelector('.qp-ctx-cost-text');
+        if (costText) costText.textContent = `$${data.session_cost_usd.toFixed(2)}`;
+    }
 }
 
 

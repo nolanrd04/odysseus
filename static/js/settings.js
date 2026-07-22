@@ -1744,6 +1744,53 @@ async function initAgentSettings() {
   }
 }
 
+/* ── Quick Proposal Pricing (TODO_CCC) ──
+   $/1M-token rates used to estimate running session cost during a Quick Proposal
+   run — moved here (Settings > Tools) from a standalone tab inside the Quick
+   Proposal Prompts panel so it lives alongside the app's other admin settings. */
+async function initQpPricingSettings() {
+  var FIELDS = [
+    ['qp_pricing_claude_input_per_million',       'set-qpPriceClaudeInput'],
+    ['qp_pricing_claude_output_per_million',      'set-qpPriceClaudeOutput'],
+    ['qp_pricing_claude_cache_write_per_million', 'set-qpPriceClaudeCacheWrite'],
+    ['qp_pricing_claude_cache_read_per_million',  'set-qpPriceClaudeCacheRead'],
+    ['qp_pricing_gemini_input_per_million',       'set-qpPriceGeminiInput'],
+    ['qp_pricing_gemini_output_per_million',      'set-qpPriceGeminiOutput'],
+    ['qp_pricing_gemini_cache_write_per_million', 'set-qpPriceGeminiCacheWrite'],
+    ['qp_pricing_gemini_cache_read_per_million',  'set-qpPriceGeminiCacheRead'],
+  ];
+  var msg = el('set-qpPricingMsg');
+  var inputs = FIELDS.map(function(f) { return { key: f[0], el: el(f[1]) }; })
+    .filter(function(f) { return f.el; });
+  if (!inputs.length) return;
+
+  try {
+    var settings = await fetch('/api/auth/settings', { credentials: 'same-origin' }).then(function(r) { return r.json(); });
+    inputs.forEach(function(f) {
+      if (settings[f.key] != null) f.el.value = settings[f.key];
+    });
+  } catch (e) { if (msg) msg.textContent = 'Failed to load rates'; }
+
+  async function save() {
+    var payload = {};
+    inputs.forEach(function(f) {
+      var v = Math.max(0, parseFloat(f.el.value));
+      if (isNaN(v)) v = 0;
+      f.el.value = v;
+      payload[f.key] = v;
+    });
+    try {
+      await fetch('/api/auth/settings', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(function() { if (msg.textContent === 'Saved') msg.textContent = ''; }, 2000); }
+    } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
+  }
+  inputs.forEach(function(f) { f.el.addEventListener('change', save); });
+}
+
 /* ═══════════════════════════════════════════
    APPEARANCE TAB
    ═══════════════════════════════════════════ */
@@ -2353,6 +2400,7 @@ function initAll() {
   initResearchSettings();
   initResearchSearchSettings();
   initAgentSettings();
+  initQpPricingSettings();
   initAppearance();
   initShortcuts();
   initAccount();

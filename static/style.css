@@ -668,6 +668,17 @@ body.bg-pattern-sparkles {
       left: auto;
       right: 9px;
     }
+    /* On mobile, keep the hamburger pinned to the left even when the main
+       sidebar is configured right-side — a right-positioned hamburger sits
+       fixed on top of full-screen panels' own top-right controls (e.g. the
+       Quick Proposal header's Close/Re-run buttons), covering them entirely
+       on narrow screens where there's no room for both in that corner. */
+    @media (max-width: 768px) {
+      body.hamburger-right .hamburger-btn {
+        left: 9px;
+        right: auto;
+      }
+    }
     .mobile-new-chat-btn {
       display: none;
     }

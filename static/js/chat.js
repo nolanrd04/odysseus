@@ -1229,7 +1229,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                         usage_source: 'real',
                       };
                       _cb._qpCtxWindows = _cb._qpCtxWindows || {};
-                      _cb._qpCtxWindows[_d.role] = { pct: _ctxPct, window: _d.context_window, model: _d.model };
+                      _cb._qpCtxWindows[_d.role] = { pct: _ctxPct, window: _d.context_window, model: _d.model,
+                                                      tokens: _d.input_tokens, cost: _d.session_cost_usd };
                     }
                   } catch {}
                 }
@@ -5566,18 +5567,26 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (!ctxDiv || !ctxWindows) return;
     const _fmtCtx = (info) => {
       if (!info) return null;
-      const pctStr = info.pct != null ? `${info.pct.toFixed(1)}%` : '?%';
-      const winStr = info.window ? (info.window >= 1000000
-        ? `${(info.window / 1000000).toFixed(1)}M` : `${Math.round(info.window / 1000)}k`) : '';
-      const color = info.pct >= 85 ? 'var(--red,#e06c75)' : info.pct >= 70 ? '#ff9900' : 'inherit';
-      return `<span style="color:${color}">${pctStr}${winStr ? ' of ' + winStr : ''}</span>`;
+      // Raw occupied-context token count, not a ratio — the % display made it easy to
+      // misread "small" as "fine" when the window itself was huge; a bare number is
+      // what's directly comparable across models with different window sizes.
+      const tokStr = info.tokens != null ? (info.tokens >= 1000000
+        ? `${(info.tokens / 1000000).toFixed(2)}M` : info.tokens >= 1000
+          ? `${(info.tokens / 1000).toFixed(1)}k` : `${info.tokens}`) : '?';
+      // No warn/caution color here — `info.window` is only a best-effort default
+      // (e.g. hardcoded to 200k for Claude in several places server-side) that doesn't
+      // reflect actual model context windows (already 1M for some) and is expected to
+      // keep changing, so a color threshold tied to it is actively misleading.
+      const costStr = info.cost != null ? ` &nbsp;<span style="opacity:0.75">$${info.cost.toFixed(2)}</span>` : '';
+      return `<span>${tokStr}</span>${costStr}`;
     };
     const parts = [];
     if (ctxWindows.claude) parts.push(`Manager: ${_fmtCtx(ctxWindows.claude)}`);
-    if (ctxWindows.gemini) parts.push(`Gemini: ${_fmtCtx(ctxWindows.gemini)}`);
+    if (ctxWindows.gemini) parts.push(`Extractor: ${_fmtCtx(ctxWindows.gemini)}`);
     if (parts.length) {
-      ctxDiv.innerHTML = parts.join(' &nbsp;|&nbsp; ');
+      ctxDiv.innerHTML = parts.map(p => `<div>${p}</div>`).join('');
       ctxDiv.style.display = 'flex';
+      ctxDiv.style.flexDirection = 'column';
     }
   }
 
@@ -5593,6 +5602,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         pct: u.context_window ? (u.input_tokens / u.context_window * 100) : null,
         window: u.context_window,
         model: u.model,
+        tokens: u.input_tokens,
+        cost: u.session_cost_usd,
       };
     }
     return out;
@@ -5716,7 +5727,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Extraction model</span><select class="qp-model-select qp-chat-rerun-select" data-role="gemini"><option>Loading…</option></select></div>
           <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Manager model</span><select class="qp-model-select qp-chat-rerun-select" data-role="manager"><option>Loading…</option></select></div>
           <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Resume prior values</span><input type="checkbox" class="qp-chat-rerun-resume"></div>
-          <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Reuse existing notes (skip re-transcription)</span><input type="checkbox" class="qp-chat-rerun-reuse-notes"></div>
+          <div class="qp-chat-rerun-row"><span class="qp-chat-rerun-label">Reuse existing notes (skip re-transcription)</span><input type="checkbox" class="qp-chat-rerun-reuse-notes" checked></div>
           <div class="qp-chat-rerun-actions"><button class="qp-chat-rerun-go">Run</button><button class="qp-chat-rerun-cancel">Cancel</button></div>
         `;
         rerunTrigger.replaceWith(form);
@@ -6709,7 +6720,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               const _ctxDiv = _liveMain?.querySelector('.qp-ctx-window-status');
               if (_ctxDiv) {
                 _cb._qpCtxWindows = _cb._qpCtxWindows || {};
-                _cb._qpCtxWindows[d.role] = { pct: _ctxPct, window: d.context_window, model: d.model };
+                _cb._qpCtxWindows[d.role] = { pct: _ctxPct, window: d.context_window, model: d.model,
+                                               tokens: d.input_tokens, cost: d.session_cost_usd };
                 _renderCtxWindowStatus(_ctxDiv, _cb._qpCtxWindows);
               }
             } catch {}
