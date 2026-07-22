@@ -91,6 +91,7 @@ Work through the plan in this order — highest-yield sheets first:
             proposed_crosswalk_count,
             sewer_main_LF (actual total LF of sewer main from plan labels/stationing),
             water_main_LF (actual total LF of water main from plan labels/stationing),
+            sewer_main_LF_by_diameter, water_main_LF_by_diameter (only if >1 diameter present),
             large_diameter_water_main_present, large_diameter_sewer_main_present,
             storm_drainage_basin_count, storm_inlet_type, irrigation_service_present
    Compare: Callouts on any of the drawings to their respective notes. Look for how many of each callout exist and 
@@ -181,6 +182,23 @@ road_LF — Write as a JSON array. NEVER return null if stationing or dimension 
   road_type. Do NOT halve or adjust any length — tag the road "fronting_existing" and Claude
   handles the quantity adjustment in Phase B. Non-zero start stations (e.g. STA 18+50) on an
   existing road are project boundary markers — do NOT flag these as evidence of a missing prior sheet.
+
+  FRONTING ROAD TYPICAL SECTIONS: For any road tagged "fronting_existing" or
+  "improvement_to_existing", look for a typical section drawn specifically for THAT road.
+  Typical sections in these plan sets are usually PER ROAD, not one section shared across the
+  whole job — match the section to the road by its printed road-name label before reading
+  dimensions/specs off it, don't assume the first typical section you find applies to every road.
+  A fronting-road section is often a HALF section (only the widened/added side, mirrored about
+  centerline) rather than a full cross-section — do not read a half section's width as the full
+  road width. Use whatever existing-vs-proposed labels are actually printed on that section
+  (commonly something like "EX."/"EXIST"/"EXISTING", "SAWCUT", "PROPOSED", "IMPROVEMENT(S)" —
+  the exact wording varies by plan set) to tell which portion is new work.
+  If you cannot find a section naming that specific road, do not borrow another road's section
+  or the new-construction road's section for it — write null for that road's typical-section-derived
+  fields and note it in additional_comments. A missing per-road section is not automatically an
+  extraction miss: it can mean the existing-road work on that road is minor (e.g. a short tie-in
+  or small sawcut repair) rather than a full-frontage buildout, so flag it for the manager to
+  weigh rather than guessing a value.
 
   Source priority for length (per road):
   1. Road name + stationing range label (end_sta − start_sta = LF)
@@ -362,14 +380,38 @@ sewer_main_LF — Read the ACTUAL total length of sewer main from the utility pl
   3. If labels are unclear, count the roads that have sewer and sum their construction LF
      (only the portion with pipe, not the full road length if pipe stops short)
   Write as a number (e.g. 802). If no public sewer is present, write 0.
+
+  DIAMETER CHANGES: pipe diameter can change partway along a run (e.g. 8" main transitioning to
+  12" or 15" at a manhole or labeled point of connection) — uncommon but it does happen. Check
+  pipe-size callouts along the ENTIRE run, not just at one point, before writing a total. If you
+  find more than one diameter on what is otherwise a single sewer system, do NOT sum them into
+  sewer_main_LF as one undifferentiated number. Instead:
+    (a) write sewer_main_LF as the correct total (sum of all diameters combined), AND
+    (b) also write "sewer_main_LF_by_diameter" as a companion array breaking out each diameter's
+        own length, e.g. [{"diameter_in": 8, "length_LF": 2071}, {"diameter_in": 15, "length_LF": 312}]
+  Omit sewer_main_LF_by_diameter entirely if the whole run is a single diameter — do not write a
+  one-entry array for the common case.
+
   CONFIDENCE: write confidence="high" ONLY if you used method 1 or 2 above (explicit LF callout, or
   a complete stationing sum covering the full run). If you used method 3 (inferred/interpolated from
   roads with sewer) or any portion of the run was unclear, write confidence="medium" — this tells the
   manager whether your number is a direct measurement or an inference, which changes how it gets used
   downstream.
 
-water_main_LF — Same approach and the same CONFIDENCE rule as sewer_main_LF, applied to water main.
-  Write as a number. If no public water main, write 0.
+water_main_LF — Same approach, the same CONFIDENCE rule, and the same diameter-breakdown rule
+  (companion field "water_main_LF_by_diameter") as sewer_main_LF, applied to water main. Write as a
+  number. If no public water main, write 0.
+
+  SCOPE OF "NEW MAIN": write sewer_main_LF/water_main_LF for the length of main actually being
+  installed under THIS bid — not the full length of an existing main shown for context, and not
+  the full corridor length by default. Sewer main commonly does run the full length of a road
+  (gravity collection requires a continuous line), but water main does NOT always work the same
+  way — some jobs deliver water to individual lots via short service laterals off a brief new-main
+  tie-in to an existing main, rather than a new main running the whole road. Do not assume water
+  main spans the full road just because sewer main does on the same job. If scope_items already
+  has an entry for individual water/sewer SERVICES (laterals), state explicitly whether the main
+  itself is a continuous new run or a short tie-in feeding those services — this is required
+  alongside the CONFIDENCE method above, not optional color commentary.
 
 existing_road_widening_present — JSON array of road names where scope adds pavement to an
   already-built road. A road qualifies if EITHER trigger is met:

@@ -319,6 +319,14 @@ ITEMS TO OMIT FOR FRONTING ROADS:
   - Subgrade SY as a standalone item (bundled into widening unit price)
   - Rolled curb on both sides (one-side frontage only)
 
+PER-ROAD TYPICAL SECTIONS: Fronting/improvement-to-existing roads are typically each drawn with
+their own dedicated typical section (labeled with that road's name, not shared across roads),
+showing existing-vs-proposed scope via callouts like "EX."/"EXISTING", "SAWCUT", "PROPOSED",
+"IMPROVEMENT(S)". If Gemini reports no typical section found for a specific fronting road, treat
+that as a signal the existing-road work on that road may be minor (short tie-in/sawcut repair)
+rather than a full frontage buildout — not as a missed extraction. Weigh line-item scope
+accordingly instead of assuming full-frontage quantities by default.
+
 ## Utility Connection Counts
 
 CONNECT TO EXIST WATER: use min(road_connection_count, 2). If road_connection_count is null,
@@ -373,19 +381,23 @@ LOT GRADING INCLUSION RULES
 ## Large-Diameter Water Main
 
 If `large_diameter_water_main_present=true` (from Gemini), include a separate large-diameter water
-main line item (10\" or 12\"+) in addition to the standard 8\" distribution main. Quantity: use
-ROW_SF ratio scaled from analogs that have it. Price from `unit_price_distributions` for the
-matching diameter. Flag as thin data (N=1–2 in current portfolio).
+main line item (10\" or 12\"+) in addition to the standard 8\" distribution main. Quantity: prefer
+`water_main_LF_by_diameter` if Gemini provided it — use the large-diameter entry's `length_LF`
+directly instead of estimating. Only fall back to a ROW_SF ratio scaled from analogs if no
+by-diameter breakdown was extracted. Price from `unit_price_distributions` for the matching
+diameter. Flag as thin data (N=1–2 in current portfolio).
 
 ## Large-Diameter Sewer Main
 
 If `large_diameter_sewer_main_present=true` (from Gemini), include a separate large-diameter sewer
 main line item (12\", 15\", or per scope notes) in addition to the standard 8\" sewer distribution
 main. Large-diameter sewer typically runs only on the collector/spine street, not all roads.
-Quantity: if `sewer_main_LF` is provided, estimate the collector street portion as a fraction
-based on road geometry (collector LF ÷ total road LF × sewer_main_LF). Otherwise scale from
-the closest analog or use the collector street LF as estimated from road geometry. Price from `unit_price_distributions` for the matching diameter key. Flag as thin
-data. This mirrors the Large-Diameter Water Main rule.
+Quantity: prefer `sewer_main_LF_by_diameter` if Gemini provided it — use the large-diameter entry's
+`length_LF` directly instead of estimating. Only if no by-diameter breakdown was extracted, fall
+back to estimating the collector street portion as a fraction based on road geometry (collector LF
+÷ total road LF × sewer_main_LF), or scale from the closest analog. Price from
+`unit_price_distributions` for the matching diameter key. Flag as thin data. This mirrors the
+Large-Diameter Water Main rule.
 
 ## Utility Trenching
 

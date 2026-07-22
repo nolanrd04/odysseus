@@ -295,7 +295,7 @@ Two obligations follow from being listed in this table:
 | Field                          | Rule to restate on first request                                                                 | Satisfaction marker (what the write must contain to count)                                  |
 |---------------------------------|----------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
 | ballast_is_separate_pay_item    | "Only mark true if you can cite the specific bid-item note or spec callout treating ballast as its own pay item; otherwise false or null." | A quoted note/callout string, not a bare true/false.                                          |
-| sewer_main_LF / water_main_LF   | "State how you measured this — stationing arithmetic, scaled from a labeled dimension, or a plan-printed note — not a single unexplained number." | A stated method (stationing / scaled / note-stated) alongside the number.                     |
+| sewer_main_LF / water_main_LF   | "State how you measured this — stationing arithmetic, scaled from a labeled dimension, or a plan-printed note — not a single unexplained number. If the run changes pipe diameter partway, break it out as sewer_main_LF_by_diameter / water_main_LF_by_diameter instead of summing diameters together. If scope_items shows individual water/sewer SERVICES (laterals), also state whether the main is a continuous new run or a short tie-in feeding those services." | A stated method (stationing / scaled / note-stated) alongside the number; a diameter breakdown when more than one diameter is present; and a continuous-run-vs-tie-in statement when service laterals are also in scope_items. |
 | lot_grading_in_scope            | "If true, quote the exact grading note or callout. If false, confirm explicitly whether (a) no lot-grading/civil-site sheet exists at all, or (b) one exists but shows lots already at finished grade." | A quoted note (if true), or an explicit (a)/(b) confirmation (if false) — see Step 4 for the full false-handling rule. |
 | scupper_count                   | "Prefer a plan-printed schedule/table if one exists; state whether you used a schedule or counted symbols directly, and confirm you checked the curb plan even if the count is 0." | A stated source (schedule vs. symbol count) — not a bare number with no method noted.        |
 | sidewalk_thickness_spec         | "If this note describes more than one thickness (e.g. a driveway-approach thickening), also write a separate scope_items entry for the differing-thickness segment — do not let the spec text alone stand in for a scope line." | A scope_items entry exists for each distinct thickness the spec text names, OR an explicit statement that only one thickness applies project-wide. |
@@ -387,6 +387,18 @@ Step 4 — Check suspicious combinations (flag, send Gemini back once):
     typical section is a template that may not match each road's actual extent.
   - curb_sides disagrees with sidewalk_sides on a road (e.g. walk both sides but curb one side)
     → allowed, but ask Gemini for a one-line reason so it isn't an extraction slip.
+  - sewer_main_LF_by_diameter or water_main_LF_by_diameter present → sum the array's length_LF
+    entries and confirm it equals the scalar sewer_main_LF/water_main_LF (within rounding). If it
+    doesn't match, ask Gemini to reconcile before trusting either number — this is the check that
+    catches a different-diameter segment silently bleeding into the wrong bucket (see TODO_OO).
+  - scope_items has a WATER SERVICES or SEWER SERVICES entry with a non-null quantity (individual
+    lot laterals are in scope) AND water_main_LF/sewer_main_LF for that utility is ≥ 70% of the
+    corresponding road's road_LF → suspicious. A job that delivers water/sewer to lots via
+    individual service laterals often only needs a short new-main tie-in, not a main spanning the
+    whole road corridor — do not assume water main runs the full road just because sewer main
+    does on the same job. Ask Gemini to explicitly confirm whether the main is a continuous new
+    run or a short tie-in feeding those services (per the SCOPE OF "NEW MAIN" rule in
+    gemini_phase3.txt) before accepting the number as-is.
   - large_diameter_water_main_present = true AND water_main_LF < 200 → verify pipe labels
   - lot_grading_in_scope = true → ask Gemini to quote the exact note or callout it found
   - lot_grading_in_scope = false → this is NOT automatically a confident exclusion. Ask Gemini
