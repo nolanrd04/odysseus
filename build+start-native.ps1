@@ -163,6 +163,15 @@ if ($tailscaleIp) {
 # Truncate old logs so the tail below starts clean
 Remove-Item $outLog, $errLog -ErrorAction SilentlyContinue
 
+# Force UTF-8 for the whole interpreter (PEP 540). Without this, stdout/stderr
+# and any file I/O without an explicit encoding= fall back to the OS ANSI
+# codepage on Windows — fine on machines with the "Beta: Unicode UTF-8"
+# region setting enabled, but a Windows Server install typically doesn't have
+# that, so any print()/write of a non-ASCII character (≥, →, em-dashes, etc.
+# all appear in the QP knowledge-pack derivation output) crashes with
+# "'charmap' codec can't encode character ...".
+$env:PYTHONUTF8 = "1"
+
 $proc = Start-Process -FilePath $venvPy `
     -ArgumentList @("-m", "uvicorn", "app:app", "--host", $appBind, "--port", $appPort) `
     -WorkingDirectory $PSScriptRoot `
