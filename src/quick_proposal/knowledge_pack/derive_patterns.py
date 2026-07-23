@@ -53,7 +53,7 @@ def resolve_holdout(raw: str) -> tuple[str, str]:
     """
     folder_name = Path(raw.rstrip("/")).name  # strip leading path components
     for f in sorted(CASE_LIBRARY_DIR.glob("*.json")):
-        data = json.loads(f.read_text())
+        data = json.loads(f.read_text(encoding="utf-8"))
         if data.get("identity", {}).get("local_folder", "").lower() == folder_name.lower():
             job_name = data["job_name"]
             slug = folder_name.lower()
@@ -63,7 +63,7 @@ def resolve_holdout(raw: str) -> tuple[str, str]:
         f"ERROR: No case library entry found with local_folder='{folder_name}'.\n"
         f"Available folders: " +
         ", ".join(
-            json.loads(f.read_text()).get("identity", {}).get("local_folder", "")
+            json.loads(f.read_text(encoding="utf-8")).get("identity", {}).get("local_folder", "")
             for f in sorted(CASE_LIBRARY_DIR.glob("*.json"))
         )
     )
@@ -77,7 +77,7 @@ def load_cases(holdout_job_name: str | None = None,
     include_lower = {j.lower() for j in include_jobs} if include_jobs is not None else None
     cases = []
     for f in sorted((case_dir or CASE_LIBRARY_DIR).glob("*.json")):
-        data = json.loads(f.read_text())
+        data = json.loads(f.read_text(encoding="utf-8"))
         name = data.get("job_name", "")
         if holdout_job_name and name.lower() == holdout_job_name.lower():
             print(f"  [holdout] Skipping: {name}")
@@ -743,7 +743,7 @@ def derive_paving_rates(cases):
         print("  WARNING: paving_label_map.json not found — skipping paving rates")
         return {}
 
-    label_map = json.loads(PAVING_LABEL_MAP_PATH.read_text())
+    label_map = json.loads(PAVING_LABEL_MAP_PATH.read_text(encoding="utf-8"))
 
     subgrade_obs = []
     paving_obs   = []
@@ -1804,7 +1804,7 @@ def _merge_manual_rules(pack):
     (static or per-run dynamic) must carry them or they silently vanish."""
     if not MANUAL_RULES_PATH.exists():
         return
-    manual = json.loads(MANUAL_RULES_PATH.read_text())
+    manual = json.loads(MANUAL_RULES_PATH.read_text(encoding="utf-8"))
     rules = pack.setdefault("derivation_rules", [])
     existing = {r.get("name") for r in rules}
     added = [r for r in manual.get("derivation_rules", []) if r.get("name") not in existing]
@@ -1947,8 +1947,8 @@ def build_kp_for_jobs(job_names, out_dir, cases=None, case_dir=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     pack = build_pack(cases)
     kp_path = out_dir / "knowledge_pack.json"
-    kp_path.write_text(json.dumps(pack, indent=2))
-    (out_dir / "patterns_review.md").write_text(build_patterns_review(pack))
+    kp_path.write_text(json.dumps(pack, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "patterns_review.md").write_text(build_patterns_review(pack), encoding="utf-8")
     return kp_path
 
 
@@ -2001,12 +2001,12 @@ def main():
 
     pack = build_pack(cases)
 
-    kp_path.write_text(json.dumps(pack, indent=2))
+    kp_path.write_text(json.dumps(pack, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"  Written: {kp_path}")
 
     print("Writing patterns review...")
     review = build_patterns_review(pack)
-    review_path.write_text(review)
+    review_path.write_text(review, encoding="utf-8")
     print(f"  Written: {review_path}")
 
     print("\nDone.")
