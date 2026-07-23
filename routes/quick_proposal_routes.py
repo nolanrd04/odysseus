@@ -5469,45 +5469,39 @@ async def run_pipeline(
         # Step 2 — load knowledge base
         full_library = _load_case_library()
         all_job_names = {c.get("job_name") for c in full_library}
-        # Dynamic KP: a proper-subset job selection (and no explicit holdout KP)
-        # gets a knowledge pack derived from just those jobs, scoped to this run.
-        dynamic_kp = bool(
-            selected_jobs
-            and not holdout_kp_path
-            and not all_job_names.issubset(set(selected_jobs))
-        )
+        # Always derive the knowledge pack dynamically from the DB-backed case
+        # library (TODO_YY), scoped to whichever jobs are selected — all of them
+        # if none were explicitly chosen. No special-cased "use the precomputed
+        # static pack" path: the on-disk knowledge_pack.json is dead.
+        jobs_for_kp = selected_jobs or sorted(all_job_names)
         await _emit(queue, "phase_start", phase="index",
-                    label=(f"Building knowledge pack from {len(selected_jobs)} selected jobs…"
-                           if dynamic_kp else "Loading knowledge base…"))
+                    label=f"Building knowledge pack from {len(jobs_for_kp)} job(s)…")
         try:
-            if dynamic_kp:
+            if not holdout_kp_path:
                 from src.quick_proposal.knowledge_pack.derive_patterns import build_kp_for_jobs
                 kp_out = Path(RUNS_DIR) / run_id / "kp"
-                # Derive from the DB-backed records (TODO_YY) rather than the frozen
-                # seed files; the derivation filters these to `selected_jobs` itself.
                 db_records = await asyncio.to_thread(_load_case_library_records)
-                built = await asyncio.to_thread(build_kp_for_jobs, selected_jobs, kp_out, db_records)
+                built = await asyncio.to_thread(build_kp_for_jobs, jobs_for_kp, kp_out, db_records)
                 holdout_kp_path = str(built)
                 # Stamp into run meta so phase-6 continuation / phase-3 restarts
                 # reload this run's pack through the existing holdout plumbing.
                 _save_run_meta(run_id, holdout_kp_path=holdout_kp_path, dynamic_kp=True)
-                logger.info(f"[quick_proposal] dynamic KP built from {len(selected_jobs)} jobs → {built}")
-            kp_path_used = holdout_kp_path or str(_KP_PATH)
-            index.knowledge_pack = _load_knowledge_pack(holdout_kp_path or None)
-            logger.info(f"[quick_proposal] knowledge pack loaded: {kp_path_used} ({len(index.knowledge_pack)} top-level keys)")
+                logger.info(f"[quick_proposal] knowledge pack built from {len(jobs_for_kp)} jobs → {built}")
+            index.knowledge_pack = _load_knowledge_pack(holdout_kp_path)
+            logger.info(f"[quick_proposal] knowledge pack loaded: {holdout_kp_path} ({len(index.knowledge_pack)} top-level keys)")
             # Filter to user-selected jobs if any were specified at run start.
             if index.selected_jobs:
                 index.case_library = [c for c in full_library if c.get("job_name") in index.selected_jobs]
             else:
                 index.case_library = full_library
         except Exception as e:
-            logger.error(f"[quick_proposal] failed to load knowledge base from {holdout_kp_path or _KP_PATH}: {e}")
+            logger.error(f"[quick_proposal] failed to load knowledge base: {e}")
             raise RuntimeError(f"Failed to load knowledge base: {e}")
 
         await _emit(queue, "index_loaded",
                     jobs=[{"id": c["job_name"], "name": c["job_name"]}
                           for c in index.case_library],
-                    kp_path=kp_path_used)
+                    kp_path=holdout_kp_path)
         await _emit(queue, "phase_complete", phase="index")
 
         # Step 2.5 — Write project_type if provided by UI picker; else run Phase 1 detection
