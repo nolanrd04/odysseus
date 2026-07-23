@@ -110,6 +110,7 @@ temp
 src/quick_proposal/case_library/
 src/quick_proposal/knowledge_pack/*
 !src/quick_proposal/knowledge_pack/*.py
+build+start.bat
 
 # QP baseline re-run scripts (local only)
 scripts/qp_baselines/
