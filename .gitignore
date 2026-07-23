@@ -108,7 +108,8 @@ documentation/.SESSION_HANDOFFS/
 graphify-out/
 temp
 src/quick_proposal/case_library/
-src/quick_proposal/knowledge_pack
+src/quick_proposal/knowledge_pack/*
+!src/quick_proposal/knowledge_pack/*.py
 
 # QP baseline re-run scripts (local only)
 scripts/qp_baselines/
