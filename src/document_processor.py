@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 MAX_INLINE_ATTACHMENT_CHARS = 24000
 MIN_INLINE_ATTACHMENT_SLICE = 500
 
+# Extension/MIME-subtype spellings that don't match what providers (e.g.
+# Anthropic, which only accepts jpeg/png/gif/webp) expect as a media_type.
+IMAGE_FORMAT_ALIASES = {"jpg": "jpeg"}
+
 
 def _is_text_file(path: str) -> bool:
     """Check if file has text extension."""
@@ -444,6 +448,9 @@ def build_user_content(
                 # so fall back to the resolved MIME subtype rather than emitting
                 # an invalid "data:image/;base64," with an empty subtype.
                 image_format = ext[1:] or (mime.split("/", 1)[1] if mime.startswith("image/") else "png")
+                # Anthropic only accepts jpeg/png/gif/webp as media_type subtypes —
+                # ".jpg" would otherwise round-trip as the invalid "image/jpg".
+                image_format = IMAGE_FORMAT_ALIASES.get(image_format.lower(), image_format.lower())
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/{image_format};base64,{encoded_string}"},

@@ -624,7 +624,8 @@ body.bg-pattern-sparkles {
     }
     #tools-section .list-item,
     #quick-proposal-section .list-item,
-    #manual-workflows-section .list-item {
+    #manual-workflows-section .list-item,
+    #tutorials-section .list-item {
       padding: 8px 8px;
     }
     .sidebar.right-side .sidebar-header {

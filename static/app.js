@@ -2649,6 +2649,8 @@ function initializeEventListeners() {
     'tool-memory':         '#tool-memory-btn',
     'tool-notes':          '#tool-notes-btn',
     'tool-tasks':          '#tool-tasks-btn',
+    'qp-runs':             '#qp-runs-btn',
+    'qp-generations':      '#qp-generations-btn',
     'tool-theme':          '#tool-theme-btn',
     'user-bar':            '#user-bar-profile',
     'sidebar-settings-btn':'#user-bar-settings',
@@ -2668,7 +2670,13 @@ function initializeEventListeners() {
   };
 
   // Keys hidden by default on first run (no localStorage yet)
-  const UI_VIS_DEFAULT_OFF = new Set(['models-section', 'rag-toggle-btn', 'text-emojis', 'chat-fullwidth']);
+  const UI_VIS_DEFAULT_OFF = new Set([
+    'models-section', 'rag-toggle-btn', 'text-emojis', 'chat-fullwidth',
+    // Secondary tools — present but tucked away by default; users can
+    // re-enable via Settings > Appearance > Customize UI.
+    'tool-compare', 'tool-cookbook', 'tool-research', 'tool-gallery', 'tool-tasks',
+    'qp-runs', 'qp-generations',
+  ]);
 
   // Keys that need admin to toggle off (reserved for future use)
   const UI_VIS_ADMIN_ONLY = new Set([]);
@@ -3778,6 +3786,18 @@ function startOdysseusApp() {
       if (searchChatModule) searchChatModule.openSearch();
     });
   }
+
+  // Tutorials — placeholders until real video links are set via data-tutorial-url
+  document.querySelectorAll('#tutorials-section .tutorial-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const url = item.dataset.tutorialUrl;
+      if (url) {
+        window.open(url, '_blank', 'noopener');
+      } else if (uiModule && uiModule.showToast) {
+        uiModule.showToast('Video coming soon');
+      }
+    });
+  });
   // Modify form submit to handle special modes
   const chatForm = document.getElementById('chat-form');
   const originalSubmit = chatModule.handleChatSubmit;
