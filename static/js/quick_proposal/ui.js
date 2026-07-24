@@ -1027,7 +1027,7 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         const res = await fetch('/api/quick_proposal/start-proposal-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, phase_models: phaseModels, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId, import_notes_from_run_id: importNotesFromRunId, import_scope_from_run_id: importScopeFromRunId, project_type: projectType, auto_memory: autoMemory, memory_recall_count: memoryRecallCount }),
+            body: JSON.stringify({ upload_id: uploadId, run_name: runName, notes, gemini_model: geminiModel, manager_model: managerModel, phase_models: phaseModels, filename, selected_jobs: selectedJobs, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels, holdout_kp_path: holdoutKpPath, import_from_run_id: importFromRunId, import_notes_from_run_id: importNotesFromRunId, import_scope_from_run_id: importScopeFromRunId, project_type: projectType, auto_memory: autoMemory, memory_recall_count: memoryRecallCount, auto_mode: autoMode }),
             credentials: 'same-origin',
         });
         if (!res.ok) throw new Error(`Run failed: ${res.status}`);
@@ -1098,6 +1098,18 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
     if (headerAutoMode) {
         headerAutoCheck.checked = autoMode;
         headerAutoMode.style.display = '';
+        headerAutoCheck.addEventListener('change', () => {
+            localStorage.setItem('qp_auto_mode', headerAutoCheck.checked ? 'true' : 'false');
+            // Push the new state to the server — the only network call auto-mode
+            // needs. If a gate is currently open and this turns auto-mode on, the
+            // server advances it immediately (see set_auto_mode).
+            fetch(`/api/quick_proposal/runs/${runId}/auto-mode`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ auto_mode: headerAutoCheck.checked }),
+                credentials: 'same-origin',
+            }).catch(err => console.warn('[quick_proposal] auto-mode push error:', err));
+        });
     }
 
     if (cancelBtn) {
@@ -1156,13 +1168,11 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
         onPhaseGate(data) {
             const nextLabel = data.next_phase_label || 'Next Phase';
             if (overlay.querySelector('#qp-auto-mode-header')?.checked) {
-                // Auto-advance: call /advance-phase immediately
-                fetch('/api/quick_proposal/advance-phase', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ run_id: runId, phase: data.phase }),
-                    credentials: 'same-origin',
-                }).catch(err => console.warn('[quick_proposal] advance-phase error:', err));
+                // Auto-mode: nothing to do here. The server already self-advances
+                // gates on its own (_wait_for_gate / _get_auto_mode) based on the
+                // auto_mode value it was seeded with at run start and any later
+                // push from the header toggle — no client call needed, and none
+                // would help anyway if the browser were closed when this fires.
             } else {
                 // Manual mode: show gate button in status area
                 setStatus(statusEl, `Ready for ${nextLabel}`);
@@ -2458,9 +2468,25 @@ export async function buildViewPanel({ runId, onClose, onRerun }) {
     const AUTO_MODE_KEY = 'qp_auto_mode';
     const headerAutoCheck = overlay.querySelector('#qp-auto-mode-header');
     if (headerAutoCheck) {
+        // Default from localStorage until the server's actual value comes back below —
+        // the server is authoritative for this specific run, localStorage is just a guess.
         headerAutoCheck.checked = localStorage.getItem(AUTO_MODE_KEY) !== 'false';
+        fetch(`/api/quick_proposal/runs/${runId}/status`, { credentials: 'same-origin' })
+            .then(r => r.ok ? r.json() : null)
+            .then(status => {
+                if (status && typeof status.auto_mode === 'boolean') {
+                    headerAutoCheck.checked = status.auto_mode;
+                }
+            })
+            .catch(() => {});
         headerAutoCheck.addEventListener('change', () => {
             localStorage.setItem(AUTO_MODE_KEY, headerAutoCheck.checked ? 'true' : 'false');
+            fetch(`/api/quick_proposal/runs/${runId}/auto-mode`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ auto_mode: headerAutoCheck.checked }),
+                credentials: 'same-origin',
+            }).catch(err => console.warn('[quick_proposal] auto-mode push error:', err));
         });
     }
 

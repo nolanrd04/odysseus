@@ -172,6 +172,14 @@ Remove-Item $outLog, $errLog -ErrorAction SilentlyContinue
 # "'charmap' codec can't encode character ...".
 $env:PYTHONUTF8 = "1"
 
+# Force unbuffered stdout/stderr. Since RedirectStandardOutput/Error below
+# points at a file rather than a real console, Python fully block-buffers
+# those streams by default — plain print() calls (e.g. the QP knowledge-pack
+# derivation trace) can sit invisible for a long stretch before actually
+# landing in the log file, even though logging-module output (uvicorn access
+# logs, logger.info calls) auto-flushes per line and appears immediately.
+$env:PYTHONUNBUFFERED = "1"
+
 $proc = Start-Process -FilePath $venvPy `
     -ArgumentList @("-m", "uvicorn", "app:app", "--host", $appBind, "--port", $appPort) `
     -WorkingDirectory $PSScriptRoot `

@@ -292,11 +292,16 @@ class RunRequest(BaseModel):
     project_type: str = ""  # "" = auto-detect via Phase 1; else: residential_subdivision | commercial_development | rural_access | mixed
     auto_memory: bool = False  # write a provisional memory snapshot at run end (TODO_D)
     memory_recall_count: int = 12  # how many Tier-2 memories to recall into the manager's system prompt
+    auto_mode: bool = True  # self-advance phase gates server-side without waiting for a client call
 
 
 class AdvancePhaseRequest(BaseModel):
     run_id: str
     phase: str = ""
+
+
+class SetAutoModeRequest(BaseModel):
+    auto_mode: bool
 
 
 class ValidateRequest(BaseModel):
@@ -2916,12 +2921,35 @@ _GEMINI_SCOPE_TOOLS = [
 # run_id → asyncio.Event set by /advance-phase to unblock a waiting pipeline gate
 _active_gates: dict[str, asyncio.Event] = {}
 
+# run_id → whether this run should self-advance phase gates without a client call.
+# Seeded once at run creation from RunRequest.auto_mode; updated only when the
+# frontend explicitly pushes a change via POST /runs/{run_id}/auto-mode (see
+# set_auto_mode below) — there is no polling in either direction. A closed/absent
+# browser must never be required for an auto-mode run to keep progressing (this
+# is the server-side fix for the "run silently stalls until I reopen the tab"
+# bug: previously auto-advance only happened because the frontend's own JS called
+# /advance-phase on receiving phase_gate, which obviously never fires with no
+# tab open).
+_run_auto_mode: dict[str, bool] = {}
+
+
+def _get_auto_mode(run_id: str) -> bool:
+    if run_id in _run_auto_mode:
+        return _run_auto_mode[run_id]
+    # Fallback for a run whose in-memory entry was lost (e.g. a process restart)
+    # — same durability idiom as the rest of this run's meta.json-backed state.
+    meta = _load_run_meta(run_id)
+    return bool(meta.get("auto_mode", True)) if meta else True
+
 
 async def _wait_for_gate(run_id: str, queue: asyncio.Queue, gate_phase: str, next_label: str) -> None:
-    """Emit a phase_gate event and block until /advance-phase is called for this run."""
+    """Emit a phase_gate event and block until the gate is unblocked for this run —
+    either /advance-phase (manual click) or, if auto_mode is on, immediately below."""
     event = asyncio.Event()
     _active_gates[run_id] = event
     await _emit(queue, "phase_gate", phase=gate_phase, next_phase_label=next_label)
+    if _get_auto_mode(run_id):
+        event.set()
     await event.wait()
     _active_gates.pop(run_id, None)
 
@@ -6276,7 +6304,9 @@ def setup_quick_proposal_routes(session_manager=None):
             manager_model=req.manager_model or "",
             phase_models=req.phase_models or {},
             auto_memory=bool(req.auto_memory),
+            auto_mode=bool(req.auto_mode),
         )
+        _run_auto_mode[run_id] = bool(req.auto_mode)
 
         # Resolve manager endpoint for session model/url metadata.
         mgr_url = mgr_model_id = None
@@ -6360,7 +6390,9 @@ def setup_quick_proposal_routes(session_manager=None):
             timestamp=int(time.time()),
             status="running",
             holdout_kp_path=req.holdout_kp_path or "",
+            auto_mode=bool(req.auto_mode),
         )
+        _run_auto_mode[run_id] = bool(req.auto_mode)
 
         queue = _RunBroadcaster()
         _active_runs[run_id] = queue
@@ -6387,13 +6419,28 @@ def setup_quick_proposal_routes(session_manager=None):
     @router.post("/advance-phase")
     async def advance_phase(req: AdvancePhaseRequest):
         """Called by the frontend to unblock a pipeline waiting at a phase gate.
-        When auto-mode is ON, the frontend calls this immediately on phase_gate.
-        When auto-mode is OFF, the user clicks a gate button which calls this."""
+        Only used in manual mode now — auto-mode runs self-advance server-side
+        (see _wait_for_gate / _get_auto_mode) without any client call."""
         event = _active_gates.get(req.run_id)
         if event:
             event.set()
             return {"status": "ok", "run_id": req.run_id}
         return {"status": "no_gate", "run_id": req.run_id}
+
+    @router.post("/runs/{run_id}/auto-mode")
+    async def set_auto_mode(run_id: str, req: SetAutoModeRequest):
+        """Push the current auto-mode toggle state to the server for this run —
+        the only network call auto-mode needs. If a gate is currently open and
+        this turns auto-mode on, it advances immediately (same effect as the
+        manual gate button), and every gate the pipeline hits from here on
+        self-advances with no client involvement at all."""
+        _run_auto_mode[run_id] = req.auto_mode
+        _save_run_meta(run_id, auto_mode=req.auto_mode)
+        if req.auto_mode:
+            event = _active_gates.get(run_id)
+            if event:
+                event.set()
+        return {"run_id": run_id, "auto_mode": req.auto_mode}
 
     @router.get("/runs")
     async def list_runs():
@@ -6448,6 +6495,7 @@ def setup_quick_proposal_routes(session_manager=None):
             "status":    status,
             "filename":  meta.get("filename", ""),
             "timestamp": meta.get("timestamp", 0),
+            "auto_mode": _get_auto_mode(run_id),
         }
 
     @router.get("/runs/{run_id}/classifications")
@@ -6947,6 +6995,7 @@ def setup_quick_proposal_routes(session_manager=None):
         if queue:
             await queue.put(None)
         _save_run_meta(run_id, status="cancelled")
+        _run_auto_mode.pop(run_id, None)
         return {"ok": True}
 
     @router.delete("/runs/{run_id}")
@@ -6958,6 +7007,7 @@ def setup_quick_proposal_routes(session_manager=None):
         if task and not task.done():
             task.cancel()
         _active_runs.pop(run_id, None)
+        _run_auto_mode.pop(run_id, None)
         await asyncio.to_thread(shutil.rmtree, run_dir, ignore_errors=True)
         return {"ok": True}
 
