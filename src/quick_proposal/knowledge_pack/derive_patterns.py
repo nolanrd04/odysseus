@@ -28,6 +28,21 @@ MANUAL_RULES_PATH     = BASE_OUTPUT_DIR / "manual_rules.json"
 
 MEASURABLE_UNITS = {"EA", "LF", "SF", "SY", "CY", "HR"}
 
+US_STATE_ABBREVIATIONS = {
+    "ALABAMA": "AL", "ALASKA": "AK", "ARIZONA": "AZ", "ARKANSAS": "AR", "CALIFORNIA": "CA",
+    "COLORADO": "CO", "CONNECTICUT": "CT", "DELAWARE": "DE", "FLORIDA": "FL", "GEORGIA": "GA",
+    "HAWAII": "HI", "IDAHO": "ID", "ILLINOIS": "IL", "INDIANA": "IN", "IOWA": "IA",
+    "KANSAS": "KS", "KENTUCKY": "KY", "LOUISIANA": "LA", "MAINE": "ME", "MARYLAND": "MD",
+    "MASSACHUSETTS": "MA", "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS",
+    "MISSOURI": "MO", "MONTANA": "MT", "NEBRASKA": "NE", "NEVADA": "NV",
+    "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ", "NEW MEXICO": "NM", "NEW YORK": "NY",
+    "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OH", "OKLAHOMA": "OK",
+    "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC",
+    "SOUTH DAKOTA": "SD", "TENNESSEE": "TN", "TEXAS": "TX", "UTAH": "UT", "VERMONT": "VT",
+    "VIRGINIA": "VA", "WASHINGTON": "WA", "WEST VIRGINIA": "WV", "WISCONSIN": "WI",
+    "WYOMING": "WY",
+}
+
 MARKET_CONTEXT = {
     "market": "Kootenai County ID / Bonner County ID / Spokane County WA",
     "common_cities": [
@@ -976,6 +991,104 @@ def derive_earthwork_balance_prior(cases):
     return by_job_type
 
 
+def _parse_state_abbr(location):
+    """Best-effort 2-letter state abbreviation from a 'City, State' string — accepts both
+    abbreviations ('Spokane, WA') and full names ('Post Falls, Idaho')."""
+    if not location or "," not in location:
+        return None
+    tail = location.rsplit(",", 1)[-1].strip().upper()
+    if len(tail) == 2 and tail.isalpha():
+        return tail
+    return US_STATE_ABBREVIATIONS.get(tail)
+
+
+def _resolve_job_state(case):
+    """Job-site state — this is what determines which state's sales-tax convention applies,
+    NOT the client's billing address, so job_location is tried first (identity.client_location
+    is a fallback only, and can disagree — e.g. Painted Rock has a WA client but an ID job site)."""
+    identity = case.get("identity") or {}
+    return (_parse_state_abbr(identity.get("job_location"))
+            or _parse_state_abbr(identity.get("client_location")))
+
+
+def derive_wa_tax_scope(cases):
+    """
+    Section: wa_tax_scope — per-state, per-item sales-tax classification derived from line
+    items that carry an explicit tax_rate (entered via the Jobs tab's tax % column).
+
+    Grouped by the job-site state rather than hardcoded to Washington: every taxed observation
+    in the portfolio today is WA, but if the company ever bids a job in another state with its
+    own tax convention, that state gets its own bucket automatically instead of silently
+    merging into (and polluting) the Washington rates.
+
+    Each item reports `typical_rate` (median of its non-zero observations) and `rates` — every
+    observed tax_rate for that description in that state, in job order, zeros included (e.g.
+    SUBGRADE ROAD: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.089, 0.0] — untaxed on 7 WA jobs, taxed on
+    one). A 0 in `rates` means "billed untaxed on at least one job" — per the Sales Tax rule in
+    system_prompt.txt, that's the signal the manager uses to NOT auto-tax an item, flagging it
+    for a human call instead of guessing. Items never observed taxed in a state aren't included
+    at all — an item absent from this section already defaults to untaxed (see kp_lookup rule
+    3), so there's nothing this section needs to say about them.
+    """
+    by_state_desc = {}
+    for case in cases:
+        p = get_primary_proposal(case)
+        if not p:
+            continue
+        job = case["job_name"]
+        state = _resolve_job_state(case) or "_UNKNOWN"
+        for item in p["line_items"]:
+            if item.get("is_optional"):
+                continue
+            tax_rate = item.get("tax_rate")
+            if tax_rate is None:
+                continue
+            by_state_desc.setdefault(state, {}).setdefault(item["description"], []).append({
+                "job": job, "tax_rate": tax_rate,
+            })
+
+    def _build_state_entry(by_desc):
+        items = {}
+        all_taxed_rates = []
+        taxed_jobs = set()
+        for desc, obs in sorted(by_desc.items()):
+            rates = [o["tax_rate"] for o in obs]
+            taxed = [r for r in rates if r]
+            if not taxed:
+                continue
+            all_taxed_rates.extend(taxed)
+            taxed_jobs.update(o["job"] for o in obs if o["tax_rate"])
+            items[desc] = {
+                "typical_rate": round(statistics.median(taxed), 4),
+                "rates": [o["tax_rate"] for o in sorted(obs, key=lambda o: o["job"])],
+            }
+        if not items:
+            return None
+        return {
+            "_typical_rate": round(statistics.median(all_taxed_rates), 4),
+            "_n_jobs_with_taxed_items": len(taxed_jobs),
+            "items": items,
+        }
+
+    result = {}
+    for state, by_desc in sorted(by_state_desc.items()):
+        if state == "_UNKNOWN":
+            continue
+        entry = _build_state_entry(by_desc)
+        if entry:
+            result[state] = entry
+
+    if "_UNKNOWN" in by_state_desc:
+        entry = _build_state_entry(by_state_desc["_UNKNOWN"])
+        if entry:
+            entry["note"] = ("Non-zero tax_rate observations whose job-site state couldn't be "
+                              "parsed from identity.job_location/client_location — spot-check "
+                              "before trusting.")
+            result["_unresolved_state"] = entry
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Section 7: Item quantity vs scale metric correlations
 # ---------------------------------------------------------------------------
@@ -1848,6 +1961,12 @@ def build_pack(cases):
         print(f"  {job_type}: N={entry['n']}, dominant={entry['dominant_outcome']} "
               f"({entry['dominant_share']:.0%}){thin}")
 
+    print("Deriving WA tax scope (Section 6b)...")
+    wa_tax_scope = derive_wa_tax_scope(cases)
+    for state, entry in wa_tax_scope.items():
+        print(f"  {state}: {len(entry['items'])} taxed item(s), "
+              f"typical_rate={entry['_typical_rate']}, n_jobs={entry['_n_jobs_with_taxed_items']}")
+
     print("Deriving paving & subgrade rates...")
     paving_rates = derive_paving_rates(cases)
     for key, val in paving_rates.items():
@@ -1917,6 +2036,7 @@ def build_pack(cases):
         "job_type_signatures": signatures,
         "ls_earthwork_rates": ls_rates,
         "earthwork_balance_prior": earthwork_balance_prior,
+        "wa_tax_scope": wa_tax_scope,
         "paving_rates": paving_rates,
         "qty_scale_correlations": qty_correlations,
         "price_trends": price_trends,

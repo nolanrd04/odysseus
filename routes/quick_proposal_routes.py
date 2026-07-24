@@ -6794,11 +6794,26 @@ def setup_quick_proposal_routes(session_manager=None):
             job_notes=meta.get("notes", ""),
             selected_jobs=[],
         )
-        # Resolve holdout KP: request wins; fall back to what was saved at run start.
-        resolved_holdout = req.holdout_kp_path or meta.get("holdout_kp_path", "") or ""
+        # Resolve holdout KP: an explicit request override (the deprecated static-holdout
+        # picker, TODO_II) wins outright. Otherwise, rebuild this run's dynamic per-run KP
+        # fresh from the DB-backed case library rather than reloading whatever was cached
+        # under runs/<run_id>/kp/ at the original run's start — without this, editing a
+        # case-library job (e.g. adding tax_rate data) or changing derive_patterns.py itself
+        # had no visible effect until a brand-new run was started from scratch, since
+        # "re-run extraction" just reloaded the stale file.
+        if req.holdout_kp_path:
+            resolved_holdout = req.holdout_kp_path
+        else:
+            from src.quick_proposal.knowledge_pack.derive_patterns import build_kp_for_jobs
+            full_library_records = await asyncio.to_thread(_load_case_library_records)
+            all_job_names = sorted({c.get("job_name") for c in full_library_records if c.get("job_name")})
+            kp_out = Path(RUNS_DIR) / run_id / "kp"
+            built = await asyncio.to_thread(build_kp_for_jobs, all_job_names, kp_out, full_library_records)
+            resolved_holdout = str(built)
+            logger.info(f"[quick_proposal] rebuilt knowledge pack for phase5 rerun run={run_id} → {built}")
         index.knowledge_pack = _load_knowledge_pack(resolved_holdout or None)
         index.case_library   = _load_case_library()
-        _save_run_meta(run_id, holdout_kp_path=resolved_holdout)
+        _save_run_meta(run_id, holdout_kp_path=resolved_holdout, dynamic_kp=True)
 
         pages_dir = Path(RUNS_DIR) / run_id / "pages"
 

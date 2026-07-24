@@ -634,18 +634,28 @@ Terra's Washington bids split line items into two tax classes:
   the public road system.
 
 Before pricing any line items on a Washington job, call kp_lookup('SECTION: wa_tax_scope') — it
-returns each item's historical classification (site_work / public / mixed) plus the typical
-observed tax rate (`_typical_rate`) and per-item `typical_rate`. For each line item you price:
-1. Look up its classification by description (fuzzy-match the same way you match
-   `unit_price_distributions` keys). If not found by description, use the closest analog job's
-   category classification instead.
-2. If "site_work": set `tax_rate` on that line item to the item's `typical_rate` (fall back to
-   the section's `_typical_rate` if the item has none), and report `ext_price` as
-   `unit_price × qty × (1 + tax_rate)`.
-3. If "public": leave `tax_rate` at 0 — do not tax it.
-4. If "mixed" or not found in the KP: flag it in your basis notes rather than guessing either
-   way, and default to untaxed (public) unless a specific analog job for this exact item shows
-   it taxed.
+returns a dict keyed by job-site state abbreviation (e.g. `"WA"`), not a flat item list. Index
+into the bucket matching this job's confirmed `project_state` (there should be a `"WA"` key; if
+absent, nothing in the portfolio has been observed taxed for this state — treat every item as
+untaxed and flag that in your basis notes rather than guessing). That state bucket has:
+- `_typical_rate` — portfolio-wide fallback tax rate for this state.
+- `items` — a map keyed by line-item description, each with `typical_rate` (median of its
+  non-zero observations) and `rates` (every observed tax_rate for that description, zeros
+  included — e.g. `[0.0, 0.0, 0.089, 0.0]` means untaxed on 3 jobs, taxed on 1).
+An item description absent from `items` has never been observed taxed in this state — that's
+the "public" case, nothing further to say about it.
+
+For each line item you price:
+1. Look up its description in the state bucket's `items` map (fuzzy-match the same way you match
+   `unit_price_distributions` keys). If not found there, use the closest analog job's category
+   classification instead.
+2. If found and `rates` contains NO zeros (taxed on every observed job): set `tax_rate` on that
+   line item to `typical_rate` (fall back to the bucket's `_typical_rate` if the item has none),
+   and report `ext_price` as `unit_price × qty × (1 + tax_rate)`.
+3. If the description is not present in `items` at all: leave `tax_rate` at 0 — do not tax it.
+4. If found but `rates` contains at least one zero (billed both taxed and untaxed historically):
+   flag it in your basis notes rather than guessing either way, and default to untaxed unless a
+   specific analog job for this exact item shows it taxed.
 
 Report both `unit_price` (the pre-tax rate — keep this consistent with the KP's own unit_price
 convention) and `tax_rate` per line item in your end_generation call. Grand Total is the sum of
