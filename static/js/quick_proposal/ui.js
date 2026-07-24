@@ -969,33 +969,8 @@ async function handleRun(overlay, file, geminiModel = '', managerModel = '', exi
     const holdoutKpPath = '';
 
     runBtn.disabled = true;
-    runBtn.textContent = 'Validating…';
-    statusEl.style.display = 'block';
-    setStatus(statusEl, 'Checking endpoints…', true);
-
-    try {
-        const vRes = await fetch('/api/quick_proposal/validate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ gemini_model: geminiModel, manager_model: managerModel, gemini_retry_attempts: geminiRetryAttempts, gemini_fallback_models: geminiFallbackModels }),
-            credentials: 'same-origin',
-        });
-        if (vRes.ok) {
-            const v = await vRes.json();
-            if (!v.ok) {
-                const msgs = Object.entries(v.errors || {}).map(([k, e]) => `${k}: ${e}`).join('\n');
-                setStatus(statusEl, `Endpoint error:\n${msgs}`);
-                runBtn.disabled = false;
-                runBtn.textContent = 'Start';
-                return;
-            }
-        }
-    } catch (e) {
-        // Non-fatal — skip validation if the check itself fails
-        console.warn('[quick_proposal] endpoint validation failed:', e);
-    }
-
     runBtn.textContent = 'Start';
+    statusEl.style.display = 'block';
 
     let uploadId;
     let filename;

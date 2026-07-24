@@ -304,11 +304,6 @@ class SetAutoModeRequest(BaseModel):
     auto_mode: bool
 
 
-class ValidateRequest(BaseModel):
-    gemini_model: str = ""
-    manager_model: str = ""
-
-
 class QPChatRequest(BaseModel):
     messages: List[dict]
     manager_model: str = ""
@@ -6515,77 +6510,6 @@ def setup_quick_proposal_routes(session_manager=None):
             "pages":    results.get("pages", []),
             "bboxes":   results.get("bboxes", {}),
         }
-
-    @router.post("/validate")
-    async def validate_endpoints(req: ValidateRequest):
-        """Smoke-test the manager and Gemini endpoints with a 1-token request before starting a run."""
-        errors: dict[str, str] = {}
-
-        def _test(url: str, headers: dict, model: str, label: str) -> str | None:
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 1,
-            }
-            try:
-                with httpx.Client(timeout=60.0) as client:
-                    r = client.post(url, headers={**headers, "content-type": "application/json"}, json=payload)
-                if r.status_code >= 400:
-                    try:
-                        detail = r.json().get("error", {}).get("message") or r.text[:120]
-                    except Exception:
-                        detail = r.text[:120]
-                    return f"HTTP {r.status_code}: {detail}"
-            except Exception as e:
-                return str(e)[:120]
-            return None
-
-        # Resolve manager
-        mgr_url = mgr_headers = mgr_model_id = None
-        if req.manager_model:
-            found = _get_endpoint_for_model(req.manager_model)
-            if found:
-                mgr_url, mgr_headers, _, mgr_model_id = found
-                mgr_url = _to_openai_compat_url(mgr_url)
-        if not mgr_url:
-            try:
-                db = SessionLocal()
-                try:
-                    ep = db.query(ModelEndpoint).filter(ModelEndpoint.base_url.ilike("%anthropic.com%")).first()
-                    if ep:
-                        base, api_key = resolve_endpoint_runtime(ep)
-                        mgr_url = _to_openai_compat_url(build_chat_url(base))
-                        mgr_headers = build_headers(api_key, base)
-                        mgr_model_id = getattr(ep, "model", None) or _CLAUDE_MODEL
-                finally:
-                    db.close()
-            except Exception:
-                pass
-        if not mgr_url:
-            errors["manager"] = "No manager endpoint found — add an endpoint in Settings"
-        else:
-            err = await asyncio.to_thread(_test, mgr_url, mgr_headers or {}, mgr_model_id or _CLAUDE_MODEL, "manager")
-            if err:
-                errors["manager"] = err
-
-        # Resolve Gemini
-        if not errors.get("manager") or True:  # always test both
-            gem_url = gem_headers = gem_model = None
-            if req.gemini_model:
-                found = _get_endpoint_for_model(req.gemini_model)
-                if found:
-                    gem_url, gem_headers, _, _ = found
-                    gem_model = req.gemini_model
-            if not gem_url:
-                gem_url, gem_headers, _, gem_model = _get_gemini_endpoint()
-            if not gem_url:
-                errors["gemini"] = "No Gemini endpoint found — add a googleapis.com endpoint in Settings"
-            else:
-                err = await asyncio.to_thread(_test, gem_url, gem_headers or {}, gem_model or "", "gemini")
-                if err:
-                    errors["gemini"] = err
-
-        return {"ok": len(errors) == 0, "errors": errors}
 
     @router.get("/jobs")
     async def list_jobs():
