@@ -1453,8 +1453,6 @@ def derive_ls_item_variance(cases):
             "min":            round(min(prices), 2),
             "max":            round(max(prices), 2),
             "per_ROW_SF":     _regress("ROW_SF"),
-            "per_lot":        _regress("lot_count"),
-            "per_fronting_LF": _regress("fronting_LF"),
         }
     return variance
 
@@ -1502,7 +1500,7 @@ def derive_item_scaling(cases):
 
         unit = sorted({o["unit"] for o in obs_list})[0]
 
-        best_r2, best_driver, best_slope, best_rmse = None, None, None, None
+        best_r2, best_driver, best_slope = None, None, None
         driver_results = {}
 
         for metric in ["ROW_SF", "lot_count", "road_LF", "fronting_LF"]:
@@ -1516,19 +1514,13 @@ def derive_item_scaling(cases):
             if r is None or slope is None:
                 continue
             r2  = r ** 2
-            mx  = sum(xs) / len(xs)
-            my  = sum(ys) / len(ys)
-            intercept = my - slope * mx
-            rmse = (sum((y - (slope * x + intercept)) ** 2
-                        for x, y in zip(xs, ys)) / len(ys)) ** 0.5
             driver_results[metric] = {
                 "r2":    round(r2, 3),
                 "slope": round(slope, 5),
                 "n":     len(pairs),
-                "rmse":  round(rmse, 1),
             }
             if best_r2 is None or r2 > best_r2:
-                best_r2, best_driver, best_slope, best_rmse = r2, metric, slope, rmse
+                best_r2, best_driver, best_slope = r2, metric, slope
 
         if best_driver is None:
             continue
@@ -1546,7 +1538,6 @@ def derive_item_scaling(cases):
             "n":           driver_results[best_driver]["n"],
             "slope":       round(best_slope, 5),
             "formula":     f"qty = {best_driver} × {round(best_slope, 5)}",
-            "rmse":        round(best_rmse, 1),
         }
         if secondary:
             entry["secondary_driver"] = secondary
@@ -1904,18 +1895,17 @@ def build_patterns_review(pack):
     if lsv:
         lines.append("## LS Item Variance (CV)\n")
         lines.append("_CV < 0.3 = low; CV 0.3–0.7 = moderate; CV > 0.7 = high; CV > 1.0 = analog scaling unreliable_\n")
-        lines.append("| Item | N | Mean | Std | CV | Min | Max | ROW_SF r² | lot r² |")
-        lines.append("|---|---|---|---|---|---|---|---|---|")
+        lines.append("| Item | N | Mean | Std | CV | Min | Max | ROW_SF r² |")
+        lines.append("|---|---|---|---|---|---|---|---|")
         for desc, v in sorted(lsv.items(), key=lambda x: -(x[1]["cv"] or 0)):
             r2_row = (v.get("per_ROW_SF") or {}).get("r2", "—")
-            r2_lot = (v.get("per_lot")    or {}).get("r2", "—")
             cv_tag = ("**HIGH**" if v["cv"] and v["cv"] > 0.7
                       else "mod" if v["cv"] and v["cv"] > 0.3 else "low")
             lines.append(
                 f"| {desc} | {v['n']} | ${v['mean']:,.0f} | ${v['std']:,.0f}"
                 f" | {v['cv']} ({cv_tag})"
                 f" | ${v['min']:,.0f} | ${v['max']:,.0f}"
-                f" | {r2_row} | {r2_lot} |"
+                f" | {r2_row} |"
             )
         lines.append("")
 
@@ -1923,14 +1913,14 @@ def build_patterns_review(pack):
     iscaling = pack.get("item_scaling", {})
     if iscaling:
         lines.append("## Item Scaling — OLS Regressions (N≥3)\n")
-        lines.append("| Item | Unit | Best Driver | r² | N | Slope | Formula | RMSE | Secondary |")
-        lines.append("|---|---|---|---|---|---|---|---|---|")
+        lines.append("| Item | Unit | Best Driver | r² | N | Slope | Formula | Secondary |")
+        lines.append("|---|---|---|---|---|---|---|---|")
         for desc, entry in sorted(iscaling.items(), key=lambda x: -x[1]["r2"]):
             secondary = entry.get("secondary_driver", "—")
             lines.append(
                 f"| {desc} | {entry['unit']} | {entry['best_driver']} | {entry['r2']:.3f}"
                 f" | {entry['n']} | {entry['slope']}"
-                f" | `{entry['formula']}` | {entry['rmse']}"
+                f" | `{entry['formula']}`"
                 f" | {secondary} |"
             )
         lines.append("")

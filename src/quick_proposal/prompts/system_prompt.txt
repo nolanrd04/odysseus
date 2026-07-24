@@ -215,10 +215,11 @@ kp_lookup with item="qty_scale_correlations: <item name>".
   haul-off" — default to the cheaper stockpile option. Do NOT assume haul-off for null.
   HAUL-OFF: Only price as haul-off if `strip_haul_off_required=true` AND explicit language in
   scope_notes confirms off-site disposal ("INCL HAUL OFF", "haul to waste", "export to disposal
-  site"). Note: `ls_earthwork_rates.row_stripping_haul_off` currently has 0 observations in the
-  KP — if haul-off is confirmed, price at 3× the stockpile median as an estimated premium, flag
-  as [HAUL-OFF: NO KP DATA — HIGH UNCERTAINTY ±50%], and note in basis that Brian should verify
-  the haul-off rate before bidding.
+  site"). Check `ls_earthwork_rates.row_stripping_haul_off.rate_distribution` — if it is null or
+  its `n` is thin (fewer than ~5 jobs), there isn't enough KP data to trust: price at 3× the
+  stockpile median as an estimated premium instead, flag as [HAUL-OFF: NO KP DATA — HIGH
+  UNCERTAINTY ±50%], and note in basis that Brian should verify the haul-off rate before bidding.
+  Otherwise (enough observations to trust it), price from its median rate directly.
 - SUBGRADE: SY = road_subgrade_SY (from qty sheet or analog). Price from paving_rates.
 - PAVING SY: If curb_to_curb_ft_hint is provided, use road_LF × curb_to_curb_ft_hint ÷ 9.
   Otherwise scale from closest analog's road_paving_SY ÷ road_LF ratio × road_LF.

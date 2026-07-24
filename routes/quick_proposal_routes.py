@@ -661,6 +661,37 @@ def _save_notes_text(run_id: str, notes_text: dict) -> None:
         logger.warning(f"[quick_proposal] notes_text save failed run={run_id}: {e}")
 
 
+def _format_notes_text(notes_text: dict) -> str:
+    """Render read_index(section='notes') as plain delimited text instead of a JSON blob.
+
+    notes_text values are verbatim multi-paragraph transcriptions; JSON-encoding them
+    escapes every internal newline/quote (\\n, \\") which the manager LLM has to pay
+    tokens for and gets zero value from. A plain "=== bbox_id ===" header per region
+    keeps the same information with real newlines instead.
+
+    Standard-notes sheets (general notes, storm notes, seeding notes, legends, etc.) are
+    frequently referenced from multiple plan sheets and come back from transcription as
+    byte-identical text under different bbox_ids — observed at ~30% of total notes size
+    in a sample job. Collapsed here to one copy per unique text, listing every bbox_id
+    it came from, so the manager still knows which regions it maps to.
+    """
+    if not notes_text:
+        return "(no notes/list regions transcribed)"
+    groups: dict[str, list] = {}
+    order = []
+    for bbox_id, text in notes_text.items():
+        if text not in groups:
+            groups[text] = []
+            order.append(text)
+        groups[text].append(bbox_id)
+    parts = []
+    for text in order:
+        ids = groups[text]
+        label = ids[0] if len(ids) == 1 else f"{', '.join(ids)} (identical text)"
+        parts.append(f"=== {label} ===\n{text}")
+    return "\n\n".join(parts)
+
+
 def _save_scope_analysis(run_id: str, scope_analysis: str) -> None:
     """Patch extracted_data.scope_analysis into results.json without touching other keys."""
     results_path = Path(RUNS_DIR) / run_id / "results.json"
@@ -5355,7 +5386,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                 elif tool_name == "read_index":
                     section = tool_input.get("section", "values")
                     if section == "notes":
-                        index_json = json.dumps(index.extracted_data.get("notes_text", {}), indent=2)
+                        index_json = _format_notes_text(index.extracted_data.get("notes_text", {}))
                     elif section == "scope":
                         index_json = json.dumps(index.extracted_data.get("scope_analysis", ""), indent=2)
                     else:
@@ -6269,7 +6300,7 @@ async def _qp_continuation_task(
                             role="tool_call", tool_id=tool_id, tool="read_index",
                             model=mgr_model_id, args=json.dumps({"section": section}))
                 if section == "notes":
-                    result = json.dumps(index.extracted_data.get("notes_text", {}), indent=2)
+                    result = _format_notes_text(index.extracted_data.get("notes_text", {}))
                 elif section == "scope":
                     result = json.dumps(index.extracted_data.get("scope_analysis", ""), indent=2)
                 else:
