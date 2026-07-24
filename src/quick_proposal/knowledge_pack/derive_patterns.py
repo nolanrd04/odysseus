@@ -1093,14 +1093,23 @@ def derive_wa_tax_scope(cases):
 # Section 7: Item quantity vs scale metric correlations
 # ---------------------------------------------------------------------------
 
-def derive_qty_scale_correlations(cases):
+def derive_qty_scale_correlations(cases, r_threshold=0.75):
     """
     For every measurable proposal item with N>=4 jobs, compute Pearson r vs
-    lot_count, road_LF, and ROW_SF, plus the observed median ratio.
+    lot_count, road_LF, ROW_SF, and fronting_LF, plus the observed median ratio.
 
-    Key finding: ROW_SF is the single best predictor for most items. Use it as
-    the primary analog-matching metric and for proportional scaling when no
-    formula rule applies.
+    Returns (filtered, full) — two knowledge-pack sections with the same shape.
+    `filtered` (exposed as `qty_scale_correlations`, what `SECTION:` returns) keeps
+    only each item's best_driver plus any other driver with |r| >= r_threshold —
+    the other 3 correlation dicts are rarely needed and roughly triple the section's
+    size for no decision-relevant signal. `full` (exposed as
+    `qty_scale_correlations_full`, drill-down only via the `qty_scale_correlations:
+    <item>` kp_lookup form) keeps every driver for every item, for the rare case a
+    dropped/weak correlation is still useful context.
+
+    Does NOT compute a regression slope — nothing reads it (formulas use
+    median_ratio; item_scaling is the actual slope source) and a slope without
+    its intercept is misleading on its own.
     """
     from collections import defaultdict
 
@@ -1129,7 +1138,7 @@ def derive_qty_scale_correlations(cases):
                 "fronting_LF": fronting_lf,
             })
 
-    correlations = {}
+    correlations_full = {}
     for desc, obs_list in sorted(obs_by_desc.items()):
         if len(obs_list) < 4:
             continue
@@ -1143,12 +1152,10 @@ def derive_qty_scale_correlations(cases):
             xs = [p[0] for p in pairs]
             ys = [p[1] for p in pairs]
             r = pearson_r(xs, ys)
-            slope = linear_slope(xs, ys)
             ratios = [y / x for x, y in zip(xs, ys) if x > 0]
             entry[metric] = {
                 "n": len(pairs),
                 "r": r,
-                "slope": round(slope, 5) if slope is not None else None,
                 "median_ratio": round(statistics.median(ratios), 4) if ratios else None,
                 "min_ratio":    round(min(ratios), 4) if ratios else None,
                 "max_ratio":    round(max(ratios), 4) if ratios else None,
@@ -1158,28 +1165,46 @@ def derive_qty_scale_correlations(cases):
 
         entry["best_driver"] = best_metric
         entry["best_r"] = best_r
-        correlations[desc] = entry
+        correlations_full[desc] = entry
 
     # Sort by best_r descending
-    correlations = dict(sorted(
-        correlations.items(),
+    correlations_full = dict(sorted(
+        correlations_full.items(),
         key=lambda x: -(abs(x[1].get("best_r") or 0)),
     ))
 
-    return {
+    correlations_filtered = {}
+    for desc, entry in correlations_full.items():
+        best_driver = entry.get("best_driver")
+        filtered_entry = {"n": entry["n"], "best_driver": best_driver, "best_r": entry["best_r"]}
+        for metric in ["lot_count", "road_LF", "ROW_SF", "fronting_LF"]:
+            stats = entry.get(metric)
+            if stats is None:
+                continue
+            if metric == best_driver or (stats.get("r") is not None and abs(stats["r"]) >= r_threshold):
+                filtered_entry[metric] = stats
+        correlations_filtered[desc] = filtered_entry
+
+    shared = {
         "description": (
-            "Pearson r between item quantity and each scale metric (N>=4 jobs). "
-            "ROW_SF dominates for most items. "
-            "Use ROW_SF as primary analog-matching metric and for proportional scaling "
-            "when no specific formula rule applies."
+            "Pearson r between item quantity and each scale metric (N>=4 jobs), filtered "
+            "to each item's best_driver plus any other driver with |r| >= "
+            f"{r_threshold} — weak/redundant drivers are omitted here. For a specific "
+            "item's full driver set (including the dropped weak ones), call kp_lookup "
+            "with item=\"qty_scale_correlations: <item name>\" (optionally add "
+            "\" r<=X\" to see only drivers at or below that r)."
         ),
         "analog_retrieval_note": (
-            "When scaling a quantity from an analog job without a formula rule, "
-            "prefer ROW_SF ratio: est_qty = analog_qty × (new_ROW_SF / analog_ROW_SF). "
-            "This outperforms lot_count or road_LF scaling for nearly all items."
+            "When scaling a quantity from an analog job without a formula rule, use "
+            "each item's best_driver and its median_ratio: "
+            "est_qty = analog_qty × (new_job_best_driver_value / analog_best_driver_value). "
+            "Do not assume ROW_SF is always best — read best_driver per item, it varies."
         ),
-        "correlations": correlations,
     }
+    return (
+        {**shared, "correlations": correlations_filtered},
+        {**shared, "correlations": correlations_full},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1802,13 +1827,20 @@ def build_patterns_review(pack):
             lines.append("")
 
     # --- Qty/scale correlations ---
-    qsc = pack.get("qty_scale_correlations", {})
+    # Full (unfiltered) data here for Nolan's benefit — the LLM-facing SECTION is
+    # trimmed to best_driver + |r|>=threshold to save tokens (see derive_qty_scale_correlations).
+    qsc = pack.get("qty_scale_correlations_full", {})
     if qsc:
         lines.append("## Item Qty vs Scale Metric Correlations (Pearson r)\n")
+        lines.append(
+            "_Table below is the full, unfiltered driver set for every item. The description "
+            "text quoted here is shared with the LLM-facing `qty_scale_correlations` SECTION, "
+            "which is trimmed to best_driver + |r|>=0.75 — this review doc always shows everything._\n"
+        )
         lines.append(f"_{qsc.get('description', '')}_\n")
         lines.append(f"> **Analog retrieval:** {qsc.get('analog_retrieval_note', '')}\n")
-        lines.append("| Item | N | best driver | best r | r_lot_count | r_road_LF | r_ROW_SF | med_ratio (best) |")
-        lines.append("|---|---|---|---|---|---|---|---|")
+        lines.append("| Item | N | best driver | best r | r_lot_count | r_road_LF | r_ROW_SF | r_fronting_LF | med_ratio (best) |")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
         for desc, entry in qsc.get("correlations", {}).items():
             bd = entry.get("best_driver", "")
             br = entry.get("best_r")
@@ -1820,7 +1852,7 @@ def build_patterns_review(pack):
             med_s = f"{med:.4f}" if med is not None else "—"
             lines.append(
                 f"| {desc} | {entry['n']} | {bd} | {br_s}"
-                f" | {_r('lot_count')} | {_r('road_LF')} | {_r('ROW_SF')} | {med_s} |"
+                f" | {_r('lot_count')} | {_r('road_LF')} | {_r('ROW_SF')} | {_r('fronting_LF')} | {med_s} |"
             )
         lines.append("")
 
@@ -1978,7 +2010,7 @@ def build_pack(cases):
     print(f"  {len(item_pairs['pairs'])} pairs with |r|>=0.85, N>=4")
 
     print("Deriving qty/scale correlations (Section 7)...")
-    qty_correlations = derive_qty_scale_correlations(cases)
+    qty_correlations, qty_correlations_full = derive_qty_scale_correlations(cases)
     n_corr = len(qty_correlations.get("correlations", {}))
     print(f"  {n_corr} items with N>=4")
 
@@ -2039,6 +2071,7 @@ def build_pack(cases):
         "wa_tax_scope": wa_tax_scope,
         "paving_rates": paving_rates,
         "qty_scale_correlations": qty_correlations,
+        "qty_scale_correlations_full": qty_correlations_full,
         "price_trends": price_trends,
         "item_prevalence": item_prevalence,
         "ls_item_variance": ls_item_variance_data,

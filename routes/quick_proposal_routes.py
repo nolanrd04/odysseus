@@ -3930,9 +3930,43 @@ def _kp_lookup(knowledge_pack: dict, query: str) -> str:
         section_name = q.split(":", 1)[1].strip()
         section_data = knowledge_pack.get(section_name)
         if section_data is None:
-            available = sorted(k for k in knowledge_pack if k not in {"unit_price_distributions", "price_trends"})
+            available = sorted(
+                k for k in knowledge_pack
+                if k not in {"unit_price_distributions", "price_trends", "qty_scale_correlations_full"}
+            )
             return f"No section '{section_name}' found. Available sections: {', '.join(available)}"
         return json.dumps(section_data)
+
+    # qty_scale_correlations drill-down — prefix "qty_scale_correlations: <item name>",
+    # optionally suffixed " r<=<threshold>". SECTION: qty_scale_correlations only shows
+    # each item's best_driver plus drivers with |r|>=0.75; this returns the full,
+    # unfiltered driver set for one item (or just the weak/dropped drivers if an r
+    # cutoff is given), for when that trimmed summary isn't enough.
+    if q.lower().startswith("qty_scale_correlations:") or q.lower().startswith("qty_scale:"):
+        rest = q.split(":", 1)[1].strip()
+        r_match = re.search(r'r\s*<=\s*([\d.]+)\s*$', rest, re.IGNORECASE)
+        r_cutoff = float(r_match.group(1)) if r_match else None
+        item_name = rest[:r_match.start()].strip() if r_match else rest
+        full_correlations = knowledge_pack.get("qty_scale_correlations_full", {}).get("correlations", {})
+        if not item_name:
+            return ("Provide an item name, e.g. 'qty_scale_correlations: 8\" WATER MAIN PVC' "
+                    "(add ' r<=0.5' to see only drivers at or below that r).")
+        entry = full_correlations.get(item_name)
+        if entry is None:
+            matches = difflib.get_close_matches(item_name, list(full_correlations.keys()), n=3, cutoff=0.4)
+            if not matches:
+                return f"No qty_scale_correlations entry for '{item_name}'."
+            if len(matches) > 1:
+                return json.dumps({"query": item_name, "matches": matches})
+            entry = full_correlations[matches[0]]
+        if r_cutoff is not None:
+            entry = {
+                **{k: v for k, v in entry.items() if k in ("n", "best_driver", "best_r")},
+                **{m: s for m, s in entry.items()
+                   if m not in ("n", "best_driver", "best_r")
+                   and s.get("r") is not None and abs(s["r"]) <= r_cutoff},
+            }
+        return json.dumps(entry)
 
     # item_pairs detail lookup — prefix "item_pairs: <item name>"
     if q.lower().startswith("item_pair"):
@@ -4994,15 +5028,21 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                 "item + co_occurrence_rate + support) so you can decide what else to price "
                 "(e.g. an item Gemini missed) in a follow-up batch. Use this to price all your "
                 "line items at once instead of one call per item. "
-                "`item` (single string) — four forms, returns FULL detail incl. per-job observations: "
+                "`item` (single string) — five forms, returns FULL detail incl. per-job observations: "
                 "(1) item name e.g. '8\" SEWER MAIN' — unit price distribution + price trend; "
                 "(2) 'item_pairs: <item name>' — full pair metadata (r, n_shared_jobs, median_ratio, shared_jobs); "
                 "(3) 'LIST' — all available item names; "
                 "(4) 'SECTION: <name>' — a full named KP section not in opening context "
                 "(qty_scale_correlations, item_scaling, ls_item_variance, ls_earthwork_rates, paving_rates, "
                 "wa_tax_scope — public-vs-site-work sales tax classification, Washington jobs only). "
-                "Use single `item` for LIST/SECTION/item_pairs and for drilling into one item's raw observations; "
-                "use `items` to price many line items in a single turn."
+                "SECTION: qty_scale_correlations is trimmed to each item's best_driver plus any "
+                "other driver with |r|>=0.75 — read best_driver per item, do not assume any one "
+                "scale metric is always best; "
+                "(5) 'qty_scale_correlations: <item name>' (optionally suffixed ' r<=<threshold>') "
+                "— the full, unfiltered driver set for one item, including drivers the SECTION view "
+                "dropped for being weak; use this only if the trimmed SECTION view isn't enough. "
+                "Use single `item` for LIST/SECTION/item_pairs/qty_scale_correlations and for drilling "
+                "into one item's raw observations; use `items` to price many line items in a single turn."
             ),
             "parameters": {
                 "type":       "object",
@@ -5963,7 +6003,9 @@ async def _qp_continuation_task(
                                 "(a list of item names — batch, stats-only, returns priced join "
                                 "+ possibly_relevant co-occurrence leads) OR `item` (a single "
                                 "string — full detail incl. observations, or 'LIST' / "
-                                "'SECTION: <name>' / 'item_pairs: <name>')."),
+                                "'SECTION: <name>' / 'item_pairs: <name>' / "
+                                "'qty_scale_correlations: <name>' [optionally ' r<=<threshold>'] "
+                                "for that item's full, unfiltered driver correlations)."),
                 "parameters": {"type": "object", "properties": {
                     "item":  {"type": "string"},
                     "items": {"type": "array", "items": {"type": "string"}},

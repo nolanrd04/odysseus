@@ -541,7 +541,7 @@ Before writing a single line item, call kp_lookup for each of these five section
 NOT in your opening context — fetch them now so the estimator rules in system_prompt.txt
 can reference them:
 
-  kp_lookup('SECTION: qty_scale_correlations')  — quantity-to-ROW_SF formula fallbacks
+  kp_lookup('SECTION: qty_scale_correlations')  — quantity formula fallbacks (best_driver + median_ratio per item)
   kp_lookup('SECTION: item_scaling')            — per-item formula slopes (ROLLED CURB, IRRIGATION SLEEVES, etc.)
   kp_lookup('SECTION: ls_item_variance')        — CV data for LS item confidence bands
   kp_lookup('SECTION: ls_earthwork_rates')      — earthwork rate table for STRIP ROW / EXC TO EMBANK

@@ -10,6 +10,18 @@ Apply these formulas before falling back to analog scaling. Slopes are derived f
 and stored in `item_scaling` in the knowledge pack — prefer those values when they differ from the
 figures below (they update automatically as jobs are added).
 
+Some rules below say "use the qty_scale_correlations best_driver for <item>" instead of naming a
+specific scale metric. This means: call kp_lookup('SECTION: qty_scale_correlations'), read
+`correlations["<item>"].best_driver` and that driver's `.median_ratio`, then compute
+qty = this_job's_value_for_best_driver × median_ratio. Never hardcode which metric is strongest
+for an item, or its r/ratio value, directly in a rule — the correlation strengths shift as the
+case library grows, and a hardcoded value silently goes stale. If this job has no value for
+best_driver's metric (e.g. best_driver is lot_count but this is a rural/commercial job with
+lot_count_applicable = false), fall back to ROW_SF's median_ratio instead and flag
+[<ITEM>: best_driver unavailable for this job type — fell back to ROW_SF]. If you need every
+driver's stats for an item (including ones the SECTION view dropped for being weak), call
+kp_lookup with item="qty_scale_correlations: <item name>".
+
 1. SEWER SERVICES (4" EA): Conditional on lot_count_applicable.
    - lot_count_applicable = true (residential): qty = lot_count. Accuracy: 7/9 within 10%. Exception: Phase 2 jobs.
    - lot_count_applicable = false + building_count present (commercial): qty = building_count.
@@ -75,10 +87,9 @@ figures below (they update automatically as jobs are added).
          diverges from the formula by more than 50%, average the plan-read value with the (b) formula
          result and flag [SEWER MAIN: low-confidence plan read vs. formula diverge >50% — averaged —
          verify LF with Brian]. If divergence is ≤50%, use the plan-read value directly.
-   (b) Otherwise (sewer_main_LF is null — no utility plan available): compute:
-       sewer_main_LF = ROW_SF × qty_scale_correlations.correlations["8\" SEWER MAIN"].ROW_SF.median_ratio
-       Read median_ratio from the knowledge pack at inference time — do not use a hardcoded value.
-       ROW_SF is the best predictor for this item (r=0.944 vs road_LF r=0.687).
+   (b) Otherwise (sewer_main_LF is null — no utility plan available): use the qty_scale_correlations
+       best_driver for "8\" SEWER MAIN" (see the Derivation Rules preamble above) to compute
+       sewer_main_LF.
        Note: arc_loop layouts tend toward higher sewer coverage than cul-de-sac — if road_layout
        is arc_loop, apply a 1.15× multiplier to the formula result. Flag as [SEWER MAIN: formula
        fallback — no utility plan data].
@@ -92,11 +103,9 @@ figures below (they update automatically as jobs are added).
          diverges from the formula by more than 50%, average the plan-read value with the (b) formula
          result and flag [WATER MAIN: low-confidence plan read vs. formula diverge >50% — averaged —
          verify LF with Brian]. If divergence is ≤50%, use the plan-read value directly.
-   (b) Otherwise (water_main_LF is null — no utility plan available): compute:
-       water_main_LF = ROW_SF × qty_scale_correlations.correlations["8\" WATER MAIN PVC"].ROW_SF.median_ratio
-       Read median_ratio from the knowledge pack at inference time — do not use a hardcoded value.
-       ROW_SF is the best predictor for this item (r=0.992 vs road_LF r=0.934).
-       Flag as [WATER MAIN: formula fallback — no utility plan data].
+   (b) Otherwise (water_main_LF is null — no utility plan available): use the qty_scale_correlations
+       best_driver for "8\" WATER MAIN PVC" (see the Derivation Rules preamble above) to compute
+       water_main_LF. Flag as [WATER MAIN: formula fallback — no utility plan data].
 6. ROLLED CURB LF (conditional — only when job uses rolled curb): base rate is
    `item_scaling["ROLLED CURB"].formula` (road_LF × 1.43, r²=0.912). NOTE: 1.43 is an empirical
    portfolio fit that already blends the mix of one- and both-side roads in the training jobs —
@@ -189,9 +198,9 @@ figures below (they update automatically as jobs are added).
     #6 (ROLLED CURB LF / CURB AND GUTTER, summed across roads using curb_sides) and ratio is read
     from `derivation_rules["scuppers_from_curb_LF"].target_ratio` at inference time (currently
     ≈0.0258, i.e. ~1 scupper per 38.7 LF of curb; r=0.98, N=5 — do not hardcode, the KP updates
-    this as more jobs are added). If curb_LF is unavailable for this job, fall back to ROW_SF
-    instead: qty = ROW_SF × qty_scale_correlations.correlations["SCUPPERS"].ROW_SF.median_ratio
-    (r=0.962, N=9). Flag as [SCUPPER COUNT: formula fallback — no plan schedule/count found].
+    this as more jobs are added). If curb_LF is unavailable for this job, fall back to the
+    qty_scale_correlations best_driver for "SCUPPERS" instead (see the Derivation Rules preamble
+    above). Flag as [SCUPPER COUNT: formula fallback — no plan schedule/count found].
     Price from `unit_price_distributions["SCUPPERS"]` — median if N≥3, else mean.
 
 ## LS Item Inference
