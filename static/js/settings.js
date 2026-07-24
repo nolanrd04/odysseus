@@ -1743,16 +1743,21 @@ async function initQpPricingSettings() {
     ['qp_pricing_gemini_cache_write_per_million', 'set-qpPriceGeminiCacheWrite'],
     ['qp_pricing_gemini_cache_read_per_million',  'set-qpPriceGeminiCacheRead'],
   ];
+  var VISION_INT_FIELD    = { key: 'qp_vision_thinking_budget', el: el('set-qpVisionThinkingBudget') };
+  var VISION_SELECT_FIELD = { key: 'qp_vision_reasoning_effort', el: el('set-qpVisionReasoningEffort') };
+
   var msg = el('set-qpPricingMsg');
   var inputs = FIELDS.map(function(f) { return { key: f[0], el: el(f[1]) }; })
     .filter(function(f) { return f.el; });
-  if (!inputs.length) return;
+  if (!inputs.length && !VISION_INT_FIELD.el && !VISION_SELECT_FIELD.el) return;
 
   try {
     var settings = await fetch('/api/auth/settings', { credentials: 'same-origin' }).then(function(r) { return r.json(); });
     inputs.forEach(function(f) {
       if (settings[f.key] != null) f.el.value = settings[f.key];
     });
+    if (VISION_INT_FIELD.el && settings[VISION_INT_FIELD.key] != null) VISION_INT_FIELD.el.value = settings[VISION_INT_FIELD.key];
+    if (VISION_SELECT_FIELD.el && settings[VISION_SELECT_FIELD.key] != null) VISION_SELECT_FIELD.el.value = settings[VISION_SELECT_FIELD.key];
   } catch (e) { if (msg) msg.textContent = 'Failed to load rates'; }
 
   async function save() {
@@ -1763,6 +1768,15 @@ async function initQpPricingSettings() {
       f.el.value = v;
       payload[f.key] = v;
     });
+    if (VISION_INT_FIELD.el) {
+      var budget = Math.max(256, Math.min(8000, parseInt(VISION_INT_FIELD.el.value, 10)));
+      if (isNaN(budget)) budget = 1024;
+      VISION_INT_FIELD.el.value = budget;
+      payload[VISION_INT_FIELD.key] = budget;
+    }
+    if (VISION_SELECT_FIELD.el) {
+      payload[VISION_SELECT_FIELD.key] = VISION_SELECT_FIELD.el.value;
+    }
     try {
       await fetch('/api/auth/settings', {
         method: 'POST', credentials: 'same-origin',
@@ -1773,6 +1787,8 @@ async function initQpPricingSettings() {
     } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
   }
   inputs.forEach(function(f) { f.el.addEventListener('change', save); });
+  if (VISION_INT_FIELD.el) VISION_INT_FIELD.el.addEventListener('change', save);
+  if (VISION_SELECT_FIELD.el) VISION_SELECT_FIELD.el.addEventListener('change', save);
 }
 
 /* ═══════════════════════════════════════════

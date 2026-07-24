@@ -204,6 +204,14 @@ DEFAULT_SETTINGS = {
     "qp_pricing_gemini_output_per_million": 12.00,
     "qp_pricing_gemini_cache_write_per_million": 0.00,
     "qp_pricing_gemini_cache_read_per_million": 0.20,
+    # Quick Proposal vision-call reasoning budget: chain-of-thought degrades
+    # visual-spatial grounding (counting, geometry, layout matching) rather than
+    # helping it, and short bounded reasoning outperforms both no-thinking and
+    # verbose thinking on this task class. Applies only to vision calls (Gemini
+    # extraction/classification, or whichever provider fills that role) — the
+    # Claude manager's own text-only orchestration reasoning is untouched.
+    "qp_vision_thinking_budget": 1024,     # Anthropic budget_tokens for vision-loop calls
+    "qp_vision_reasoning_effort": "low",   # Gemini/OpenAI-compat reasoning_effort: none|low|medium|high
     # Keyboard shortcuts (action: key combination)
     "keybinds": {
         "search": "ctrl+k",

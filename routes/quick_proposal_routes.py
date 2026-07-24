@@ -715,6 +715,33 @@ def _qp_pricing_rates(role: str) -> dict:
     }
 
 
+def _qp_vision_reasoning_config() -> dict:
+    """Reasoning budget for QP vision calls (Gemini extraction/classification, and any
+    provider filling that role) — chain-of-thought degrades visual-spatial grounding
+    (counting, geometry, layout matching) rather than helping it, and short bounded
+    reasoning outperforms both no-thinking and verbose thinking on this task class.
+    Admin-configurable under Settings -> Quick Proposal Pricing so it can be tuned
+    without a code change if a given model doesn't behave like the cited benchmarks.
+    Does NOT apply to the Claude manager's own text-only orchestration reasoning
+    (tool-calling loop, QC checks) — that's a different task class, untouched here.
+    """
+    from src.settings import get_setting
+    return {
+        "budget_tokens": int(get_setting("qp_vision_thinking_budget", 1024)),
+        "effort":        get_setting("qp_vision_reasoning_effort", "low"),
+    }
+
+
+def _apply_vision_reasoning_cap(payload: dict, url: str, headers: dict) -> dict:
+    """Cap reasoning effort on a vision-call payload. Anthropic candidates are handled
+    separately via _stream_anthropic_native's thinking_budget_override — that endpoint
+    doesn't understand this OpenAI-compat field.
+    """
+    if _is_anthropic_endpoint(url, headers):
+        return payload
+    return {**payload, "reasoning_effort": _qp_vision_reasoning_config()["effort"]}
+
+
 def _qp_estimate_cost(role: str, usage: dict) -> float:
     """Estimate $ cost of ONE call's token usage (not aggregated totals — see why below).
 
@@ -2488,13 +2515,13 @@ async def _classify_one_page(
                 {"type": "text", "text": "Classify this page per your instructions."},
             ],
         }]
-        payload = {
+        payload = _apply_vision_reasoning_cap({
             "model":           model,
             "messages":        messages,
             "max_tokens":      8192,
             "response_format": {"type": "json_object"},
             "cached_content":  cache_name,
-        }
+        }, url, headers)
     else:
         messages = [
             {"role": "system", "content": prompt},
@@ -2502,12 +2529,12 @@ async def _classify_one_page(
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
             ]},
         ]
-        payload = {
+        payload = _apply_vision_reasoning_cap({
             "model":           model,
             "messages":        messages,
             "max_tokens":      8192,
             "response_format": {"type": "json_object"},
-        }
+        }, url, headers)
 
     # 300s: gemini-3.1-pro-preview (a thinking model) can take 1-3 min per
     # image-heavy classification when Google's preview capacity is under load.
@@ -3305,7 +3332,8 @@ async def _gemini_call_with_retry(
                 # TTL can't realistically miss, and it's cheaper than paying the 1h
                 # write premium for headroom this call site will never use.
                 resp_dict = await _stream_anthropic_native(
-                    cfg_url, cfg_hdrs, attempt_payload, queue, cfg_model, log_path, cache_ttl="5m"
+                    cfg_url, cfg_hdrs, attempt_payload, queue, cfg_model, log_path, cache_ttl="5m",
+                    thinking_budget_override=_qp_vision_reasoning_config()["budget_tokens"],
                 )
                 if "error" not in resp_dict:
                     # Tells _run_gemini_with_tools this turn's text/thinking were already
@@ -3377,6 +3405,7 @@ async def _run_gemini_with_tools(
         # cached_content is a native Gemini API field; the OpenAI-compat endpoint rejects it
         if gemini_state.get("cache_name") and "/openai/" not in gemini_state["url"]:
             payload["cached_content"] = gemini_state["cache_name"]
+        payload = _apply_vision_reasoning_cap(payload, gemini_state["url"], gemini_state["headers"])
 
         resp_data = await _gemini_call_with_retry(
             gemini_state["url"], gemini_state["headers"], payload,
@@ -4233,6 +4262,7 @@ async def _stream_anthropic_native(
     mgr_model_id: str,
     log_path: str,
     cache_ttl: str = "1h",
+    thinking_budget_override: int | None = None,
 ) -> dict:
     """Stream a native Anthropic /v1/messages call with extended thinking enabled.
 
@@ -4247,11 +4277,20 @@ async def _stream_anthropic_native(
     `cache_ttl` selects the prompt-cache breakpoint TTL ("5m" or "1h") — see the
     _CACHE_CONTROL_5M / _CACHE_CONTROL_1H comment above for which call site should
     pass which.
+
+    `thinking_budget_override`, when given, replaces the max_tokens-derived formula
+    below outright — used by the vision/tool-loop call site (_gemini_call_with_retry)
+    to cap reasoning short regardless of this call's max_tokens, since verbose CoT
+    degrades visual-spatial grounding rather than helping it. The manager's own
+    text-only orchestration loop never passes this, so it keeps the formula.
     """
     url = _anthropic_native_url(url)
     system, anth_messages = _openai_messages_to_anthropic(payload.get("messages") or [])
     max_tokens    = payload.get("max_tokens", 8000)
-    budget_tokens = max(1024, min(8000, max_tokens - 2000))
+    budget_tokens = (
+        thinking_budget_override if thinking_budget_override is not None
+        else max(1024, min(8000, max_tokens - 2000))
+    )
     cache_control = _CACHE_CONTROL_5M if cache_ttl == "5m" else _CACHE_CONTROL_1H
 
     # Prompt caching: the manager loop resends the same system prompt, tool

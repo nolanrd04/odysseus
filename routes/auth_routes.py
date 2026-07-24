@@ -655,7 +655,9 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         _INT_RANGES = {
             "agent_max_rounds": (1, 200),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
+            "qp_vision_thinking_budget": (256, 8000),  # Anthropic's accepted budget_tokens range
         }
+        _REASONING_EFFORT_LEVELS = {"none", "low", "medium", "high"}
         for key in DEFAULT_SETTINGS:
             if key not in body:
                 continue
@@ -667,6 +669,9 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 except (TypeError, ValueError):
                     raise HTTPException(400, f"{key} must be an integer")
                 val = max(lo, min(val, hi))
+            elif key == "qp_vision_reasoning_effort":
+                if val not in _REASONING_EFFORT_LEVELS:
+                    raise HTTPException(400, f"{key} must be one of {sorted(_REASONING_EFFORT_LEVELS)}")
             elif key.startswith("qp_pricing_"):
                 try:
                     val = max(0.0, float(val))

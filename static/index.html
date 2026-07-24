@@ -2445,6 +2445,21 @@
                 <label class="settings-label">Cache read</label>
                 <input id="set-qpPriceGeminiCacheRead" type="text" inputmode="decimal" placeholder="0.20" class="settings-select" style="width:120px;">
               </div>
+              <div style="font-size:11px;font-weight:600;opacity:0.7;margin-top:10px;">Vision reasoning</div>
+              <div class="admin-toggle-sub" style="margin-bottom:4px;">Caps reasoning on vision calls (page classification, field extraction) — chain-of-thought degrades visual-spatial grounding rather than helping it, so these are kept short and bounded. Does not affect the manager's own orchestration reasoning.</div>
+              <div class="settings-row">
+                <label class="settings-label">Thinking budget</label>
+                <input id="set-qpVisionThinkingBudget" type="text" inputmode="numeric" placeholder="1024" class="settings-select" style="width:120px;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label">Reasoning effort</label>
+                <select id="set-qpVisionReasoningEffort" class="settings-select" style="width:120px;">
+                  <option value="none">None</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </div>
               <div id="set-qpPricingMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>
