@@ -2133,15 +2133,40 @@ function _escHtml(str) {
 }
 
 const PROMPT_DISPLAY_NAMES = {
-    'gemini_phase1':      'Phase 1 — Classification',
-    'gemini_phase3':      'Phase 3 — Extraction',
-    'gemini_completeness': 'Extract Completeness',
-    'gemini_notes':        'Extract Notes',
-    'gemini_phase0_5':     'Detect Job Type',
-    'gemini_scope':        'Detect Scope',
-    'manager_system':      'Manager Guidance Prompt',
-    'system_prompt':       'System Prompt',
+    'gemini_phase0_5':      'Detect Job Type',
+    'gemini_phase1':        'Classification',
+    'gemini_completeness':  'Completeness',
+    'gemini_notes':         'Extract Notes',
+    'gemini_scope':         'Detect Scope',
+    'gemini_phase3':        'Extraction',
+    'manager_system':       'Manager',
+    'system_prompt':        'System',
 };
+
+// Pipeline order (matches phase execution order), not alphabetical filename order.
+// Anything returned by the API but not listed here is appended at the end, in the
+// order the API returned it, so a newly added prompt file never silently disappears.
+const PROMPT_ORDER = [
+    'gemini_phase0_5',
+    'gemini_phase1',
+    'gemini_completeness',
+    'gemini_notes',
+    'gemini_scope',
+    'gemini_phase3',
+    'manager_system',
+    'system_prompt',
+];
+
+function sortPromptsForDisplay(prompts) {
+    return [...prompts].sort((a, b) => {
+        const ia = PROMPT_ORDER.indexOf(a.name);
+        const ib = PROMPT_ORDER.indexOf(b.name);
+        if (ia === -1 && ib === -1) return 0;
+        if (ia === -1) return 1;
+        if (ib === -1) return -1;
+        return ia - ib;
+    });
+}
 
 export async function buildPromptsPanel({ onClose }) {
     injectStyles();
@@ -2166,7 +2191,7 @@ export async function buildPromptsPanel({ onClose }) {
     try {
         const res = await fetch('/api/quick_proposal/prompts', { credentials: 'same-origin' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const prompts = await res.json();
+        const prompts = sortPromptsForDisplay(await res.json());
 
         if (!prompts.length) {
             body.innerHTML = '<div style="padding:32px;text-align:center;opacity:0.5;">No prompts found.</div>';
