@@ -5349,7 +5349,16 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     continue
                 break
 
-            for tc in tool_calls:
+            # Every tool_call_id dispatched here MUST end up with a persisted
+            # tool-role ChatMessage — phase-6 continuation chat reconstructs its
+            # history straight from these DB rows, and a tool_use block with no
+            # paired tool_result is a permanent 400 invalid_request_error on
+            # every future turn once it lands (not just this one). Called from
+            # inside a try/except below so a mid-dispatch exception (Gemini
+            # failure, etc.) still gets a result saved; the "unknown tool"
+            # branch covers the other way a result used to go unsaved.
+            async def _dispatch_qp5_tool_call(tc):
+                nonlocal phase_b_complete, _earthwork_prior_checked
                 tool_id   = tc.get("id", "")
                 tool_name = tc.get("function", {}).get("name", "")
                 try:
@@ -5383,6 +5392,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                                          "content": gemini_resp or "(no response from Gemini)"})
                     _save_chat_message(session_id, "tool", gemini_resp or "(no response from Gemini)",
                                        {"tool_call_id": tool_id, "tool_name": "send_to_gemini"})
+                    return False
                 elif tool_name == "read_index":
                     section = tool_input.get("section", "values")
                     if section == "notes":
@@ -5402,6 +5412,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": index_json})
                     _save_chat_message(session_id, "tool", index_json,
                                        {"tool_call_id": tool_id, "tool_name": "read_index", "section": section})
+                    return False
                 elif tool_name == "kp_lookup":
                     items_arg = tool_input.get("items")
                     if isinstance(items_arg, list) and items_arg:
@@ -5425,6 +5436,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": lookup_result})
                     _save_chat_message(session_id, "tool", lookup_result,
                                        {"tool_call_id": tool_id, "tool_name": "kp_lookup"})
+                    return False
                 elif tool_name == "create_memory":
                     _mem_args = {"text": (tool_input.get("text") or "")[:300],
                                  "confirms_run": bool(tool_input.get("confirms_run"))}
@@ -5441,6 +5453,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": mem_result})
                     _save_chat_message(session_id, "tool", mem_result,
                                        {"tool_call_id": tool_id, "tool_name": "create_memory"})
+                    return False
                 elif tool_name == "end_generation":
                     _eb_present = _earthwork_balance_present(index.extracted_values)
                     if _eb_present and not _earthwork_prior_checked:
@@ -5470,6 +5483,7 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                         mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": _reject_msg})
                         _save_chat_message(session_id, "tool", _reject_msg,
                                            {"tool_call_id": tool_id, "tool_name": "end_generation"})
+                        return False
                     else:
                         grand_total = tool_input.get("grand_total")
                         final_line_items = tool_input.get("line_items") or []
@@ -5482,10 +5496,30 @@ async def phase5_extraction_loop(index, queue: asyncio.Queue, manager_model: str
                         _save_chat_message(session_id, "tool", _end_content,
                                            {"tool_call_id": tool_id, "tool_name": "end_generation"})
                         phase_b_complete = True
-                        break
+                        return True
                 else:
+                    _unknown_result = f"Unknown tool: {tool_name}"
                     mgr_messages.append({"role": "tool", "tool_call_id": tool_id,
-                                         "content": f"Unknown tool: {tool_name}"})
+                                         "content": _unknown_result})
+                    _save_chat_message(session_id, "tool", _unknown_result,
+                                       {"tool_call_id": tool_id, "tool_name": tool_name})
+                    return False
+
+            for tc in tool_calls:
+                try:
+                    _tool_done = await _dispatch_qp5_tool_call(tc)
+                except Exception as e:
+                    _tool_id   = tc.get("id", "")
+                    _tool_name = tc.get("function", {}).get("name", "")
+                    logger.error(f"[quick_proposal] tool execution failed run={index.run_id} "
+                                 f"tool={_tool_name} id={_tool_id}: {e}", exc_info=True)
+                    _err_result = f"Tool execution error ({_tool_name}): {e}"
+                    mgr_messages.append({"role": "tool", "tool_call_id": _tool_id, "content": _err_result})
+                    _save_chat_message(session_id, "tool", _err_result,
+                                       {"tool_call_id": _tool_id, "tool_name": _tool_name, "error": True})
+                    _tool_done = False
+                if _tool_done:
+                    break
 
             if phase_b_complete:
                 break
@@ -6272,7 +6306,16 @@ async def _qp_continuation_task(
         if not tool_calls:
             break
 
-        for tc in tool_calls:
+        # Every tool_call_id dispatched here MUST end up with a persisted tool-role
+        # ChatMessage, no matter what happens — the next continuation turn
+        # reconstructs history straight from these DB rows and hands it back to
+        # Anthropic. A tool_use block with no paired tool_result is a permanent
+        # 400 invalid_request_error that reproduces on every future turn, not
+        # just this one. This helper is called from inside a try/except below so
+        # a mid-dispatch exception (Gemini/doc-gen failure) still gets a result
+        # saved; its own "unknown tool" branch covers the other way a result
+        # used to go unsaved (the manager calling a tool name we don't handle).
+        async def _dispatch_qp_tool_call(tc):
             tool_id   = tc.get("id", "")
             tool_name = tc.get("function", {}).get("name", "")
             try:
@@ -6369,6 +6412,24 @@ async def _qp_continuation_task(
                 _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": "generate_proposal_document"})
             else:
                 result = f"Unknown tool: {tool_name}"
+                await _emit(queue, "extraction_message",
+                            role="tool_result", tool_id=tool_id, tool=tool_name,
+                            model=mgr_model_id, result=result)
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": tool_name})
+            return tool_id, result
+
+        for tc in tool_calls:
+            try:
+                tool_id, result = await _dispatch_qp_tool_call(tc)
+            except Exception as e:
+                tool_id = tc.get("id", "")
+                tool_name = tc.get("function", {}).get("name", "")
+                logger.error(f"[qp_chat] tool execution failed run={run_id} tool={tool_name} id={tool_id}: {e}", exc_info=True)
+                result = f"Tool execution error ({tool_name}): {e}"
+                await _emit(queue, "extraction_message",
+                            role="tool_result", tool_id=tool_id, tool=tool_name,
+                            model=mgr_model_id, result=result)
+                _save_chat_message(session_id, "tool", result, {"tool_call_id": tool_id, "tool_name": tool_name, "error": True})
             mgr_messages.append({"role": "tool", "tool_call_id": tool_id, "content": result})
 
     await _emit(queue, "phase_complete", phase="phase6")
