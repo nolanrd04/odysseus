@@ -54,6 +54,12 @@ pytest-asyncio
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+# DWG parsing + geometry engine for the DWG -> quantity-sheet pipeline
+# investigation (documentation/.SESSION_HANDOFFS/dwg_to_qty_sheet/building/dwg_qty/).
+# Not wired into the main app yet — staged here ahead of the pipeline's
+# eventual production home (still an open decision as of session 2026_7_27.1).
+ezdxf==1.4.4
+shapely
 
 
 
