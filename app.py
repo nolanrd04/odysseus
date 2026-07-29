@@ -795,6 +795,11 @@ app.include_router(setup_workspace_routes())
 from routes.hwfit_routes import setup_hwfit_routes
 app.include_router(setup_hwfit_routes())
 
+# DWG->DXF conversion smoke test (DQ-1 scoping, dwg_to_qty_sheet project) --
+# throwaway, not the real pipeline integration.
+from routes.dwg_test_routes import setup_dwg_test_routes
+app.include_router(setup_dwg_test_routes())
+
 # Model A/B Comparison
 from routes.compare.compare_routes import setup_compare_routes
 app.include_router(setup_compare_routes(session_manager))

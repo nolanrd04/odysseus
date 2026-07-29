@@ -51,6 +51,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # regressing pip/venv installs on hosts without libmagic. Debian always has the
 # lib here, so the import is instant and detection actually works.
 
+# ODA File Converter + Xvfb: headless DWG->DXF conversion for the DWG
+# quantity pipeline (documentation/.SESSION_HANDOFFS/dwg_to_qty_sheet).
+# Verified 2026-07-29 (session 2026_7_29.1, DQ-1): the QT6 Linux build needs
+# Xvfb (no real X display in the container) *and* this specific set of
+# xcb/Qt runtime libs the qxcb platform plugin dlopens at runtime -- without
+# them it aborts with "no Qt platform plugin could be initialized" even
+# though libqxcb.so itself is found and Xvfb is running.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb \
+    xauth \
+    libxkbcommon-x11-0 \
+    libxcb-icccm4 \
+    libxcb-keysyms1 \
+    libxcb-shape0 \
+    libxcb-xkb1 \
+    libxcb-image0 \
+    libxcb-render-util0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Direct guestfiles download, no login/EULA wall as of 2026-07-29 (matches
+# the version already validated on Windows in dwg_qty/convert.py). Pin the
+# filename/version explicitly since ODA's guestfiles links have moved before.
+ARG ODA_FILE_CONVERTER_VERSION=27.1
+RUN curl -fsSL -o /tmp/oda.deb \
+      "https://www.opendesign.com/guestfiles/get?filename=ODAFileConverter_QT6_lnxX64_8.3dll_${ODA_FILE_CONVERTER_VERSION}.deb" \
+    && apt-get update && apt-get install -y --no-install-recommends /tmp/oda.deb \
+    && rm -f /tmp/oda.deb && rm -rf /var/lib/apt/lists/*
+
 # Docker CLI (client only — daemon stays on the host via the
 # /var/run/docker.sock mount). The Debian `docker.io` package ships
 # dockerd but not the client binary on slim, so grab the static client

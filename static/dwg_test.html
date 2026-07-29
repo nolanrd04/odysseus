@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DWG Conversion Test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 1.2rem; }
+  #result { white-space: pre-wrap; background: #f4f4f4; padding: 12px; border-radius: 6px; margin-top: 16px; font-size: 0.85rem; overflow-x: auto; }
+  .error { color: #b00020; }
+  .ok { color: #0a7a2f; }
+</style>
+</head>
+<body>
+<h1>DWG &rarr; DXF Conversion Test (DQ-1 smoke test)</h1>
+<p>Uploads a .dwg to the odysseus server process, runs it through ODA File Converter + dwg_qty's census, and reports back. Not the real pipeline &mdash; just proves the conversion path works from inside the app.</p>
+<input type="file" id="file" accept=".dwg">
+<button id="go">Convert</button>
+<div id="result"></div>
+<script src="/static/js/dwg_test.js"></script>
+</body>
+</html>
