@@ -1,0 +1,23 @@
+## Row-label reference — a closed vocabulary, not a fixed output shape
+
+The table below is the closed row-label template: the exact set of
+`Work type` strings (and units) you're allowed to use, rendered blank as
+a reference/checklist while you work — it is NOT the literal shape of
+your final answer. Do not print all ~200 rows in your response, blank or
+not. Copy a row's `Work type` string into your final output **exactly as
+written here** — including any depth-range, size, or SINGLE/DOUBLE split
+suffix — only for rows where you found a real QTY. Do not merge split
+rows into one, paraphrase a label, drop a qualifier, or invent a
+row/label not on this list (that's Case A instead — see field rules).
+Omit a row entirely from your final table, and record it in your Case B
+list instead, when you found no evidence for it — do not leave it in the
+table as a blank row.
+
+This is a union across every job in the corpus, so near-duplicate
+rows across different jobs are expected (different depth ranges,
+sizes, or an occasional source-data typo carried over from a real
+sheet) — use the census, profile data, and analog jobs
+(`dwg_corpus_lookup`) to judge which specific variant this job's
+evidence actually supports. Never guess a depth range or size
+qualifier you have no evidence for; flag it (Case B) instead of
+picking one arbitrarily.

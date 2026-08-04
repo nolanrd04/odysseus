@@ -103,6 +103,15 @@ async def _run_subprocess_streaming(
 class BashTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import agent_cwd, _truncate
+        # DWG extraction turns exclude bash entirely (DQ-5): the python audit
+        # hook can't see through arbitrary shell/binaries. chat_routes already
+        # disables bash for these turns; this refusal is belt-and-braces.
+        from src.dwg_pipeline.sandbox import active_dwg_job_dir
+        if active_dwg_job_dir():
+            return {
+                "error": "bash is disabled during DWG extraction turns — use the python tool",
+                "exit_code": 1,
+            }
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
         proc = await asyncio.create_subprocess_shell(
@@ -131,6 +140,18 @@ class PythonTool:
         from src.tool_execution import agent_cwd, _truncate
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
+        # DWG extraction turns get the DQ-5 sandbox: an audit-hook preamble
+        # confining filesystem access to the job folder (plus read-only app /
+        # interpreter roots so imports work under -I), and a Windows Job
+        # Object capping memory/process count.
+        from src.dwg_pipeline.sandbox import (
+            active_dwg_job_dir,
+            assign_job_object,
+            build_sandbox_preamble,
+        )
+        _dwg_job_dir = active_dwg_job_dir()
+        if _dwg_job_dir:
+            content = build_sandbox_preamble(_dwg_job_dir) + "\n" + content
         proc = await asyncio.create_subprocess_exec(
             (sys.executable or "python"), "-I", "-c", content,
             stdout=asyncio.subprocess.PIPE,
@@ -138,6 +159,8 @@ class PythonTool:
             env=_subproc_env,
             cwd=agent_cwd(),
         )
+        if _dwg_job_dir:
+            assign_job_object(proc.pid)
         stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
             proc,
             timeout=DEFAULT_PYTHON_TIMEOUT,

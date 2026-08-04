@@ -494,6 +494,16 @@ def _ollama_api_root(url: str) -> str:
         return url
     if path == "":
         return url + "/api"
+    host = parsed.hostname or ""
+    # A local/Ollama-default-port host stored in OpenAI-compat form
+    # (".../v1" or ".../v1/chat/completions") — the app talks to Ollama's
+    # OpenAI-compat surface for these unless the URL is already in native
+    # /api form, but the native root is always just the bare host. A non-Ollama
+    # host on an arbitrary port (e.g. api.openai.com/v1) must NOT be rewritten.
+    local_ollama_host = host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or parsed.port == 11434
+    if local_ollama_host and (path == "/v1" or path.startswith("/v1/")):
+        root = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else url
+        return root.rstrip("/") + "/api"
     if _host_match(url, "ollama.com"):
         root = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://ollama.com"
         return root.rstrip("/") + "/api"
@@ -1326,6 +1336,33 @@ def _convert_openai_content_to_anthropic(content):
     return converted
 
 
+def _mark_anthropic_cache_breakpoint(msg: dict) -> dict:
+    """Return a copy of `msg` with an ephemeral prompt-cache breakpoint on the
+    last block of its content (converting plain-string content to a block first).
+
+    Never mutates `msg` or its content list in place — content blocks built by
+    `_convert_openai_content_to_anthropic` can be the same block objects the
+    caller's persisted message history holds, so an in-place edit would
+    permanently bake a cache_control marker into history that gets resent (and
+    re-marked) every subsequent round, eventually exceeding Anthropic's
+    4-breakpoint-per-request limit.
+    """
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content:
+        # Anthropic rejects cache_control on thinking/redacted_thinking blocks. Those
+        # only land last if a turn was cut off mid-thinking with no text/tool_use
+        # after it (rare) — skip marking rather than risk a 400 on an otherwise-fine
+        # request.
+        if content[-1].get("type") in ("thinking", "redacted_thinking"):
+            return msg
+        new_content = content[:-1] + [{**content[-1], "cache_control": {"type": "ephemeral"}}]
+    else:
+        return msg
+    return {**msg, "content": new_content}
+
+
 def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=False, tools=None):
     """Convert OpenAI-style messages to Anthropic format."""
     system_parts = []
@@ -1381,16 +1418,18 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
     # returns HTTP 400. Omit it for those models; older Claude models still take it.
     if not _anthropic_rejects_temperature(model):
         payload["temperature"] = temperature
+    # Presence of `tools` means an agentic/multi-round call, where the system
+    # prompt, tools, and (below) the growing message history are all reused
+    # round over round. Skip caching tiny one-off prompts, where the
+    # cache-WRITE premium wouldn't pay back (no reuse).
+    cache_agentic = bool(tools) or sum(len(p) for p in system_parts) > 4000
     if system_parts:
         system_text = "\n\n".join(system_parts)
         # Send `system` as a structured text block so we can attach a prompt-cache
-        # breakpoint. The agent loop re-sends this same large prefix every round;
-        # caching it makes Anthropic re-read it from cache (~90% cheaper, lower TTFB)
-        # instead of re-billing it. Skip caching tiny one-off prompts, where the
-        # cache-WRITE premium wouldn't pay back (no reuse). Presence of `tools`
-        # means an agentic/multi-round call, where the prefix is always reused.
+        # breakpoint. Caching it makes Anthropic re-read it from cache (~90%
+        # cheaper, lower TTFB) instead of re-billing it every round.
         system_block = {"type": "text", "text": system_text}
-        if tools or len(system_text) > 4000:
+        if cache_agentic:
             system_block["cache_control"] = {"type": "ephemeral"}
         payload["system"] = [system_block]
     if stream:
@@ -1411,6 +1450,20 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
             # The breakpoint caches all tool defs preceding it in the request.
             anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
             payload["tools"] = anthropic_tools
+    # Rolling breakpoint(s) on the message history itself. Without this, only
+    # the fixed system+tools prefix is ever cached — every round of an agentic
+    # loop re-bills the entire, ever-growing tool-call/tool-result history as
+    # fresh input. Mark a sliding pair (last two messages): whichever messages
+    # are last this round are still the earlier, unchanged prefix next round,
+    # so this round's breakpoint gets hit again next round even as history
+    # grows. Mirrors the pattern already proven out in
+    # routes/quick_proposal_routes.py's _mark_cache_breakpoint.
+    if cache_agentic and chat_messages:
+        if len(chat_messages) >= 2:
+            for idx in (len(chat_messages) - 2, len(chat_messages) - 1):
+                chat_messages[idx] = _mark_anthropic_cache_breakpoint(chat_messages[idx])
+        else:
+            chat_messages[-1] = _mark_anthropic_cache_breakpoint(chat_messages[-1])
     return payload
 
 def _build_anthropic_headers(headers):
@@ -2167,6 +2220,12 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     else:
         messages_copy = non_sys
 
+    # Set below (Ollama OpenAI-compat branch only) when we explicitly asked
+    # the endpoint to disable structured thinking via "think": false. Declared
+    # here unconditionally so the reasoning-routing check further down (shared
+    # by every non-Anthropic provider) never hits a NameError for providers
+    # that don't take this branch.
+    _think_explicitly_disabled = False
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
         h = _build_anthropic_headers(headers)
@@ -2213,7 +2272,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
         # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
         # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
-        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
+        _think_explicitly_disabled = _is_ollama_openai_compat_url(url) and _supports_thinking(model)
+        if _think_explicitly_disabled:
             payload["think"] = False
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
@@ -2367,6 +2427,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     if provider == "anthropic":
         _anth_input_tokens = 0
         _anth_output_tokens = 0
+        _c_read = 0
+        _c_write = 0
         # Track tool_use blocks: {index: {id, name, arguments_json}}
         _anth_tool_blocks: Dict[int, Dict] = {}
         _anth_block_idx = -1
@@ -2445,8 +2507,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                         "arguments": tb["arguments"],
                                     })
                                 yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
-                            if _anth_input_tokens or _anth_output_tokens:
-                                yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens, "output_tokens": _anth_output_tokens}})}\n\n'
+                            if _anth_input_tokens or _anth_output_tokens or _c_read or _c_write:
+                                # `input_tokens` here is the TRUE size of this round's
+                                # context (fresh + cache-read + cache-write), not just
+                                # the fresh portion Anthropic's own usage field reports —
+                                # a heavily-cached round can be ~2 fresh tokens against a
+                                # 75k+ token actual prompt, and anything downstream that
+                                # tracks context-% off a bare `input_tokens` would badly
+                                # under-report it otherwise. cache_read/cache_write are
+                                # also broken out for callers that want the split.
+                                yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens + _c_read + _c_write, "output_tokens": _anth_output_tokens, "cache_read_tokens": _c_read, "cache_write_tokens": _c_write}})}\n\n'
                             yield "data: [DONE]\n\n"
                             return
                         elif evt == "error":
@@ -2480,6 +2550,13 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     _first_content_sent = False
     _in_think_tag = False        # True while consuming <think>…</think> content
     _think_open_stripped = False  # opening <think> tag already removed
+    # Carry-over buffer for the </think> close-tag search below — a chunk
+    # boundary can split the tag itself (e.g. "...</th" then "ink>..."), in
+    # which case a plain per-chunk substring search never finds it and
+    # _in_think_tag gets stuck True for the rest of the stream, silently
+    # routing real answer content into the thinking channel instead.
+    _THINK_CLOSE_TAG = "</think>"
+    _think_close_buf = ""
     _harmony_router = _HarmonyStreamRouter()
     _harmony_active = False       # sticky: gpt-oss harmony <|channel|> stream detected
     _actual_model = ""
@@ -2529,6 +2606,14 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 if line.startswith("data:"):
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        if _think_close_buf:
+                            # Stream ended while still holding back a
+                            # possible partial </think> tag — the model
+                            # never actually closed it, so this is real
+                            # thinking content, not a tag fragment. Flush it
+                            # rather than silently dropping it.
+                            yield f'data: {json.dumps({"delta": _think_close_buf, "thinking": True})}\n\n'
+                            _think_close_buf = ""
                         for event in _format_routed_content(_harmony_router.flush()):
                             yield event
                         tc_event = _emit_tool_calls()
@@ -2618,6 +2703,24 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                             if thinking_part:
                                                 reasoning = (reasoning + thinking_part) if reasoning else thinking_part
                                             content = text_part
+                                        if reasoning and _think_explicitly_disabled:
+                                            # We explicitly asked this endpoint for
+                                            # "think": false (Ollama qwen3/gemma4) precisely
+                                            # so nothing would arrive on the reasoning
+                                            # channel — confirmed live: Ollama sends real,
+                                            # substantive round narration via `reasoning`
+                                            # here anyway (gemma4:26b), ignoring the
+                                            # request. Since we already tried to suppress
+                                            # the thinking channel for this model and it
+                                            # didn't take, anything landing here was never
+                                            # meant to be hidden — treat it as ordinary
+                                            # visible content instead of routing it to the
+                                            # collapsed thinking panel (where a DWG agent
+                                            # turn's real per-round analysis was silently
+                                            # ending up, saved only in `metadata.thinking`
+                                            # and never rendered as a visible message).
+                                            content = reasoning + content
+                                            reasoning = ""
                                         if reasoning:
                                             _degenerate = degenerate_guard.check(reasoning)
                                             if _degenerate:
@@ -2647,14 +2750,27 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                                 # Covers Qwen3-derived models (Qwopus, QwQ forks) whose
                                                 # names don't match _THINKING_MODEL_PATTERNS but still
                                                 # emit literal <think> markup via llama.cpp --jinja.
-                                                if not _first_content_sent and not _thinking_model and not _in_think_tag and stripped.lower().startswith("<think"):
+                                                if not _in_think_tag and stripped.lower().startswith("<think"):
+                                                    # Not gated to "first chunk of the whole stream" —
+                                                    # some models (confirmed live: gemma4:26b) emit
+                                                    # multiple separate <think>...</think> cycles within
+                                                    # a single round. Restricting detection to only the
+                                                    # very first occurrence left every later cycle's
+                                                    # <think> tag leaking as literal unstripped text into
+                                                    # the visible answer instead of being routed to the
+                                                    # thinking channel.
                                                     _thinking_model = True
                                                     _in_think_tag = True
+                                                    _think_open_stripped = False
                                                 if _in_think_tag:
-                                                    close_idx = content.lower().find("</think>")
+                                                    # Search across the carry-over buffer + this chunk so a
+                                                    # </think> tag split across a chunk boundary is still
+                                                    # found (see _think_close_buf comment above).
+                                                    search_text = _think_close_buf + content
+                                                    close_idx = search_text.lower().find(_THINK_CLOSE_TAG)
                                                     if close_idx != -1:
                                                         # Split: up-to-</think> → thinking, remainder → content
-                                                        think_part = content[:close_idx]
+                                                        think_part = search_text[:close_idx]
                                                         if not _think_open_stripped:
                                                             # Strip the opening <think[...] > from the first chunk.
                                                             # Use a dedicated flag — _first_content_sent stays False
@@ -2663,23 +2779,33 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                                             if tag_end != -1:
                                                                 think_part = think_part[tag_end + 1:]
                                                             _think_open_stripped = True
-                                                        regular_part = content[close_idx + len("</think>"):]
+                                                        regular_part = search_text[close_idx + len(_THINK_CLOSE_TAG):]
                                                         _in_think_tag = False
+                                                        _think_close_buf = ""
                                                         if think_part:
                                                             yield f'data: {json.dumps({"delta": think_part, "thinking": True})}\n\n'
                                                         if regular_part:
                                                             _first_content_sent = True
                                                             yield f'data: {json.dumps({"delta": regular_part})}\n\n'
                                                     else:
-                                                        # Still inside <think>: route to thinking channel
+                                                        # Still inside <think>: route to thinking channel.
+                                                        # Hold back only the last len(tag)-1 chars — the
+                                                        # most a boundary could split off — as the new
+                                                        # buffer, and flush the rest now so streaming
+                                                        # stays responsive.
                                                         if not _think_open_stripped:
                                                             # Strip the opening <think[...] > tag (first chunk only)
-                                                            tag_end = stripped.lower().find(">")
+                                                            tag_end = search_text.lstrip().lower().find(">")
                                                             if tag_end != -1:
-                                                                content = stripped[tag_end + 1:]
+                                                                search_text = search_text.lstrip()[tag_end + 1:]
                                                             _think_open_stripped = True
-                                                        if content:
-                                                            yield f'data: {json.dumps({"delta": content, "thinking": True})}\n\n'
+                                                        _keep = len(_THINK_CLOSE_TAG) - 1
+                                                        if len(search_text) > _keep:
+                                                            emit_now, _think_close_buf = search_text[:-_keep], search_text[-_keep:]
+                                                        else:
+                                                            emit_now, _think_close_buf = "", search_text
+                                                        if emit_now:
+                                                            yield f'data: {json.dumps({"delta": emit_now, "thinking": True})}\n\n'
                                                 else:
                                                     # Some thinking backends start normal content with a
                                                     # stray closing tag. Repair only that shape; do not
@@ -2792,12 +2918,27 @@ def _summarize_stream_error(err_chunk: Optional[str]) -> str:
     return "primary model failed"
 
 
+# A completed-but-empty response — 200 OK, the stream runs to message_stop,
+# but zero text and zero tool_use blocks — is rare but real and NOT evidence
+# the model/endpoint is broken (seen twice in live long-running DWG extraction
+# turns, ~20 and ~45 rounds into an otherwise-healthy agentic conversation).
+# Unlike a pre-content connection/auth/config error, it's worth retrying the
+# SAME candidate a couple of times before treating it as that candidate's
+# failure — a multi-hour unattended agent run shouldn't die to one transient
+# glitch when the fix is just asking again.
+_MAX_EMPTY_COMPLETION_RETRIES = 2
+
+
 async def stream_llm_with_fallback(candidates, messages, **kwargs):
     """Wrap stream_llm with an ordered fallback chain.
 
     `candidates` is a list of (url, model, headers). Each is tried in order,
     but only retried on a *pre-content* failure — an ``event: error`` or an
     empty completion before any assistant text / completed tool call is yielded.
+    An empty completion additionally gets up to `_MAX_EMPTY_COMPLETION_RETRIES`
+    same-candidate retries before falling through to the next candidate (or
+    the terminal error), since it's a known-transient glitch rather than
+    evidence the candidate itself is unusable.
     Metadata is held until substantive output commits the candidate.
     Once a candidate has emitted real output we never switch (that would
     duplicate streamed tokens); a later error from that candidate passes
@@ -2815,82 +2956,93 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
     last_error = None
     for i, (url, model, headers) in enumerate(cands):
         is_last = (i == len(cands) - 1)
-        emitted = False
-        retried = False
-        pending_metadata = []
-        async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
-            if chunk.startswith("event: error"):
-                if not emitted and not is_last:
-                    # Pre-content failure with fallbacks left — swallow and
-                    # move to the next candidate.
-                    last_error = chunk
-                    retried = True
-                    if i == 0:
-                        logger.warning(f"[fallback] primary {model} failed before output; trying fallback")
-                    else:
-                        logger.warning(f"[fallback] candidate {model} failed; trying next")
-                    break
-                if not emitted:
-                    # A last-candidate error is already the clearest terminal
-                    # result; do not append an empty-completion error as well.
+        empty_attempt = 0
+        while True:
+            emitted = False
+            retried = False
+            pending_metadata = []
+            async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
+                if chunk.startswith("event: error"):
+                    if not emitted and not is_last:
+                        # Pre-content failure with fallbacks left — swallow and
+                        # move to the next candidate.
+                        last_error = chunk
+                        retried = True
+                        if i == 0:
+                            logger.warning(f"[fallback] primary {model} failed before output; trying fallback")
+                        else:
+                            logger.warning(f"[fallback] candidate {model} failed; trying next")
+                        break
+                    if not emitted:
+                        # A last-candidate error is already the clearest terminal
+                        # result; do not append an empty-completion error as well.
+                        yield chunk
+                        return
                     yield chunk
-                    return
-                yield chunk
-                continue
+                    continue
 
-            event_data = {}
-            is_done = chunk.startswith("data: [DONE]")
-            if chunk.startswith("data: ") and not is_done:
-                try:
-                    event_data = json.loads(chunk[6:])
-                except Exception:
-                    pass
+                event_data = {}
+                is_done = chunk.startswith("data: [DONE]")
+                if chunk.startswith("data: ") and not is_done:
+                    try:
+                        event_data = json.loads(chunk[6:])
+                    except Exception:
+                        pass
 
-            delta = event_data.get("delta")
-            event_type = event_data.get("type")
-            substantive = (
-                isinstance(delta, str) and bool(delta)
-            ) or (
-                event_type == "tool_call_delta"
-            ) or (
-                event_type == "tool_calls"
-                and bool(event_data.get("calls"))
-            )
+                delta = event_data.get("delta")
+                event_type = event_data.get("type")
+                substantive = (
+                    isinstance(delta, str) and bool(delta)
+                ) or (
+                    event_type == "tool_call_delta"
+                ) or (
+                    event_type == "tool_calls"
+                    and bool(event_data.get("calls"))
+                )
 
-            if substantive and not emitted:
-                # First real output from a NON-primary candidate: tell the client
-                # the selected model failed and another answered. Without this the
-                # fallback is invisible — a misconfigured provider looks like it
-                # works because the reply is shown under the originally selected
-                # model's name (e.g. a Bedrock/Claude endpoint that 400s every
-                # request but appears fine because another model silently answered).
-                if i > 0:
-                    yield ('data: ' + json.dumps({
-                        "type": "fallback",
-                        "selected_model": primary_model,
-                        "answered_by": model,
-                        "reason": _summarize_stream_error(last_error),
-                    }) + '\n\n')
-                # Metadata must not commit a candidate. Once real output arrives,
-                # flush it after any fallback notice and before the output itself.
-                for metadata_chunk in pending_metadata:
-                    yield metadata_chunk
-                pending_metadata.clear()
-                emitted = True
+                if substantive and not emitted:
+                    # First real output from a NON-primary candidate: tell the client
+                    # the selected model failed and another answered. Without this the
+                    # fallback is invisible — a misconfigured provider looks like it
+                    # works because the reply is shown under the originally selected
+                    # model's name (e.g. a Bedrock/Claude endpoint that 400s every
+                    # request but appears fine because another model silently answered).
+                    if i > 0:
+                        yield ('data: ' + json.dumps({
+                            "type": "fallback",
+                            "selected_model": primary_model,
+                            "answered_by": model,
+                            "reason": _summarize_stream_error(last_error),
+                        }) + '\n\n')
+                    # Metadata must not commit a candidate. Once real output arrives,
+                    # flush it after any fallback notice and before the output itself.
+                    for metadata_chunk in pending_metadata:
+                        yield metadata_chunk
+                    pending_metadata.clear()
+                    emitted = True
 
-            if substantive or emitted:
-                yield chunk
-            elif not is_done:
-                pending_metadata.append(chunk)
+                if substantive or emitted:
+                    yield chunk
+                elif not is_done:
+                    pending_metadata.append(chunk)
 
-        if emitted:
-            return
-        if retried:
-            continue
-        if not is_last:
+            if emitted:
+                return
+            if retried:
+                break  # pre-content error — no same-model retry, fall through to next candidate
+            empty_attempt += 1
             last_error = f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502})}\n\n'
+            if empty_attempt <= _MAX_EMPTY_COMPLETION_RETRIES:
+                logger.warning(
+                    f"[fallback] {model} returned no substantive output "
+                    f"(attempt {empty_attempt}/{_MAX_EMPTY_COMPLETION_RETRIES}); retrying same model"
+                )
+                continue  # retry same candidate
+            break  # exhausted same-model retries for this candidate
+
+        if not is_last:
             tag = "primary" if i == 0 else "candidate"
-            logger.warning(f"[fallback] {tag} {model} returned no substantive output; trying next")
+            logger.warning(f"[fallback] {tag} {model} returned no substantive output after retries; trying next")
             continue
         yield f'event: error\ndata: {json.dumps({"error": "All model candidates returned no substantive output", "status": 502})}\n\n'
         return

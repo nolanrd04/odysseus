@@ -212,3 +212,17 @@ def test_metrics_fall_back_to_wallclock_without_backend_timings():
     assert m["tokens_per_second"] == 4.2
     assert m["tps_source"] == "computed"
     assert "prefill_tps" not in m
+
+
+def test_current_context_tokens_is_peak_not_cumulative():
+    """`input_tokens` sums every round of the turn (real total compute — the
+    right number for cost tracking on a no-caching provider like Ollama,
+    which re-processes the whole growing prompt each round). It is NOT the
+    chat's current context size, and can run into the hundreds of thousands
+    on a many-round turn while the actual context is a fraction of that.
+    `current_context_tokens` must report the peak/last-round value instead
+    (the same figure `context_percent` is already derived from)."""
+    m = _metrics(real_input_tokens=526838, last_round_input_tokens=58720, context_length=262144)
+    assert m["input_tokens"] == 526838
+    assert m["current_context_tokens"] == 58720
+    assert m["context_percent"] == round(58720 / 262144 * 100, 1)

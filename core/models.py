@@ -115,12 +115,29 @@ class Session:
         ``metadata.source == "slash"``; exclude them here so they never reach
         the model. Display/history-load paths use the raw ``history`` and are
         unaffected.
+
+        An agent-mode turn's tool_calls/tool_results only ever live in-memory
+        for the duration of that turn — the row saved afterward collapses the
+        whole turn into one assistant bubble (its display text, e.g. "Done."
+        when the turn was cut off before producing real prose). Without
+        replaying the real exchange, a later turn (e.g. "continue" after a
+        stream error) sees only that placeholder and restarts the task from
+        scratch with no memory of what was already done. `metadata.round_messages`
+        (src/agent_loop.py) holds the actual native assistant/tool message
+        sequence for the turn; splice it in instead of the collapsed bubble
+        whenever present.
         """
-        return [
-            msg.to_dict()
-            for msg in self.history
-            if (msg.metadata or {}).get("source") != "slash"
-        ]
+        result: List[Dict[str, Any]] = []
+        for msg in self.history:
+            metadata = msg.metadata or {}
+            if metadata.get("source") == "slash":
+                continue
+            round_messages = metadata.get("round_messages")
+            if round_messages:
+                result.extend(round_messages)
+            else:
+                result.append(msg.to_dict())
+        return result
 
     def get(self, key: str, default=None):
         """Dict-like access for compatibility."""

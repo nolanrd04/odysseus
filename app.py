@@ -800,6 +800,10 @@ app.include_router(setup_hwfit_routes())
 from routes.dwg_test_routes import setup_dwg_test_routes
 app.include_router(setup_dwg_test_routes())
 
+# DWG Generations — browse the automatic live-run captures (src/dwg_pipeline/generations.py)
+from routes.dwg_generation_routes import setup_dwg_generation_routes
+app.include_router(setup_dwg_generation_routes())
+
 # Model A/B Comparison
 from routes.compare.compare_routes import setup_compare_routes
 app.include_router(setup_compare_routes(session_manager))

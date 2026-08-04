@@ -750,6 +750,90 @@ def setup_chat_routes(
             except Exception as e:
                 logger.warning("Failed to parse attachments JSON, ignoring attachments", exc_info=e)
 
+        # ── DWG extraction flow (dwg_to_qty_sheet ledger, DQ-2/5/6/15) ──
+        # A .dwg attachment provisions a per-job folder (convert → census),
+        # escalates the turn to agent mode with the DWG system prompt, binds
+        # the job folder as the confined workspace, and drops bash. Later
+        # turns in the same session re-attach the same job. Admin/single-user
+        # only — the tools this flow relies on (python/file tools) are
+        # blocked for other callers anyway.
+        dwg_extraction_forced = (
+            str(form_data.get("dwg_extraction", "")).lower() == "true"
+            or bool(body and str((body or {}).get("dwg_extraction", "")).lower() == "true")
+        )
+        # Optional: the uploaded DWG is itself one of the corpus jobs (testing
+        # the pipeline against a job whose completed qty_tbl is already in the
+        # corpus) — name it so dwg_corpus_lookup excludes its own answer key.
+        # Only meaningful on first provisioning; re-attach reads the persisted
+        # holdout_job.txt instead (see jobs.py).
+        dwg_holdout_job = str(
+            form_data.get("dwg_holdout_job", "")
+            or (body or {}).get("dwg_holdout_job", "")
+            or ""
+        ).strip()
+        dwg_job = None
+        dwg_system_prompt = ""
+        try:
+            from src.tool_security import owner_is_admin_or_single_user as _dwg_admin_ok
+            if _dwg_admin_ok(get_current_user(request)):
+                _dwg_paths = []
+                _dwg_original_names = []
+                _uh = getattr(chat_handler, "upload_handler", None)
+                for _aid in att_ids:
+                    try:
+                        _info = _uh.resolve_upload(str(_aid), owner=getattr(sess, "owner", None)) if _uh else None
+                    except Exception:
+                        _info = None
+                    _p = str((_info or {}).get("path") or "")
+                    if _p.lower().endswith(".dwg") and os.path.exists(_p):
+                        _dwg_paths.append(_p)
+                        # The upload subsystem stores files under a content-hash
+                        # name — "name"/"original_name" is the as-uploaded
+                        # filename, the only surviving job identity.
+                        _dwg_original_names.append(
+                            str((_info or {}).get("name") or (_info or {}).get("original_name") or "")
+                        )
+                from src.dwg_pipeline import jobs as _dwg_jobs
+                if _dwg_paths:
+                    dwg_job = await asyncio.to_thread(
+                        _dwg_jobs.provision_dwg_job, _dwg_paths, session, dwg_holdout_job, _dwg_original_names
+                    )
+                else:
+                    dwg_job = _dwg_jobs.job_for_session(session)
+        except Exception:
+            logger.exception("[dwg] provisioning failed; continuing as a normal turn")
+            dwg_job = None
+        if dwg_job:
+            from src.dwg_pipeline.context import build_dwg_system_prompt
+            dwg_system_prompt = build_dwg_system_prompt(
+                dwg_job.census,
+                dwg_job.job_dir,
+                dwg_job.dxf_files,
+                forced=dwg_extraction_forced,
+            )
+            if dwg_job.errors:
+                dwg_system_prompt += (
+                    "\n\n## Conversion problems this job\n"
+                    + "\n".join(f"- {e}" for e in dwg_job.errors)
+                    + "\nTell the user about these; do not guess at contents of files that failed to convert."
+                )
+            if dwg_job.holdout_job:
+                dwg_system_prompt += (
+                    f"\n\n## Holdout notice\nThis job is being tested against '{dwg_job.holdout_job}', "
+                    "an existing corpus job — its own census fingerprint and completed qty_tbl are "
+                    "excluded from every dwg_corpus_lookup mode for this job. Use a different job as "
+                    "your convention analog; do not treat the exclusion as a tool error."
+                )
+            if chat_mode != "agent":
+                chat_mode = "agent"
+                auto_escalated = True
+                logger.info("chat→agent auto-escalation: DWG extraction (job=%s)", dwg_job.job_id)
+            # The provisioned job folder IS the workspace for this turn —
+            # server-chosen, so it bypasses the client-posted field (and the
+            # python sandbox in subprocess_tools keys off this location).
+            workspace = dwg_job.job_dir
+            workspace_rejected = ""
+
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
         pre_context_tool_policy = build_effective_tool_policy(
             last_user_message=message,
@@ -987,6 +1071,15 @@ def setup_chat_routes(
         if plan_mode:
             from src.tool_security import plan_mode_disabled_tools
             disabled_tools.update(plan_mode_disabled_tools())
+
+        # DWG extraction turns restrict the tool schema to exactly what the
+        # DWG system prompt documents (python + dwg_corpus_lookup) — not just
+        # bash. See dwg_extraction_disabled_tools()'s docstring for why
+        # (session 2026_8_3.3 item 3: leaving general tools reachable cost
+        # ~10 rounds of orientation before real extraction work started).
+        if dwg_job:
+            from src.tool_security import dwg_extraction_disabled_tools
+            disabled_tools.update(dwg_extraction_disabled_tools())
 
         tool_policy = build_effective_tool_policy(
             disabled_tools=disabled_tools,
@@ -1405,6 +1498,12 @@ def setup_chat_routes(
                     _forced_tools = None
                     if _search_enabled:
                         _forced_tools = set(WEB_TOOL_NAMES)
+                    # DWG turns rely on dwg_corpus_lookup for convention/analog
+                    # grounding (DQ-7/DQ-8), but it has no tool-index retrieval
+                    # description, so RAG-based tool selection never surfaces
+                    # it on its own — force it in, same as web search above.
+                    if dwg_job:
+                        _forced_tools = (_forced_tools or set()) | {"dwg_corpus_lookup"}
 
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
@@ -1429,6 +1528,7 @@ def setup_chat_routes(
                         workspace=workspace or None,
                         forced_tools=_forced_tools,
                         uploaded_files=ctx.uploaded_files,
+                        extra_system=dwg_system_prompt or None,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1455,6 +1555,7 @@ def setup_chat_routes(
                                     "intent_nudge_exhausted",
                                     "ask_user",
                                     "plan_update",
+                                    "context_usage",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))
@@ -1485,7 +1586,14 @@ def setup_chat_routes(
                                         last_metrics["context_messages_after_trim"] = ctx.context_messages_after_trim
                                         last_metrics["context_tokens_before_trim"] = ctx.context_tokens_before_trim
                                         last_metrics["context_tokens_after_trim"] = ctx.context_tokens_after_trim
-                                    yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
+                                    # round_messages is the raw native tool-call/tool-result
+                                    # history for this turn (see src/agent_loop.py) — kept in
+                                    # last_metrics for the DB save below so the next turn can
+                                    # replay it, but never sent to the browser: it duplicates
+                                    # what tool_events already renders and can be very large
+                                    # on long agentic runs.
+                                    _client_metrics = {k: v for k, v in last_metrics.items() if k != "round_messages"}
+                                    yield f'data: {json.dumps({"type": "metrics", "data": _client_metrics})}\n\n'
                             except json.JSONDecodeError:
                                 yield chunk
                         elif chunk.startswith("event: "):
@@ -1507,6 +1615,14 @@ def setup_chat_routes(
                                 )
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                                if dwg_job and not incognito:
+                                    from src.dwg_pipeline.generations import save_dwg_generation
+                                    save_dwg_generation(
+                                        dwg_job.job_id, session,
+                                        _metrics_to_save.get("model") or sess.model,
+                                        dwg_job.dxf_files, _response_to_save,
+                                        original_filenames=dwg_job.original_filenames,
+                                    )
                                 run_post_response_tasks(
                                     sess, session_manager, session, message, _response_to_save,
                                     _metrics_to_save, ctx.uprefs, memory_manager, memory_vector, webhook_manager,

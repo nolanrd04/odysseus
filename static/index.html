@@ -224,6 +224,7 @@
   <link rel="stylesheet" href="/static/css/tasks_run_status.css">
   <link rel="stylesheet" href="/static/css/qp_generations.css">
   <link rel="stylesheet" href="/static/css/qp_jobs.css">
+  <link rel="stylesheet" href="/static/css/dwg_generations.css">
   <link rel="modulepreload" href="/static/app.js?v=20260630mdfontsize">
   <link rel="modulepreload" href="/static/js/chat.js">
   <link rel="modulepreload" href="/static/js/ui.js">
@@ -999,6 +1000,28 @@
         </div>
       </div>
 
+      <div class="section" id="dwg-extraction-section">
+        <div class="section-header-flex">
+          <span class="section-title">
+            <svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
+            <span>DWG Extraction</span>
+          </span>
+        </div>
+        <div class="list-item" id="dwg-extract-btn" tabindex="0" role="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span class="grow">New Extraction</span>
+        </div>
+        <div class="list-item" id="dwg-generations-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M9 11l3 3L22 4"/>
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+          </svg>
+          <span class="grow">Generations</span>
+        </div>
+      </div>
+
       <div class="section" id="quick-proposal-section">
         <div class="section-header-flex">
           <span class="section-title">
@@ -1253,6 +1276,9 @@
           </button>
         </div>
         <div class="chat-input-right">
+          <!-- Current chat's context size, a bare token count (not X/Y) —
+               updated live per-round during a stream and on session load. -->
+          <span id="context-token-indicator" class="context-token-indicator" style="display:none;" title="Current context size"></span>
           <!-- Agent / Chat mode toggle -->
           <div class="mode-toggle">
             <button type="button" class="mode-toggle-btn active" id="mode-agent-btn" aria-pressed="true">Agent</button>

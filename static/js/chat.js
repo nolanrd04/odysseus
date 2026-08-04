@@ -1301,6 +1301,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (_ws) {
         fd.append('workspace', _ws);
       }
+      // DWG extraction modal sends assert extraction intent (forced mode);
+      // one-shot — later turns in the session re-attach server-side.
+      if (window.__dwgExtractionPending) {
+        fd.append('dwg_extraction', 'true');
+        window.__dwgExtractionPending = false;
+      }
+      if (window.__dwgHoldoutJob) {
+        fd.append('dwg_holdout_job', window.__dwgHoldoutJob);
+        window.__dwgHoldoutJob = null;
+      }
       if (presetsModule.getSelectedPreset()) {
         fd.append('preset_id', presetsModule.getSelectedPreset());
       }
@@ -1771,6 +1781,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       // Tool-aware thinking spinner
       let _lastToolName = '';
+      // Live context-window % from the most recent `context_usage` event (see
+      // src/agent_loop.py). Without this, a long tool-only turn (many rounds,
+      // zero text output) gave no context-size signal at all until the whole
+      // turn finished or errored — this keeps the spinner label current every
+      // round instead.
+      let _liveContextPct = null;
       const _searchIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:4px"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
       const _toolLabels = {
         'web_search': 'Searching',
@@ -1799,16 +1815,19 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         'web_search': _searchIcon,
       };
       function _thinkingLabel() {
-        if (!_lastToolName) {
-          return 'Thinking';
+        let base = 'Thinking';
+        if (_lastToolName) {
+          // Check exact match first, then prefix match
+          const lower = _lastToolName.toLowerCase();
+          if (_toolLabels[lower]) {
+            base = _toolLabels[lower];
+          } else {
+            for (const [key, label] of Object.entries(_toolLabels)) {
+              if (lower.includes(key) || key.includes(lower)) { base = label; break; }
+            }
+          }
         }
-        // Check exact match first, then prefix match
-        const lower = _lastToolName.toLowerCase();
-        if (_toolLabels[lower]) return _toolLabels[lower];
-        for (const [key, label] of Object.entries(_toolLabels)) {
-          if (lower.includes(key) || key.includes(lower)) return label;
-        }
-        return 'Thinking';
+        return _liveContextPct != null ? `${base} · ${_liveContextPct}% ctx` : base;
       }
 
       function _showThinkingSpinner(label) {
@@ -2126,7 +2145,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress' || json.type === 'context_usage') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -2763,6 +2782,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (metrics) {
                   const metricsTarget = _metricsTargetForTurn();
                   if (metricsTarget) displayMetrics(metricsTarget, metrics);
+                  // current_context_tokens (peak/last-round size), NOT input_tokens
+                  // (a cumulative sum across every round — can look like the chat
+                  // exploded to 500k+ tokens when the real context is a fraction
+                  // of that, see #4931-follow-up).
+                  if (typeof metrics.current_context_tokens === 'number') setContextTokenIndicator(metrics.current_context_tokens);
                 }
 
               } else if (json.type === 'message_saved') {
@@ -3094,6 +3118,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 chatRenderer.renderAskUserCard(json.data || {});
+
+              } else if (json.type === 'context_usage') {
+                if (_isBg) continue;
+                // Live per-round context-size signal (src/agent_loop.py) — fires
+                // every round regardless of whether the model produced any text,
+                // so a long tool-only stretch still shows growing context% instead
+                // of going silent until the final `metrics` event (or an error).
+                _liveContextPct = typeof json.context_percent === 'number' ? json.context_percent : _liveContextPct;
+                if (document.querySelector('.agent-thinking-dots')) {
+                  _replaceThinkingSpinner(_thinkingLabel());
+                }
+                if (typeof json.input_tokens === 'number') setContextTokenIndicator(json.input_tokens);
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
@@ -5232,6 +5268,39 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }
   }
 
+  /** Format a raw token count the same way the Quick Proposal context-window
+   * status does: a bare number ("12.4k", "1.2M"), never a ratio — an X/Y or %
+   * reading makes it easy to misread "small" as "fine" when the window
+   * itself is huge, and isn't directly comparable across models with
+   * different window sizes anyway. */
+  function _formatTokenCount(tokens) {
+    if (tokens == null) return null;
+    if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(2)}M`;
+    if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
+    return `${tokens}`;
+  }
+
+  /** Persistent context-size readout next to the Agent/Chat toggle. Shows the
+   * current chat's context size as a bare token count (see _formatTokenCount),
+   * not the per-message stats popup's X/Y. Updated live every round during a
+   * stream (the `context_usage` SSE event from src/agent_loop.py — fires even
+   * on tool-only rounds with no text output) and on session load/switch from
+   * the last saved message's metrics, so it reflects the chat's actual size
+   * even when nothing is currently streaming. Pass null/undefined to hide it
+   * (new/empty chat). */
+  export function setContextTokenIndicator(tokens) {
+    const el = document.getElementById('context-token-indicator');
+    if (!el) return;
+    const formatted = _formatTokenCount(tokens);
+    if (formatted == null) {
+      el.style.display = 'none';
+      el.textContent = '';
+    } else {
+      el.textContent = `${formatted} tok`;
+      el.style.display = '';
+    }
+  }
+
   /** Set a display override for the next user message bubble */
   export function setDisplayOverride(text) {
     _displayOverride = text;
@@ -7335,6 +7404,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     getImageCost: chatRenderer.getImageCost,
     setDisplayOverride,
     setHideUserBubble,
+    setContextTokenIndicator,
     setPendingContinue,
     regenerateFrom,
     forkFrom,

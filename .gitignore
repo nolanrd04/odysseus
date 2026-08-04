@@ -103,6 +103,9 @@ compound.config.json
 _scratch/
 /odysseus/
 
+# DWG pipeline derived corpus (regenerate: python -m src.dwg_pipeline.build_corpus)
+src/dwg_pipeline/corpus/
+
 # My shtuff
 documentation/.SESSION_HANDOFFS/
 graphify-out/

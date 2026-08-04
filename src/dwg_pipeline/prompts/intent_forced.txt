@@ -1,0 +1,1 @@
+The user initiated this through the DWG extraction entry point — extraction is the assumed goal. Begin the workflow immediately; do not ask whether they want a takeoff.

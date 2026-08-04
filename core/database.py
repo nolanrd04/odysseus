@@ -377,6 +377,44 @@ class QpActual(Base):
     updated_at     = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
 
 
+class DwgGeneration(Base):
+    """Immutable snapshot of one DWG extraction turn's final qty_tbl table,
+    captured automatically at the end of every completed live agent turn
+    where a DWG job is active (routes/chat_routes.py) — mirrors QpGeneration's
+    auto-capture-on-completion pattern so live pipeline output survives for
+    later browsing/scoring instead of only existing as a chat message.
+
+    When the job's DXF filenames match a known corpus job (build_corpus.py's
+    qty_tbl_records.json — see src/dwg_pipeline/generations.py's conservative
+    name-substring matcher, same approach as quick_proposal/actuals_matcher.py),
+    `corpus_job_folder` records the match and `metrics` holds the same
+    predicted-vs-actual scoring eval/run_eval.py computes for its offline
+    harness (src/dwg_pipeline/qty_tbl_parser.py's score()), computed here
+    automatically instead of requiring a manual run_eval invocation. Jobs with
+    no corpus match still get a row (predicted_rows/final_reply only,
+    metrics=None) — there's no ground truth to score against yet.
+    """
+    __tablename__ = "dwg_generations"
+
+    id                = Column(String, primary_key=True, index=True)
+    job_id            = Column(String, nullable=False, index=True)
+    session_id        = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    generation_index  = Column(Integer, nullable=False)  # nth captured table for this job_id, in creation order
+    model             = Column(String, nullable=True)
+    dxf_files         = Column(JSON, nullable=True)
+    corpus_job_folder = Column(String, nullable=True, index=True)  # matched ground-truth job, if any
+    predicted_rows    = Column(JSON, nullable=True)   # parse_predicted_table() output
+    final_reply       = Column(Text, nullable=True)   # full final assistant message for this turn
+    metrics           = Column(JSON, nullable=True)   # score() output when corpus_job_folder is set
+    created_at        = Column(DateTime, default=utcnow_naive, nullable=False)
+
+    session = relationship("Session", backref=backref("dwg_generations", cascade="save-update, merge"))
+
+    __table_args__ = (
+        Index('ix_dwg_generations_job', 'job_id', 'generation_index'),
+    )
+
+
 class QpJobData(Base):
     """Root of the Quick Proposal case-library job record — the canonical library
     that backs the brain-window Jobs tab and the knowledge-pack derivation.

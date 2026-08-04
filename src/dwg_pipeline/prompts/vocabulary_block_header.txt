@@ -1,0 +1,5 @@
+## qty_tbl row-label vocabulary (union of all completed takeoff sheets)
+Read `jobs_present` to judge how canonical a row is: high counts are the
+fixed template skeleton; low counts are per-job size/spec instantiations
+of a template row (e.g. sized variants of a mainline row). Do not invent
+labels outside this vocabulary's patterns.

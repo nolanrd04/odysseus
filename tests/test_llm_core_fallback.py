@@ -71,7 +71,9 @@ def test_done_only_primary_invokes_fallback(monkeypatch):
         ]
 
     chunks = _run_fallback(monkeypatch, per_model)
-    assert calls == ["primary", "backup"]
+    # An empty completion gets _MAX_EMPTY_COMPLETION_RETRIES same-candidate
+    # retries before falling through to the next candidate.
+    assert calls == ["primary"] * (llm_core._MAX_EMPTY_COMPLETION_RETRIES + 1) + ["backup"]
     assert any('"delta": "backup answer"' in c for c in chunks)
     model_idx = next(i for i, c in enumerate(chunks) if '"model_actual"' in c)
     fallback_idx = next(i for i, c in enumerate(chunks) if '"fallback"' in c)
@@ -92,7 +94,7 @@ def test_usage_then_done_primary_invokes_fallback_and_discards_usage(monkeypatch
         return ['data: {"delta": "backup answer"}\n\n', "data: [DONE]\n\n"]
 
     chunks = _run_fallback(monkeypatch, per_model)
-    assert calls == ["primary", "backup"]
+    assert calls == ["primary"] * (llm_core._MAX_EMPTY_COMPLETION_RETRIES + 1) + ["backup"]
     assert not any('"type": "usage"' in c for c in chunks)
 
 
@@ -189,11 +191,47 @@ def test_empty_final_candidate_surfaces_terminal_error(monkeypatch):
         return ["data: [DONE]\n\n"]
 
     chunks = _run_fallback(monkeypatch, per_model)
-    assert calls == ["primary", "backup"]
+    # Each candidate exhausts its same-model retries before the next is tried.
+    attempts_per_candidate = llm_core._MAX_EMPTY_COMPLETION_RETRIES + 1
+    assert calls == ["primary"] * attempts_per_candidate + ["backup"] * attempts_per_candidate
     errors = [c for c in chunks if c.startswith("event: error")]
     assert len(errors) == 1
     assert "All model candidates returned no substantive output" in errors[0]
     assert '"status": 502' in errors[0]
+
+
+def test_empty_completion_retries_same_candidate_before_succeeding(monkeypatch):
+    """An empty completion is retried on the SAME candidate — no fallback
+    notice, no switch to another candidate — before it ever produces output."""
+    calls = []
+
+    def per_model(model):
+        calls.append(model)
+        if len(calls) < 2:
+            return ["data: [DONE]\n\n"]  # empty first attempt
+        return ['data: {"delta": "recovered"}\n\n', "data: [DONE]\n\n"]
+
+    chunks = _run_fallback(monkeypatch, per_model)
+    assert calls == ["primary", "primary"]
+    assert any('"delta": "recovered"' in c for c in chunks)
+    assert not any('"fallback"' in c for c in chunks)
+
+
+def test_empty_completion_retry_count_is_bounded(monkeypatch):
+    """Retries stop at _MAX_EMPTY_COMPLETION_RETRIES and fall through to the
+    next candidate rather than retrying forever."""
+    calls = []
+
+    def per_model(model):
+        calls.append(model)
+        if model == "primary":
+            return ["data: [DONE]\n\n"]  # always empty
+        return ['data: {"delta": "backup answer"}\n\n', "data: [DONE]\n\n"]
+
+    chunks = _run_fallback(monkeypatch, per_model)
+    assert calls.count("primary") == llm_core._MAX_EMPTY_COMPLETION_RETRIES + 1
+    assert calls[-1] == "backup"
+    assert any('"delta": "backup answer"' in c for c in chunks)
 
 
 def test_dedupe_candidates_keeps_first_of_each_route():

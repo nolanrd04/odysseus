@@ -432,6 +432,29 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
         except Exception:
             pass
 
+        # Try Ollama's native /api/show — the OpenAI-compat /v1/models probed
+        # below never carries context_length for Ollama, and the static
+        # KNOWN_CONTEXT_WINDOWS table is fragile to tag naming (e.g. "gemma4"
+        # vs "gemma-4"), silently falling back to DEFAULT_CONTEXT and, in turn,
+        # to Ollama's own (usually much smaller) num_ctx default — see #4931.
+        # A non-Ollama local endpoint just 404s/connection-errors here and
+        # falls through to the generic /v1/models probe below, same as the
+        # /slots attempt above.
+        try:
+            from src.llm_core import _ollama_api_root
+            from src.model_capability_readers.ollama import _limits_from_show
+
+            show_url = _ollama_api_root(endpoint_url).rstrip("/") + "/show"
+            r = httpx.post(show_url, json={"model": model}, timeout=REQUEST_TIMEOUT)
+            if r.is_success:
+                limits = _limits_from_show(r.json())
+                ctx_tokens = limits.get("context_tokens")
+                if ctx_tokens and isinstance(ctx_tokens, int) and ctx_tokens > 0:
+                    logger.info(f"Ollama /api/show reports context_length={ctx_tokens} for {model}")
+                    return ctx_tokens, True
+        except Exception:
+            pass
+
     # GitHub Copilot's /models requires auth + X-GitHub-Api-Version headers that
     # aren't available here; an unauthenticated probe just 400s. All Copilot
     # picker models are major API models covered by the known-context table, so

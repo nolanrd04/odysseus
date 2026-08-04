@@ -1,30 +1,17 @@
 """
-Throwaway smoke-test route for DQ-1 (dwg_to_qty_sheet deployment scoping):
-proves the ODA File Converter DWG->DXF path validated in
-documentation/.SESSION_HANDOFFS/dwg_to_qty_sheet/building/dwg_qty/ actually
-runs from inside the odysseus process on this machine, not just standalone
-scripts. Not the real pipeline integration -- see DQ-4 in that ledger for
-how dwg_qty functions should actually be exposed once this is settled.
-
-dwg_qty lives under documentation/, not a normal package location, so it's
-reached via a sys.path insert rather than a real import -- fine for a
-temporary test harness, not something to build on.
+Standalone smoke-test route for the DWG->DXF conversion path (kept as a
+manual sanity-check tool independent of the chat pipeline, per the
+dwg_to_qty_sheet deployment ledger). The real integration is the DWG
+extraction chat flow (src/dwg_pipeline/); this page only proves ODA
+conversion + census work from inside the odysseus process.
 """
 
-import sys
 import tempfile
 import time
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File
 from fastapi.responses import JSONResponse
-
-_DWG_QTY_BUILDING_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "documentation" / ".SESSION_HANDOFFS" / "dwg_to_qty_sheet" / "building"
-)
-if str(_DWG_QTY_BUILDING_DIR) not in sys.path:
-    sys.path.insert(0, str(_DWG_QTY_BUILDING_DIR))
 
 
 def setup_dwg_test_routes():
@@ -36,8 +23,8 @@ def setup_dwg_test_routes():
             return JSONResponse(status_code=400, content={"error": "Upload a .dwg file"})
 
         import ezdxf
-        from dwg_qty.convert import convert_dwg_to_dxf
-        from dwg_qty.census import layer_census, resolve_all_anonymous_blocks
+        from src.dwg_qty.convert import convert_dwg_to_dxf
+        from src.dwg_qty.census import layer_census, resolve_all_anonymous_blocks
 
         with tempfile.TemporaryDirectory(prefix="dwg_test_") as tmp:
             tmp_dir = Path(tmp)

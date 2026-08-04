@@ -625,7 +625,8 @@ body.bg-pattern-sparkles {
     #tools-section .list-item,
     #quick-proposal-section .list-item,
     #manual-workflows-section .list-item,
-    #tutorials-section .list-item {
+    #tutorials-section .list-item,
+    #dwg-extraction-section .list-item {
       padding: 8px 8px;
     }
     .sidebar.right-side .sidebar-header {
@@ -2448,6 +2449,7 @@ body.bg-pattern-sparkles {
     .chat-input-bar { container-type: inline-size; container-name: chatbar; }
     @container chatbar (max-width: 340px) {
       .chat-input-right .mode-toggle { display: none !important; }
+      .context-token-indicator { display: none !important; }
     }
     @container chatbar (max-width: 260px) {
       #model-picker-wrap { display: none !important; }
@@ -2487,6 +2489,15 @@ body.bg-pattern-sparkles {
       gap: 8px;
       align-items: center;
       flex-shrink: 0;
+    }
+    .context-token-indicator {
+      font-size: 11px;
+      font-weight: 500;
+      font-family: inherit;
+      color: color-mix(in srgb, var(--fg) 40%, transparent);
+      white-space: nowrap;
+      flex-shrink: 0;
+      user-select: none;
     }
     .input-icon-btn {
       background: none;
@@ -5284,7 +5295,8 @@ body.bg-pattern-sparkles {
       #research-overlay,
       #theme-modal,
       #settings-modal,
-      #email-lib-modal {
+      #email-lib-modal,
+      #dwg-extract-modal {
         left: calc(var(--icon-rail-w, 48px) + var(--sidebar-w, 0px));
         width: calc(100% - (var(--icon-rail-w, 48px) + var(--sidebar-w, 0px)));
         box-sizing: border-box;

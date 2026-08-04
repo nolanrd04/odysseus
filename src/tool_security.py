@@ -41,6 +41,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "bash",
     "python",
     "manage_bg_jobs",
+    "dwg_corpus_lookup",  # serves Terra business takeoff data
     "read_file",
     "write_file",
     "edit_file",
@@ -190,6 +191,39 @@ def plan_mode_disabled_tools() -> Set[str]:
     # static mutator backstop). Fail closed: if the schema import failed above,
     # the backstop alone still blocks known mutators.
     return (all_names | _PLAN_MODE_KNOWN_MUTATORS) - PLAN_MODE_READONLY_TOOLS
+
+
+# The DWG extraction system prompt (src/dwg_pipeline/prompts/dwg_system_prompt.txt)
+# documents exactly these two tools ("There is no shell access in this flow").
+DWG_EXTRACTION_ALLOWED_TOOLS = frozenset({"python", "dwg_corpus_lookup"})
+
+
+def dwg_extraction_disabled_tools() -> Set[str]:
+    """Tool names to add to the denylist for a DWG extraction turn.
+
+    Same denylist-of-everything-else shape as plan_mode_disabled_tools()
+    above, with the allowlist narrowed to DWG_EXTRACTION_ALLOWED_TOOLS. Until
+    this existed, chat_routes.py only removed `bash` for DWG turns — every
+    other general tool (`ls`, `glob`, `read_file`, `manage_skills`, ...)
+    stayed reachable even though the DWG system prompt never mentions them
+    and explicitly says there is no shell access in this flow. Live runs
+    spent their first ~10 rounds on orientation this made possible
+    (re-listing the job dir, re-reading census.json already in the system
+    prompt, reading unrelated published skills) before doing any real
+    extraction work (session 2026_8_3.3, item 3)."""
+    try:
+        import src.agent_tools  # noqa: F401
+        from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+
+        all_names = {
+            (t.get("function") or {}).get("name")
+            for t in FUNCTION_TOOL_SCHEMAS
+        }
+        all_names.discard(None)
+    except Exception as exc:
+        logger.warning("Unable to load tool schemas for DWG-turn gating: %s", exc)
+        all_names = set()
+    return (all_names | _PLAN_MODE_KNOWN_MUTATORS) - DWG_EXTRACTION_ALLOWED_TOOLS
 
 
 def email_tool_policy_names(tool_name: str) -> frozenset:

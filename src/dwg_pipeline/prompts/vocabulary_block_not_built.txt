@@ -1,0 +1,2 @@
+## qty_tbl vocabulary
+(corpus not built — run `python -m src.dwg_pipeline.build_corpus`; fall back to analog jobs' sheets from dwg_corpus_lookup for the template)

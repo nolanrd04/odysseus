@@ -1082,3 +1082,122 @@ async function _registerEndpointFromButton(btn) {
     start();
   }
 })();
+
+// ── App-wide "copy table" buttons (dwg_to_qty_sheet ledger, DQ-3) ──────────
+// A small button under every LLM-rendered markdown table in chat, copying it
+// as a dual-flavor clipboard payload: text/html (real <table>, bold <th>
+// headers) + text/plain TSV — so pasting into Excel/Sheets yields real
+// columns, not literal pipe text. Same DOM-watcher shape as the endpoint-add
+// buttons above; insertion is debounced per message so buttons only settle in
+// once a streaming message has finished (re)rendering.
+
+function _renderedTableFlavors(table) {
+  const clean = (v) => String(v).replace(/\t/g, ' ').replace(/\r?\n/g, ' ').trim();
+  const esc = (s) => String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const rows = [...table.querySelectorAll('tr')];
+  const tsv = rows
+    .map(tr => [...tr.querySelectorAll('th,td')].map(c => clean(c.innerText)).join('\t'))
+    .join('\n');
+  const html = '<table>' + rows.map(tr =>
+    '<tr>' + [...tr.querySelectorAll('th,td')].map(c => {
+      const tag = c.tagName.toLowerCase() === 'th' ? 'th' : 'td';
+      return `<${tag}>${esc(clean(c.innerText))}</${tag}>`;
+    }).join('') + '</tr>'
+  ).join('') + '</table>';
+  return { tsv, html };
+}
+
+async function _copyRenderedTable(btn) {
+  const wrap = btn.closest('.md-table-copy-wrap');
+  const table = wrap?.previousElementSibling;
+  if (!table || table.tagName !== 'TABLE') return;
+  const { tsv, html } = _renderedTableFlavors(table);
+  const flash = (msg) => {
+    const orig = btn.textContent;
+    btn.textContent = msg;
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  };
+  try {
+    if (navigator.clipboard && window.ClipboardItem) {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([tsv], { type: 'text/plain' }),
+      })]);
+    } else {
+      await navigator.clipboard.writeText(tsv);
+    }
+    flash('Copied');
+  } catch (err) {
+    console.warn('copy table failed', err);
+    flash('Copy failed');
+  }
+}
+
+function _appendCopyTableButtons(root) {
+  if (!root || !root.querySelectorAll) return;
+  const tables = root.matches?.('table') ? [root] : [...root.querySelectorAll('table')];
+  for (const table of tables) {
+    if (!table.closest('#chat-history')) continue;      // chat transcript only
+    if (table.closest('.qp-panel, .qp-job-form')) continue; // QP has its own copy affordance
+    if (table.dataset.copyTableChecked === '1') continue;
+    table.dataset.copyTableChecked = '1';
+    if (table.nextElementSibling?.classList?.contains('md-table-copy-wrap')) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'md-table-copy-wrap';
+    wrap.style.cssText = 'margin:2px 0 8px;text-align:right;';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'md-table-copy-btn';
+    btn.title = 'Copy this table — pastes into Excel/Sheets as real columns';
+    btn.textContent = 'Copy table';
+    btn.style.cssText = 'font-size:11px;padding:2px 8px;opacity:0.65;background:none;'
+      + 'border:1px solid var(--input-border,#666);border-radius:4px;color:inherit;cursor:pointer;';
+    wrap.appendChild(btn);
+    table.insertAdjacentElement('afterend', wrap);
+  }
+}
+
+(function _watchMarkdownTables() {
+  if (window._mdTableCopyWatcherWired) return;
+  window._mdTableCopyWatcherWired = true;
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest?.('.md-table-copy-btn');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    _copyRenderedTable(btn);
+  });
+
+  // Debounce per message bubble: a streaming message re-renders its content
+  // repeatedly, so wait for a quiet period before decorating its tables (a
+  // button attached to a bubble that re-renders is destroyed with the old DOM
+  // and simply re-added after the next quiet period — self-healing).
+  const timers = new WeakMap();
+  const schedule = (node) => {
+    const msg = node.closest?.('.msg') || node;
+    clearTimeout(timers.get(msg));
+    timers.set(msg, setTimeout(() => _appendCopyTableButtons(msg), 600));
+  };
+  const start = () => {
+    const root = document.body;
+    if (!root) return;
+    _appendCopyTableButtons(root);
+    new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.tagName === 'TABLE' || (node.querySelector && node.querySelector('table'))) {
+            schedule(node);
+          }
+        }
+      }
+    }).observe(root, { childList: true, subtree: true });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, { once: true });
+  } else {
+    start();
+  }
+})();

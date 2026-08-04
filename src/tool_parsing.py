@@ -652,7 +652,7 @@ def _raw_openai_tool_call_to_block(value) -> Optional[ToolBlock]:
         content = args.get("url") or args.get("domain") or ""
     elif tool_type == "read_file":
         content = json.dumps(args) if (args.get("offset") or args.get("limit")) else args.get("path", "")
-    elif tool_type in ("grep", "glob", "ls", "edit_file"):
+    elif tool_type in ("grep", "glob", "ls", "edit_file", "dwg_corpus_lookup"):
         content = json.dumps(args) if args else "{}"
     elif tool_type == "write_file":
         content = args.get("path", "") + "\n" + args.get("content", "")

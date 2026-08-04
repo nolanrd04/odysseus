@@ -20,8 +20,8 @@ from src.llm_core import (
     stream_llm_with_fallback,
     _is_ollama_native_url,
 )
-from src.model_context import estimate_tokens
-from src.settings import get_setting
+from src.model_context import estimate_tokens, is_local_endpoint
+from src.settings import get_setting, DEFAULT_SETTINGS
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
@@ -39,8 +39,41 @@ from src.agent_tools import (
     ToolBlock,
     MAX_AGENT_ROUNDS,
 )
+from src.tool_schemas import _REQUIRED_NATIVE_TOOL_ARGS
+from src.tool_parsing import _TOOL_NAME_MAP
 
 logger = logging.getLogger(__name__)
+
+STREAM_TIMEOUT_DEFAULT = DEFAULT_SETTINGS["agent_stream_timeout_seconds"]
+LOCAL_STREAM_TIMEOUT_DEFAULT = 1800
+
+
+def resolve_stream_timeout(configured, is_local: bool) -> int:
+    """Effective per-round stream read-timeout, in seconds.
+
+    Local models commonly go silent for a long stretch mid-round with zero
+    bytes reaching the client — not because they're wedged, but because a
+    native tool call's arguments (e.g. a large write_file / python code
+    body) often aren't streamed incrementally at all; the backend buffers
+    the whole argument string and emits it as one chunk once complete. Give
+    local endpoints a much longer leash (``LOCAL_STREAM_TIMEOUT_DEFAULT``)
+    than the cloud-tuned ``STREAM_TIMEOUT_DEFAULT`` — unless the user has
+    set a genuinely different value.
+
+    ``configured`` is whatever's on disk for ``agent_stream_timeout_seconds``
+    via ``get_setting``. settings.py's save path materializes every
+    DEFAULT_SETTINGS value into settings.json, so a persisted
+    ``STREAM_TIMEOUT_DEFAULT`` can't be told apart from "user never touched
+    this" by presence alone (same shape as ``agent_input_token_budget`` —
+    see ``context_budget.budget_is_explicit``). Only a value that DIFFERS
+    from the default counts as a deliberate override; otherwise local
+    endpoints still get the longer auto-scaled timeout.
+    """
+    default = STREAM_TIMEOUT_DEFAULT
+    configured = int(configured or 0) or default
+    if configured != default:
+        return configured
+    return LOCAL_STREAM_TIMEOUT_DEFAULT if is_local else default
 
 
 def _looks_like_notes_list_request(text: str) -> bool:
@@ -102,124 +135,6 @@ def _load_mcp_disabled_map() -> Dict[str, set]:
 # System prompt that tells the LLM about available tools.
 # Always injected — the LLM decides whether to use them.
 _AGENT_PREAMBLE = """\
-You are an AI assistant with tool access. You can run shell commands, execute Python, search the web, \
-read/write files, create and edit documents, generate images, manage memories, and more. \
-To use a tool, write a fenced code block with the tool name as the language tag. \
-The block executes automatically and you see the output."""
-
-_AGENT_RULES = """\
-## Rules
-- Only use tools when needed. Don't search for things you already know.
-- For web lookup/search/latest/current requests, use `web_search` or `web_fetch`. Do NOT use `bash`, `python`, `curl`, `requests`, or scraping code for web lookup unless web tools are disabled or already failed.
-- If `web_search` is listed in this prompt, web search is available. Do NOT tell the user search/web tools are unavailable.
-- These exact tags execute automatically. For showing code examples, use ```shell, ```sh, ```py, etc. instead.
-- Multiple tool blocks per response OK. 60s timeout per tool, 10K char output limit.
-- Code/content >15 lines → ```create_document (NOT in chat). Short snippets OK in chat.
-- Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Use create_document instead of dumping the full content in chat.
-- Editing an existing document: ALWAYS use ```edit_document with FIND/REPLACE blocks. Do NOT rewrite the whole document with ```update_document unless genuinely changing more than half of it.
-- BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — JUST DO IT with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo or re-prompt if wrong.
-- AFTER A TOOL SUCCEEDS, do not second-guess. The success message ("Document edited: v2, 1 edit") means it worked. Reply in ONE short sentence confirming what was done. No re-checking, no replaying the diff in your head, no validation theater.
-- AFTER A TOOL FAILS (timeout, error, "Unknown action", "not found"), DO NOT GO SILENT. The user expects a follow-up: either retry with a fix (e.g. correct args, longer-running form, run `tail -f /tmp/foo.log` to see progress, split into smaller steps), OR explicitly tell them "this didn't work, want me to try X instead?". A failed tool is not a stopping condition — only a successful one is.
-- YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; you have plenty of rounds, so don't rush to quit just because you've made a few calls. There are exactly three ways to end a turn: (1) DONE — before you declare it, sanity-check that every concrete thing the user asked for actually exists or succeeded (file written, edit applied, command exited clean); then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you genuinely can't proceed (a capability is missing, permission denied, or data you can't obtain), so say plainly what's blocking you, in a sentence or two, and stop; (3) keep going with the single most useful next step. The only wrong moves are trailing off mid-task without one of these, and repeating a call you already ran.
-- Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations.
-- BULK email actions ("delete all those", "mark all as read", "archive these", "delete all spam", "mark these 19 read") → use the `bulk_email` tool ONCE with either the exact `uids` list from the latest `list_emails` result or `all_unread: true`. NEVER just say you deleted/archived/marked messages unless a delete/archive/mark/bulk email tool call succeeded. NEVER loop mark_email_read / archive_email / delete_email one message at a time — that floods the context and can blow the token budget. One bulk_email call handles the whole set.
-- Email UIDs are the values after `UID:` in tool output, not list row numbers. For example, row `1.` with `UID: 90186` must use `"90186"`, never `"1"`.
-- "Last/latest/newest email" means call `list_emails` with `max_results: 1`, `unread_only: false`, and the right `account`, then read the UID returned by that tool if full content is needed. NEVER use a table row number like "#18" as an email UID.
-- Plain "list/show/check my inbox/emails" means latest inbox mail, including read messages. Do not set `unread_only: true` unless the user explicitly asks for unread/needs attention.
-- Multiple email accounts: if tool output says "Other accounts" or the user asks "my Gmail?", "other inbox?", "work mail?", "custom domain mail?", or names any mailbox/account, DO NOT answer from memory. Call `list_email_accounts` if needed, then call `list_emails`/`read_email`/`bulk_email` with the exact `account` value for that mailbox. Account names are user-defined labels; if the user typo-matches a known account, use the closest listed account instead of claiming it does not exist. NEVER use `app_api` or `/api/email/accounts` to discover email accounts; that route is owner-filtered in tool context and can falsely return empty.
-- User identity facts/preferences ("my name is <name>", "I live in <place>", "I prefer concise replies", "call me <name>") → use `manage_memory` with action=add. NEVER use `manage_contact` for facts about the user unless the user explicitly says to create/update a contact and provides contact details such as an email or phone.
-- "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate.
-- "Do X every morning / daily / on a schedule / automatically" (e.g. "summarize my inbox every morning") → this is a request to CREATE A SCHEDULED TASK, not to do X once right now. Call `manage_tasks` with action=create (prompt = what to do, schedule + cron/time). Do NOT just perform the action inline this turn — the user wants it to recur. After creating, return a clickable `[Task name](#task-<id>)` link and tell them it'll run on schedule and show in the Tasks panel. If you also want to show a sample of this run, do that AFTER creating the task, not instead of it.
-
-## UI conventions
-- When you reference an entity by ID in your reply, render it as a STANDARD markdown link with a hash-prefixed anchor. The frontend converts these into clickable jump buttons:
-  - Sessions / chats: `[Name](#session-<id>)`
-  - Documents: `[Title](#document-<id>)`
-  - Notes: `[Title](#note-<id>)`
-  - Gallery images: `[Caption](#image-<id>)`
-  - Emails (use the UID from list_emails/read_email output): `[Subject](#email-<uid>)`
-  - Calendar events (use the uid from manage_calendar): `[Summary](#event-<uid>)` — opens the calendar on that day
-  - Tasks: `[Task name](#task-<id>)`
-  - Skills: `[skill-name](#skill-<name>)`
-  - Research jobs: `[Topic](#research-<session_id>)`
-- The format is `[link text](#kind-<id>)` — text in square brackets, anchor in parens. NOT `[name] [#kind-id]` and NOT `[#kind-id]`. That's plain text and the user can't click it.
-- Use this inside lists, tables, prose — anywhere. Tables: `| Name | Open |` rows like `| Big Chat | [open](#session-abc123) |` work fine.
-- Examples:
-  - After `create_session` returns id `89effa28`: "Created [New Chat](#session-89effa28) — click to switch."
-  - Listing five sessions:
-    ```
-    1. [Big Chat](#session-abc123) — 2h ago
-    2. [Code Review](#session-def456) — 5h ago
-    3. [Note Taking](#session-ghi789) — 1d ago
-    ```
-"""
-
-_API_AGENT_RULES = """\
-## Rules
-- Prefer native tool/function calling when tools are needed.
-- Only call tools when they materially help answer the request.
-- You MUST use tools to take action — do not describe what you would do. Act, don't narrate.
-- For web lookup/search/latest/current requests, call `web_search` or `web_fetch`. Do NOT use shell, Python, curl, requests, or scraping code for web lookup unless web tools are unavailable or already failed.
-- If `web_search` is listed in this prompt, web search is available. Do NOT tell the user search/web tools are unavailable.
-- Keep answers concise unless the user asks for depth.
-- For long code or content, use document tools instead of pasting large blocks into chat.
-- Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Call create_document instead of dumping the full content in chat.
-- Editing an existing document: ALWAYS use `edit_document` with find/replace. Only use `update_document` for genuine full rewrites (>50% changed) — do NOT echo the entire file back for small edits.
-- If the active editor document is an email draft/compose window, treat that open email as the target for "write this", "write the email", "reply with...", "make it say...", "draft this", and similar requests. Do NOT create another document, search/list/manage documents, or open a different reply unless the user explicitly asks. Edit the open email draft with `edit_document` or `update_document`; preserve To/Cc/Bcc/Subject/In-Reply-To/References/X-* header lines unless the user asks to change them.
-- "Give suggestions / feedback / review / how can I improve this / what would make it better" about the OPEN document → call `suggest_document`, do NOT write a prose list of ideas in chat. It creates inline accept/reject bubbles on the doc. Give concrete `find`/`replace`/`reason` items. To suggest an ADDITION (e.g. "add a bow to the SVG", a new section), set `find` to a short existing anchor snippet and `replace` to that same snippet PLUS the new content. Only answer in prose when no document is open, or the request is purely conceptual with no concrete change to propose.
-- BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — call the edit tool with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo.
-- AFTER A TOOL SUCCEEDS, do not second-guess. A success response means it worked. Reply in ONE short sentence confirming what was done. No verification thinking, no re-analyzing — move on.
-- AFTER A TOOL FAILS, DO NOT GO SILENT. The user expects a follow-up: retry with a fix, run a diagnostic (`tail`, `ls`, `which`), or explicitly tell them what didn't work and what you'll try next. Failure is not a stopping condition.
-- YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; don't quit early just because you've made a few calls. Three ways to end a turn: (1) DONE — before declaring it, verify every concrete deliverable the user asked for actually exists or succeeded; then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you can't proceed (missing capability, permission denied, unobtainable data), so state plainly what's blocking you and stop; (3) keep going with the single most useful next step. Never trail off mid-task without (1) or (2), and never repeat a call you already ran.
-- Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations.
-- "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate. `manage_tasks` is for RECURRING background AI jobs, NOT for one-off user reminders.
-- "Disable/turn off/enable/turn on <tool>" (shell, search, research, browser, documents, incognito, etc.) → call `ui_control` with `toggle <name> <on|off>`. Aliases accepted: shell→bash, search→web, deepresearch→research, documents→document_editor. NEVER record this as a memory — the user wants the toggle flipped, not a note about preferring it.
-- "Research X" / "do research on X" / "look into Y" / "deep dive on Z" → call `trigger_research` with `topic`. This starts a live job that appears in the Deep Research sidebar (streams progress + final report). **Do NOT use `web_search` for these** — saw the agent do a plain web_search for "do research on X" when the user wanted the deep-research job. "research X" is a deep-research request, not a quick lookup. (web_search is only for a single quick fact mid-task.) Do NOT POST /api/research/start via app_api either — blocked. After starting, tell the user it's running in the Deep Research sidebar. Only if the user explicitly wants it inline/quick should you fall back to web_search.
-- "Open/show <panel>" (documents, library, gallery, email, inbox, sessions, brain/memories, skills, settings, notes, cookbook) → call `ui_control` with `open_panel <name>`. Panel aliases: library/doc/docs/document→documents, images→gallery, mail/inbox/emails→email, chats/history→sessions, memory/memories→brain, preferences→settings, models/serve/serving→cookbook. CRITICAL: "open memory/memories/brain" / "open skills" / "open notes" / "open documents" / "open cookbook" means OPEN THE PANEL — call `ui_control`, NOT a manage/list tool. The "manage_*" tools list contents in chat; `ui_control open_panel` opens the visual modal the user is asking for.
-- "Write/draft a reply saying X" for an open/read email → call `ui_control` with `action="open_email_reply"`, the email `uid`/`folder`, `mode="reply"`, and `body` containing the drafted reply. This opens the same email compose document as clicking Reply and DOES NOT send. Do NOT call `reply_to_email` unless the user explicitly says to send immediately.
-- "Open/start a reply", "open a reply to <sender>", "draft a reply window" with no requested body → find/read the email if needed, then call `ui_control` with `open_email_reply <uid> <folder> reply`.
-- Bulk email actions ("delete all those", "archive these", "mark all read") require a real email tool call. Use `bulk_email` once with UIDs from the latest `list_emails` result and the same `account`; never claim success without the tool result.
-- Email UIDs are the values after `UID:` in tool output, not list row numbers. For example, row `1.` with `UID: 90186` must use `"90186"`, never `"1"`.
-- "Last/latest/newest email" means call `list_emails` with `max_results: 1`, `unread_only: false`, and the right `account`, then read the UID returned by that tool if full content is needed. NEVER use a table row number like "#18" as an email UID.
-- Plain "list/show/check my inbox/emails" means latest inbox mail, including read messages. Do not set `unread_only: true` unless the user explicitly asks for unread/needs attention.
-- Multiple email accounts: if tool output says "Other accounts" or the user asks "my Gmail?", "other inbox?", "work mail?", "custom domain mail?", or names any mailbox/account, DO NOT answer from memory or infer it is the same inbox. Call `list_email_accounts` if needed, then call `list_emails`/`read_email`/`bulk_email` with the exact `account` value for that mailbox. Account names are user-defined labels; if the user typo-matches a known account, use the closest listed account instead of claiming it does not exist. NEVER use `app_api` or `/api/email/accounts` to discover email accounts; that route is owner-filtered in tool context and can falsely return empty.
-- User identity facts/preferences ("my name is <name>", "I live in <place>", "I prefer concise replies", "call me <name>") → use `manage_memory` with action=add. NEVER use `manage_contact` for facts about the user unless the user explicitly says to create/update a contact and provides contact details such as an email or phone.
-- You are running INSIDE Odysseus — there is no OpenWebUI, ChatGPT, or external chat backend to query. All chats/sessions live in THIS app and are accessed via `list_sessions` (or `manage_session` with `action=list`), and deleted via `manage_session` with `action=delete`. Do NOT shell out to find sqlite files, curl localhost:8080, or grep for routers — those don't exist here. If `list_sessions` returns rows, that IS the source of truth.
-- After `list_sessions`, preserve the returned `[Chat title](#session-<id>)` links in your user-facing reply. Do not rewrite chat lists as plain tables with non-clickable titles.
-- "Cookbook" = the LLM-serving subsystem (NOT chat sessions, NOT a recipe app). Routing:
-  • "What's running" / "what's serving" / "show my cookbook" / "is anything up" → **first action MUST be `list_served_models` (no args)**. The tool is ALWAYS available. Do not run `ps aux`, do not `curl localhost:8000`, do not `which vllm`. Even if you don't remember seeing the tool listed, it IS available — call it. The output IS the source of truth (it tracks diffusion models, vLLM, SGLang, llama.cpp, Ollama, etc. — anything spawned via the cookbook, including remote hosts that `ps aux` here can't see).
-  • "What's downloading" / "show downloads" → `list_downloads` (always available).
-  • "What models do I have" → `list_cached_models` (always available).
-  • "Kill / stop / shut down" → `stop_served_model` (or `cancel_download`) with the session_id from the list.
-  • Searching for a model → `search_hf_models`.
-  • Downloading or serving a model → these run on a SERVER. If the user names one ("on gpu-box", "on the gpu box") pass `host=`. If they DON'T name one, the tool defaults to the cookbook's currently-selected server (NOT localhost). When there are multiple servers and it's genuinely ambiguous which they mean, call `list_cookbook_servers` and ask. Only download to localhost when the user explicitly says "locally" / "on this machine" (pass `local=true`).
-  • Image/inpainting/diffusion serve requests ("serve inpaint", "SDXL inpainting", "image model") → use `serve_model` with the built-in Diffusers command: `python3 scripts/diffusion_server.py --model <repo> --port 8100` (or another free port). Do NOT invent modules like `diffusers_api_server`, and do NOT use bash/ssh/pip directly. The Cookbook route copies `scripts/diffusion_server.py` to remote hosts and registers the image endpoint.
-  • Launching a known model ("run SD 3.5", "start the inpaint model", "serve qwen") → **FIRST** `list_serve_presets` to find the saved launch template, **THEN** `serve_preset {name: "..."}`. Do NOT fabricate a tmux command — the user already saved working ones from the UI. Only fall back to raw `serve_model` if no preset matches.
-  • Launching a model the user names ("serve minimax m2.7 on gpu-box") with NO preset → `serve_model {repo_id, cmd, host}`. The cookbook route OWNS tmux session creation AND state-file registration AND UI live-refresh — bypassing it produces an orphan the UI can never see. After launching, call `list_served_models` to verify readiness. If it reports a diagnosis and suggested adjusted command, retry with `serve_model` using that command instead of asking the user to debug raw tmux logs.
-  • Adopting an already-running tmux session (someone or a prior bash launch started a server, but it's not in the cookbook) → `adopt_served_model {host, tmux_session, model, port}`. This registers it in cookbook_state.json AND adds it as a chat endpoint so the user can pick it in the model dropdown. Use this whenever you find a running server that the cookbook doesn't know about.
-  • After ANY successful serve (preset or raw or adopted), the cookbook's serve flow auto-adds the model as an endpoint. If for some reason it didn't (e.g. the launch was external), call `adopt_served_model` to fix both at once, or `manage_endpoints` with action=add to register the URL manually.
-  **Anti-pattern (CRITICAL — saw the agent do this and it produced an orphan session invisible to the UI):** `ssh <host> 'tmux new-session ... vllm serve ...'` via bash. THIS IS WRONG even when it "works". The launch must go through `serve_model` so the cookbook route creates the tmux session AND writes the task to cookbook_state.json. If the user asks for a launch and you reach for bash/ssh/tmux, STOP — call `serve_model` instead. Bash launches don't show up in the Cookbook UI, can't be `stop_served_model`'d, and don't survive a UI refresh.
-  Anti-pattern (DO NOT do this — saw it twice): "I don't see list_served_models in my tool list, let me try bash ps aux." → wrong. The tool IS available. Just call it.
-  Anti-pattern: POSTing to `/api/cookbook/state` via `app_api` — that overwrites the whole state file (presets and all). Blocked. Use serve_preset / serve_model / stop_served_model.
-
-## UI conventions
-- When referencing an entity by ID, render it as a STANDARD markdown link with a hash-prefixed anchor — the frontend renders these as clickable jump buttons:
-  - Sessions / chats: `[Name](#session-<id>)`
-  - Documents: `[Title](#document-<id>)`
-  - Notes: `[Title](#note-<id>)`
-  - Gallery images: `[Caption](#image-<id>)`
-  - Emails (use the UID from list_emails/read_email output): `[Subject](#email-<uid>)`
-  - Calendar events (use the uid from manage_calendar): `[Summary](#event-<uid>)` — opens the calendar on that day
-  - Tasks: `[Task name](#task-<id>)`
-  - Skills: `[skill-name](#skill-<name>)`
-  - Research jobs: `[Topic](#research-<session_id>)`
-- The format is `[link text](#kind-<id>)` — text in square brackets, anchor in parens. NOT `[name] [#kind-id]` and NOT `[#kind-id]`. That's plain text and the user can't click it.
-- Use this inside lists, tables, prose — anywhere. Tables: `| Big Chat | [open](#session-abc123) |` works.
-- Examples:
-  - After `create_session` returns id `89effa28`: "Created [New Chat](#session-89effa28) — click to switch."
-  - Listing sessions: "1. [Big Chat](#session-abc123) — 2h ago, 2. [Code Review](#session-def456) — 5h ago\""""
-
-_AGENT_PREAMBLE = """\
 You are an AI assistant with tool access. Only the tools listed below are available for this turn.
 To use a tool, write a fenced code block with the tool name as the language tag. The block executes automatically and you see the output."""
 
@@ -229,7 +144,7 @@ _AGENT_RULES = """\
 - If a needed tool/domain is missing from this turn, say what is missing briefly instead of pretending.
 - After a tool succeeds, do not second-guess it; reply with one short confirmation unless more work remains.
 - After a tool fails, retry with a concrete fix or state what is blocking you.
-- Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
+- YOU DECLARE WHEN THE JOB IS DONE, not a timer — keep taking concrete steps while the task still needs them. Three ways to end a turn: (1) DONE — verify every concrete deliverable actually exists/succeeded, then write the final answer; (2) BLOCKED — state plainly what's blocking you and stop; (3) keep going with the single most useful next step. Never trail off without (1) or (2), and never repeat a call you already ran.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
 """
 
@@ -242,7 +157,7 @@ _API_AGENT_RULES = """\
 - Keep answers concise unless the user asks for depth.
 - After a tool succeeds, do not second-guess it; reply with one short confirmation unless more work remains.
 - After a tool fails, retry with a concrete fix or state what is blocking you.
-- Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
+- YOU DECLARE WHEN THE JOB IS DONE, not a timer — keep taking concrete steps while the task still needs them. Three ways to end a turn: (1) DONE — verify every concrete deliverable actually exists/succeeded, then write the final answer; (2) BLOCKED — state plainly what's blocking you and stop; (3) keep going with the single most useful next step. Never trail off without (1) or (2), and never repeat a call you already ran.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
 """
 
@@ -257,6 +172,7 @@ When referencing app entities by id, use clickable markdown anchors:
 - Tasks: `[Task name](#task-<id>)`
 - Skills: `[skill-name](#skill-<name>)`
 - Research jobs: `[Topic](#research-<session_id>)`
+Example: after `create_session` returns id `89effa28`, reply "Created [New Chat](#session-89effa28) — click to switch."
 """
 
 _DOMAIN_RULES = {
@@ -270,12 +186,13 @@ _DOMAIN_RULES = {
 - For long code/content (>15 lines), use `create_document` instead of pasting into chat.
 - If an active document is open, "fix this", "add X", "change Y", etc. usually refers to that document.
 - Use `edit_document` for targeted changes. Use `update_document` only for genuine full rewrites.
-- For feedback/review/suggestions on an open document, use `suggest_document`.""",
+- For feedback/review/suggestions on an open document, use `suggest_document`.
+- BIAS TOWARD ACTION on edit requests — "edit out X", "remove the Y paragraph", "change Z" means call the edit tool with your best interpretation, not ask for clarification on minor ambiguity. The user can undo.""",
     "email": """\
 ## Email rules
 - Email UIDs are the values after `UID:` in tool output, never list row numbers.
 - For latest/newest email, list with `max_results: 1`, `unread_only: false`, then read the returned UID if needed.
-- For named mailboxes/accounts, call `list_email_accounts` if needed and pass the exact `account` value.
+- For named mailboxes/accounts, call `list_email_accounts` if needed and pass the exact `account` value. NEVER use `app_api`/`/api/email/accounts` to discover accounts — that route is owner-filtered in tool context and can falsely return empty.
 - Bulk email actions use `bulk_email` once with explicit UIDs; do not loop one message at a time.
 - "Write/draft a reply saying X" means open a pre-filled draft via `ui_control open_email_reply ... <body>` / structured `body`; only `reply_to_email` when the user clearly wants to send now.""",
     "cookbook": """\
@@ -285,7 +202,8 @@ _DOMAIN_RULES = {
 - Launch known models by checking `list_serve_presets` before raw `serve_model`.
 - Downloads/serves run on a Cookbook server; pass the named `host` when the user names one.
 - Do not launch model servers manually with bash/ssh/tmux. Use `serve_model`/`serve_preset` so the UI can track and stop them.
-- After a successful serve, verify with `list_served_models`; if an external server is running but invisible, use `adopt_served_model`.""",
+- After a successful serve, verify with `list_served_models`; if an external server is running but invisible, use `adopt_served_model`.
+- Anti-patterns actually observed — don't repeat them: launching via `ssh <host> 'tmux new-session ... serve ...'` through bash (creates an orphan invisible to the UI — can't be stopped, doesn't survive a refresh); falling back to `bash ps aux` because `list_served_models` isn't visible in this turn's tools (it IS available — call it); POSTing to `/api/cookbook/state` via `app_api` (overwrites the whole state file, presets included — blocked, use serve_preset/serve_model/stop_served_model).""",
     "notes_calendar_tasks": """\
 ## Notes/calendar/tasks rules
 - Notes/todos/reminders use `manage_notes`, not memory.
@@ -411,6 +329,12 @@ Edit an EXISTING file by exact string replacement. PREFER this over bash (sed/ec
 ```get_workspace
 ```
 Return the absolute path of the active workspace folder. File tools are CONFINED to it (paths can be RELATIVE to it); the shell starts there (cwd) but is NOT sandboxed. Call this first when the user says "the project"/"the code"/"this folder" without a path, instead of asking them. No arguments.""",
+
+    "dwg_corpus_lookup": """\
+```dwg_corpus_lookup
+{"mode": "jobs"}
+```
+Retrieval over past DWG jobs' census fingerprints and completed qty_tbl takeoff sheets — use this to find the closest convention analog before mapping quantities. Args (JSON): `{"mode": "...", "job": "..."?}`. `mode` is one of: `jobs` (list every past job + which data it has — start here), `vocabulary` (the canonical qty_tbl row-label vocabulary), `fingerprints` (compact census summary — layer/block names, counts — for ALL past jobs, for judging which one shares this job's drawing conventions), `fingerprint` (the FULL census for one job; requires `job`), `qty_tbl` (one past job's completed, human-verified takeoff sheet — the few-shot mapping example; requires `job`). `job` is a job-folder name or substring (e.g. "KILDERE"), required only for `fingerprint`/`qty_tbl`. Call this during a DWG extraction BEFORE mapping quantities to the template — it grounds firm-convention judgment calls in real prior jobs instead of guessing.""",
 
     "create_document": """\
 ```create_document
@@ -2172,6 +2096,30 @@ def _build_base_prompt(
 
 
 
+def _native_call_rejection_reason(tc_name: str, tc_args) -> str:
+    """Best-effort human-readable reason a native tool call failed to convert.
+
+    Mirrors tool_schemas.function_call_to_tool_block's rejection checks
+    (bad JSON / non-object args / missing required arg / unknown tool)
+    without duplicating its full conversion logic, so a caller can feed a
+    concrete, actionable reason back to the model for a retry instead of
+    the call silently vanishing from history.
+    """
+    tool_type = _TOOL_NAME_MAP.get(tc_name, tc_name)
+    try:
+        args = json.loads(tc_args) if isinstance(tc_args, str) and tc_args.strip() else (tc_args or {})
+    except (json.JSONDecodeError, TypeError):
+        return "the arguments were not valid JSON"
+    if not isinstance(args, dict):
+        return "the arguments must be a JSON object"
+    required = _REQUIRED_NATIVE_TOOL_ARGS.get(tool_type)
+    if required and not any(str(args.get(k) or "").strip() for k in required):
+        return f"missing required argument — provide {' or '.join(required)}"
+    if tool_type not in TOOL_TAGS and not tool_type.startswith("mcp__"):
+        return f"'{tc_name}' is not a recognized tool"
+    return "the call could not be processed"
+
+
 def _resolve_tool_blocks(
     round_response: str,
     native_tool_calls: list,
@@ -2179,9 +2127,11 @@ def _resolve_tool_blocks(
     is_api_model: bool = False,
     allow_fenced_for_api: bool = False,
 ):
-    """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
+    """Choose native function calls or fenced code block parsing. Returns
+    (tool_blocks, used_native, converted_calls, failed_native_calls)."""
     used_native = False
     converted_calls = []  # native calls that converted, ALIGNED with tool_blocks
+    failed_native_calls = []  # [{"call": tc, "reason": str}] for calls that didn't convert
     if native_tool_calls:
         tool_blocks = []
         for tc in native_tool_calls:
@@ -2193,7 +2143,9 @@ def _resolve_tool_blocks(
                 converted_calls.append(tc)
                 logger.info(f"  -> converted: {tc_name} -> {block.tool_type}")
             else:
-                logger.warning(f"  -> FAILED to convert native call: {tc_name} args={tc_args[:200]}")
+                reason = _native_call_rejection_reason(tc_name, tc_args)
+                logger.warning(f"  -> FAILED to convert native call: {tc_name} args={tc_args[:200]} ({reason})")
+                failed_native_calls.append({"call": tc, "reason": reason})
         if tool_blocks:
             used_native = True
     if not used_native:
@@ -2220,7 +2172,7 @@ def _resolve_tool_blocks(
                 f"{len(native_tool_calls)} native calls, "
                 f"{len(tool_blocks)} tool blocks. Preview: {resp_preview}")
 
-    return tool_blocks, used_native, converted_calls
+    return tool_blocks, used_native, converted_calls, failed_native_calls
 
 
 def _append_tool_results(
@@ -2349,7 +2301,17 @@ def _compute_final_metrics(
     metrics = {
         "response_time": round(total_duration, 2),
         "time_to_first_token": round(time_to_first_token, 2) if time_to_first_token else 0,
+        # `input_tokens` is a CUMULATIVE sum across every round of the turn
+        # (real total compute — the right number for cost/billing), NOT the
+        # current context size. A provider with no prompt caching (e.g. Ollama)
+        # re-processes the whole growing prompt every round, so this can run
+        # into the hundreds of thousands on a many-round turn even though the
+        # actual context is a fraction of that. Use `current_context_tokens`
+        # for "how big is this chat right now" — same peak/last-round value
+        # `context_percent` is already computed from, just exposed as a raw
+        # count instead of forcing callers to reverse it out of a percentage.
         "input_tokens": input_tokens,
+        "current_context_tokens": ctx_tokens,
         "output_tokens": output_tokens,
         "tokens_per_second": round(tps, 2),
         # True decode speed when the backend reported it; "computed" = the
@@ -2563,6 +2525,7 @@ async def stream_agent_loop(
     forced_tools: Optional[Set[str]] = None,
     uploaded_files: Optional[List[Dict]] = None,
     workload: str = "foreground",
+    extra_system: Optional[str] = None,
     _is_teacher_run: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
@@ -3138,6 +3101,15 @@ async def stream_agent_loop(
             messages[0]["content"] = GUIDE_ONLY_DIRECTIVE + "\n\n" + (messages[0].get("content") or "")
         else:
             messages.insert(0, {"role": "system", "content": GUIDE_ONLY_DIRECTIVE})
+    if extra_system and extra_system.strip():
+        # Caller-supplied domain context (e.g. the DWG extraction prompt with
+        # census + library reference). Top-pinned like the plan note so it
+        # survives history truncation, and stable per job so the system-block
+        # prompt cache applies.
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = extra_system.strip() + "\n\n" + (messages[0].get("content") or "")
+        else:
+            messages.insert(0, {"role": "system", "content": extra_system.strip()})
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
@@ -3209,8 +3181,16 @@ async def stream_agent_loop(
     total_start = time.time()
     time_to_first_token = None
     first_token_received = False
-    tool_events = []   # Persist tool executions for history reload
+    tool_events = []   # Persist tool executions for history reload (UI transcript display)
     round_texts = []   # Cleaned text per round for history reload
+    # Index into `messages` where this turn's own rounds begin. Everything
+    # from here on (assistant tool_calls + tool results appended by
+    # _append_tool_results et al.) is this turn's actual native conversation
+    # with the model — captured below as `round_messages` and persisted on
+    # the saved ChatMessage so a later turn (e.g. "continue" after this one
+    # was cut off by a stream error) replays the real tool-call/tool-result
+    # history instead of just the one-line "Done." placeholder text.
+    _round_msgs_start = len(messages)
     # Completion-verifier state (mechanism 3a). _effectful_used flips on when
     # a tool that produces a checkable artifact runs; the verifier only fires
     # on such turns and at most _VERIFIER_MAX_ROUNDS times.
@@ -3275,8 +3255,23 @@ async def stream_agent_loop(
     # using tools — i.e. it was cut off, not finished. Drives a "Continue" event
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
+    # Set when a round ends because the upstream stream itself broke
+    # (ReadTimeout/ConnectError/NetworkError) rather than the model
+    # legitimately finishing. Without this, that round looks identical to a
+    # clean "no tools — done" finish and gets persisted with no error flag.
+    _agent_stopped_by_stream_error = False
+    # Consecutive rounds with no real narration text (tool calls only).
+    # `max_rounds` caps THIS, not total rounds elapsed — any round where the
+    # model writes actual text resets it to 0, so a task that keeps narrating
+    # its progress can run indefinitely (up to the hard ceiling below)
+    # instead of getting cut off at a flat round count regardless of output.
+    _silent_rounds = 0
+    # Hard backstop so a model that narrates every single round (never
+    # tripping the silent-round cap) can't run away unbounded — same 200
+    # ceiling chat_routes.py already clamps the user-facing setting to.
+    _hard_round_ceiling = max(max_rounds, 200)
 
-    for round_num in range(1, max_rounds + 1):
+    for round_num in range(1, _hard_round_ceiling + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
@@ -3337,7 +3332,14 @@ async def stream_agent_loop(
             _last_content = _last_user.lower()
             _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
             all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
-        agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
+        # See resolve_stream_timeout() for why this isn't a plain get_setting()
+        # call — local endpoints need a much longer leash than the cloud-tuned
+        # default, and a materialized-default settings.json value must not be
+        # mistaken for a deliberate override (2026_8_3.3 fix).
+        agent_stream_timeout = resolve_stream_timeout(
+            get_setting("agent_stream_timeout_seconds", STREAM_TIMEOUT_DEFAULT),
+            is_local_endpoint(endpoint_url),
+        )
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
@@ -3354,6 +3356,10 @@ async def stream_agent_loop(
         _round_start = time.time()
         _round_first_event_logged = False
         _round_first_token_logged = False
+        # Set below if this round's stream forwards an `event: error` chunk
+        # (upstream ReadTimeout/ConnectError/NetworkError) — distinguishes a
+        # broken stream from a model that legitimately emitted no tool calls.
+        _round_stream_error_detail = None
         logger.info(
             "[agent-timing] round_start round=%s model=%s endpoint=%s prompt_tokens=%s tools=%s native_tools=%s timeout=%s",
             round_num,
@@ -3400,6 +3406,7 @@ async def stream_agent_loop(
                     time.time() - _round_start,
                     chunk[:500],
                 )
+                _round_stream_error_detail = chunk[:500]
                 yield chunk
                 continue
             if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -3464,6 +3471,15 @@ async def stream_agent_loop(
                             backend_gen_tps = u["gen_tps"]
                         if u.get("prefill_tps"):
                             backend_prefill_tps = u["prefill_tps"]
+                        # Live per-round context visibility — without this the
+                        # client only ever learns the context size once, in the
+                        # single `metrics` event at the very end of the whole
+                        # turn. On a long tool-only run (many rounds, zero text
+                        # output) that means no signal at all until the turn
+                        # finishes or errors — see the "how big did this get"
+                        # question that had no answer mid-run otherwise.
+                        _ctx_pct = round(round_input / context_length * 100, 1) if context_length else None
+                        yield f'data: {json.dumps({"type": "context_usage", "round": round_num, "input_tokens": round_input, "output_tokens": u.get("output_tokens", 0), "context_length": context_length, "context_percent": _ctx_pct, "cache_read_tokens": u.get("cache_read_tokens", 0), "cache_write_tokens": u.get("cache_write_tokens", 0), "model": actual_model})}\n\n'
                     elif data.get("type") == "fallback":
                         # The selected model failed and another answered; surface
                         # the notice so a misconfigured provider isn't masked.
@@ -3593,7 +3609,7 @@ async def stream_agent_loop(
             if _ody_doc_finetune_mode
             else round_response
         )
-        tool_blocks, used_native, converted_calls = _resolve_tool_blocks(
+        tool_blocks, used_native, converted_calls, failed_native_calls = _resolve_tool_blocks(
             _normalized_doc_round,
             native_tool_calls,
             round_num,
@@ -3765,7 +3781,51 @@ async def stream_agent_loop(
         if _ody_qwen_finetune_model and not tool_blocks and cleaned_round:
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
 
+        if not tool_blocks and failed_native_calls:
+            # Every native tool call this round was malformed (bad JSON,
+            # missing a required argument, unknown tool name) and none
+            # converted, so the round otherwise looks identical to "no tools
+            # called — done" and the turn would silently end on whatever
+            # prose the model wrote before the call. Feed the rejection
+            # reason back as a real tool result (keyed to each call's
+            # tool_call_id, same as a normal tool error) so the model sees
+            # exactly what was wrong and can retry with corrected arguments,
+            # instead of the failed call vanishing from history.
+            _failed_reply_texts = [
+                f"Tool call rejected — {fc['reason']}. Fix the arguments and call "
+                f"{fc['call'].get('name', '')} again with valid arguments."
+                for fc in failed_native_calls
+            ]
+            logger.info(
+                "[agent] round %d: %d native call(s) failed to convert; feeding rejection back for retry",
+                round_num, len(failed_native_calls),
+            )
+            _append_tool_results(
+                messages, round_response, [fc["call"] for fc in failed_native_calls],
+                _failed_reply_texts, _failed_reply_texts, True, round_num,
+                round_reasoning=round_reasoning,
+            )
+            full_response += "\n\n"
+            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            continue
+
         if not tool_blocks:
+            if _round_stream_error_detail is not None:
+                # This round didn't end because the model finished — the
+                # upstream stream itself broke mid-round (forwarded above as
+                # `event: error`). Left to the normal completion path below,
+                # this looks identical to a clean "no tools — done" finish
+                # and the partial response would be silently persisted as
+                # the real answer, with no error flag (unlike the
+                # client-disconnect path, which sets `stopped: True`). Stop
+                # here instead and let the final metrics carry that same
+                # flag through to the saved message.
+                logger.warning(
+                    "[agent] round %d ended on a stream error, not a clean finish: %s",
+                    round_num, _round_stream_error_detail,
+                )
+                _agent_stopped_by_stream_error = True
+                break
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -3905,6 +3965,13 @@ async def stream_agent_loop(
         # rounds (just "<think>\n\n</think>" + a tool call) must not read as
         # progress, so strip think before checking.
         _real_text = _strip_think_blocks(cleaned_round).strip()
+        # Silent-round cap bookkeeping (see _silent_rounds init above) —
+        # any round with real narration text resets it, so it only measures
+        # consecutive tool-only rounds, not total rounds elapsed.
+        if _real_text:
+            _silent_rounds = 0
+        else:
+            _silent_rounds += 1
         # Circling = repeating a recent call with nothing written. Any
         # progress (a NEW distinct call, or actual answer text) resets it.
         if _is_repeat and not _real_text:
@@ -4438,8 +4505,22 @@ async def stream_agent_loop(
         # tool_blocks but stayed in native_tool_calls, so indexing results by
         # native position mis-attached each result to the wrong tool_call_id
         # (and left the real call answered empty).
-        _append_tool_results(messages, round_response, converted_calls,
-                             tool_results, tool_result_texts, used_native, round_num,
+        # A MIXED round (some native calls converted, some didn't) still needs
+        # every original tool_call_id answered — append the failed ones with
+        # their rejection reason so the model can retry those specifically,
+        # instead of them silently vanishing from history (order doesn't
+        # matter to the API; only that every id gets exactly one reply).
+        _reply_calls = converted_calls
+        _reply_texts = tool_result_texts
+        if failed_native_calls:
+            _reply_calls = converted_calls + [fc["call"] for fc in failed_native_calls]
+            _reply_texts = tool_result_texts + [
+                f"Tool call rejected — {fc['reason']}. Fix the arguments and call "
+                f"{fc['call'].get('name', '')} again with valid arguments."
+                for fc in failed_native_calls
+            ]
+        _append_tool_results(messages, round_response, _reply_calls,
+                             tool_results, _reply_texts, used_native or bool(failed_native_calls), round_num,
                              round_reasoning=round_reasoning)
 
         # Emit agent_step event
@@ -4449,13 +4530,24 @@ async def stream_agent_loop(
 
         # Separator in accumulated response
         full_response += "\n\n"
+
+        # `max_rounds` consecutive tool-only rounds with zero narration text
+        # — the model is heads-down working but never checking in. Offer
+        # Continue rather than silently running to the hard ceiling.
+        if _silent_rounds >= max_rounds:
+            logger.info(
+                "[agent] silent-round cap (%d) reached — %d consecutive rounds with no narration text",
+                max_rounds, _silent_rounds,
+            )
+            _exhausted_rounds = True
+            break
     else:
         # The for-loop completed every allowed round WITHOUT an early `break`
-        # (a `break` fires on "done", budget, or error). Reaching this `else`
-        # means the agent kept working until it ran out of rounds — so offer
-        # Continue instead of stopping silently. This catches ALL exhaustion
-        # paths, including a verifier `continue` on the final round (the old
-        # bottom-of-loop flag missed those).
+        # (a `break` fires on "done", budget, error, or the silent-round cap
+        # above). Reaching this `else` means the agent hit the hard round
+        # ceiling itself — so offer Continue instead of stopping silently.
+        # This catches ALL exhaustion paths, including a verifier `continue`
+        # on the final round (the old bottom-of-loop flag missed those).
         _exhausted_rounds = True
 
     # If the loop hit the round cap while still working, tell the client so it
@@ -4504,7 +4596,20 @@ async def stream_agent_loop(
         backend_gen_tps=backend_gen_tps,
         backend_prefill_tps=backend_prefill_tps,
     )
+    if len(messages) > _round_msgs_start:
+        # The real assistant tool_calls / tool results this turn produced —
+        # see the `_round_msgs_start` comment above. Stripped back out of the
+        # SSE `metrics` event before it reaches the client (routes/chat_routes.py)
+        # so this never goes over the wire; it exists only to be persisted on
+        # the saved ChatMessage and replayed into context on the next turn.
+        metrics["round_messages"] = messages[_round_msgs_start:]
     metrics["requested_model"] = requested_model
+    if _agent_stopped_by_stream_error:
+        # Same convention the client-disconnect path uses (routes/chat_routes.py)
+        # so the saved message renders the existing "[Message interrupted]" +
+        # Continue affordance instead of looking like a clean, complete answer.
+        metrics["stopped"] = True
+        metrics["stream_error"] = True
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.

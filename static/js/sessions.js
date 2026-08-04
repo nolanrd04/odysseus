@@ -1918,6 +1918,16 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
         }, loadingDelayMs);
       }
       const res = await fetch(_historyUrl(id, { limit: _historyPageLimit() }));
+      if (!res.ok) {
+        // A non-2xx response (404/500/etc.) still parses as JSON in most
+        // cases (e.g. FastAPI's {"detail": "..."}), which has no `history`
+        // key — falling through silently turned this into "no messages"
+        // and wiped the chat pane with no visible error (the long-standing
+        // "all messages disappeared on refresh" report). Treat it as a
+        // real failure so the existing catch-block error UI below fires
+        // instead of a blank render.
+        throw new Error(`Failed to load history (HTTP ${res.status})`);
+      }
       const data = await res.json();
       if (loadingTimer) {
         clearTimeout(loadingTimer);
@@ -1987,6 +1997,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     // Populate new content while invisible
     if (isOC) {
       if (window.chatModule && window.chatModule.showWelcomeScreen) window.chatModule.showWelcomeScreen();
+      if (window.chatModule && window.chatModule.setContextTokenIndicator) window.chatModule.setContextTokenIndicator(null);
       window.chatModule.addMessage('assistant',
         `<p>\uD83E\uDD9E <strong>OpenClaw Agent Connected</strong></p>
          <p>Messages will be routed through your OpenClaw agent. The agent has access to tools, memory, and skills configured in your OpenClaw workspace.</p>`,
@@ -1999,8 +2010,24 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
           console.warn('Failed to render history message:', e, msg);
         }
       }
+      // Persistent context-token readout (next to the Agent/Chat toggle) picks
+      // up where the last turn left off on session load/switch — otherwise it
+      // only ever reflected live streaming and went blank again on reload.
+      if (window.chatModule && window.chatModule.setContextTokenIndicator) {
+        // current_context_tokens (peak/last-round size), NOT input_tokens — the
+        // latter is a cumulative sum across every round of that turn (real
+        // total compute, useful for cost tracking) and can be many times the
+        // chat's actual current context size on a many-round turn.
+        let lastKnownTokens = null;
+        for (let i = msgHistory.length - 1; i >= 0; i--) {
+          const t = msgHistory[i]?.metadata?.current_context_tokens;
+          if (typeof t === 'number') { lastKnownTokens = t; break; }
+        }
+        window.chatModule.setContextTokenIndicator(lastKnownTokens);
+      }
     } else {
       if (window.chatModule && window.chatModule.showWelcomeScreen) window.chatModule.showWelcomeScreen();
+      if (window.chatModule && window.chatModule.setContextTokenIndicator) window.chatModule.setContextTokenIndicator(null);
       // Don't highlight ordinary empty sessions — feels like nothing is
       // selected. Keep document/email-scoped sessions highlighted though: a
       // new email/reply chat starts empty but immediately owns an email doc.
@@ -2095,7 +2122,12 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
   } catch (error) {
     console.error('Error in selectSession:', error);
     const chatHistory = uiModule.el('chat-history');
-    if (chatHistory?.querySelector('.session-loading-state')) {
+    // Show the failure in-pane even when the loading placeholder never
+    // painted (a fast-failing fetch beats the loading-delay timer) — a fresh
+    // page load has no prior bubbles to preserve, so leaving the pane blank
+    // with only a toast (easy to miss/auto-dismiss) read as "my conversation
+    // is gone" instead of "something failed, retry".
+    if (chatHistory) {
       chatHistory.innerHTML = '';
       chatHistory.style.opacity = '1';
       chatHistory.classList.remove('no-animate');
@@ -2387,8 +2419,18 @@ window.addEventListener('hashchange', () => {
   const hashId = window.location.hash.replace('#', '');
   if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId) || /^open=notes&note=/.test(hashId)) return;
   if (hashId && hashId !== currentSessionId) {
-    const target = sessions.find(s => s.id === hashId && !s.archived);
-    if (target) selectSession(hashId);
+    // Previously gated on the id already being in the locally cached
+    // ACTIVE session list (`sessions.find(s => s.id === hashId && !s.archived)`),
+    // which silently no-opped whenever the hash pointed at a session
+    // created after this tab's list was last loaded (a just-finished
+    // background run, another tab's new chat) — leaving the URL and the
+    // app's actual selected session permanently out of sync for the rest
+    // of the tab's lifetime. Still block navigating into a KNOWN archived
+    // session (original intent), but no longer require the id to already
+    // be present locally — selectSession() tolerates an id with no cached
+    // meta (falls back to "Odysseus Chat" for the header).
+    const knownArchived = sessions.find(s => s.id === hashId && s.archived);
+    if (!knownArchived) selectSession(hashId);
   }
 });
 

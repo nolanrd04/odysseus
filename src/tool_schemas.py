@@ -163,6 +163,21 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "dwg_corpus_lookup",
+            "description": "Look up the DWG quantity-takeoff corpus: past jobs' census fingerprints (for judging which past job's drawing convention most resembles the current one) and their completed qty_tbl takeoff sheets (few-shot grounding for mapping extracted quantities into Terra's template rows). Modes: 'jobs' (list what's available), 'vocabulary' (canonical row-label vocabulary), 'fingerprints' (compact census fingerprints for all past jobs), 'fingerprint' (full fingerprint for one job), 'qty_tbl' (one job's completed takeoff sheet).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "description": "One of: jobs, vocabulary, fingerprints, fingerprint, qty_tbl"},
+                    "job": {"type": "string", "description": "Job folder name or substring (required for modes 'fingerprint' and 'qty_tbl'), e.g. 'KILDERE'"}
+                },
+                "required": ["mode"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_file",
             "description": "Write/save a file to disk",
             "parameters": {
@@ -1359,7 +1374,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = json.dumps(args)
         else:
             content = args.get("path", "")
-    elif tool_type in ("grep", "glob", "ls"):
+    elif tool_type in ("grep", "glob", "ls", "dwg_corpus_lookup"):
         content = json.dumps(args) if args else "{}"
     elif tool_type == "get_workspace":
         content = ""

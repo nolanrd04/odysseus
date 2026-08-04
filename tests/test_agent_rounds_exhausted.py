@@ -81,6 +81,68 @@ def test_emits_intent_nudge_exhausted_when_cap_is_exhausted(monkeypatch):
     assert guard["nudges"] == 2
 
 
+def test_rounds_exhausted_resets_on_narration_text(monkeypatch):
+    _patch_common(monkeypatch)
+
+    call_count = {"n": 0}
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] <= 5:
+            delta = "Found the layer census.\n```bash\necho hi\n```"
+        else:
+            delta = "All done, here is your answer."
+        yield f'data: {json.dumps({"delta": delta})}\n\n'
+        yield "data: [DONE]\n\n"
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+
+    gen = al.stream_agent_loop(
+        "http://x/v1", "m",
+        [{"role": "user", "content": "do a long multi-step task"}],
+        max_rounds=2,
+        relevant_tools={"bash"},
+    )
+    events = _types(_collect(gen))
+
+    # 5 narrated tool-call rounds exceed max_rounds=2, but each round's real
+    # narration text resets the silent-round counter, so the cap must never
+    # trip -- the loop should run all 6 rounds and finish normally instead
+    # of asking the user to "Continue" after round 2.
+    assert not any(e.get("type") == "rounds_exhausted" for e in events), events
+    agent_steps = [e for e in events if e.get("type") == "agent_step"]
+    assert max(e["round"] for e in agent_steps) >= 6, agent_steps
+
+
+def test_rounds_exhausted_on_pure_silent_tool_rounds_past_cap(monkeypatch):
+    _patch_common(monkeypatch)
+
+    call_count = {"n": 0}
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        call_count["n"] += 1
+        # Distinct args each round so the loop-breaker's repeat detector
+        # doesn't fire first and mask what we're actually testing.
+        cmd = "echo hi" + str(call_count["n"])
+        delta = "```bash\n" + cmd + "\n```"
+        yield f'data: {json.dumps({"delta": delta})}\n\n'
+        yield "data: [DONE]\n\n"
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+
+    gen = al.stream_agent_loop(
+        "http://x/v1", "m",
+        [{"role": "user", "content": "do a long multi-step task"}],
+        max_rounds=2,
+        relevant_tools={"bash"},
+    )
+    events = _types(_collect(gen))
+
+    # No round ever writes narration text, so the silent-round cap (2) still
+    # trips -- confirms the reset behavior above didn't just disable the cap.
+    assert any(e.get("type") == "rounds_exhausted" for e in events), events
+    agent_steps = [e for e in events if e.get("type") == "agent_step"]
+    assert max(e["round"] for e in agent_steps) <= 3, agent_steps
+
+
 def test_emits_loop_breaker_triggered_when_loop_breaker_trips(monkeypatch):
     _patch_common(monkeypatch)
 

@@ -1,0 +1,1 @@
+The user attached a DWG to a normal chat without explicitly requesting extraction. Briefly confirm they want a quantity-sheet takeoff before starting the full workflow; answer simpler questions about the file directly if that is all they asked for.

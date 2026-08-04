@@ -1,0 +1,1 @@
+Extract a quantity takeoff sheet from the attached DWG file(s). Present the final result as a qty_tbl markdown table, followed by the Case A (possible extras) and Case B (possible misses) flag lists.

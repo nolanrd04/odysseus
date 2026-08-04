@@ -6,6 +6,7 @@ import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
+import dwgExtractionModule from './js/dwgExtraction.js';
 import modelsModule from './js/models.js';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
@@ -23,6 +24,7 @@ import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
 import qpGenerationsModule from './js/qp_generations.js';
+import dwgGenerationsModule from './js/dwg_generations.js';
 import tasksModule from './js/tasks.js?v=20260630tasksactivity';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
@@ -745,6 +747,7 @@ function initializeEventListeners() {
         'rename-ai-modal': null,
         'custom-preset-modal': null,
         'memory-modal': null,
+        'dwg-extract-modal': null,
       };
 
       // Dynamic modals (removed from DOM on close)
@@ -795,6 +798,7 @@ function initializeEventListeners() {
   const _modalSidebarMap = {
     'memory-modal': null,
     'theme-modal': null,
+    'dwg-extract-modal': null,
   };
   const _dynamicModalIds = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal'];
   function dismissModal(modal) {
@@ -1079,6 +1083,19 @@ function initializeEventListeners() {
       if (!Modals.toggle('qp-generations-modal')) {
         if (qpGenerationsModule.isQpGenerationsOpen()) qpGenerationsModule.closeQpGenerations();
         else qpGenerationsModule.openQpGenerations();
+      }
+    });
+  }
+
+  // DWG Generations tool button (read-only browse of automatic live-run captures)
+  const toolDwgGenerationsBtn = el('dwg-generations-btn');
+  if (toolDwgGenerationsBtn) {
+    toolDwgGenerationsBtn.addEventListener('click', async () => {
+      if (!dwgGenerationsModule) return;
+      const Modals = await import('./js/modalManager.js');
+      if (!Modals.toggle('dwg-generations-modal')) {
+        if (dwgGenerationsModule.isDwgGenerationsOpen()) dwgGenerationsModule.closeDwgGenerations();
+        else dwgGenerationsModule.openDwgGenerations();
       }
     });
   }
@@ -3653,6 +3670,7 @@ function startOdysseusApp() {
   if (_inputBottom) _inputBottom.style.visibility = '';
 
   fileHandlerModule.init(API_BASE);
+  dwgExtractionModule.init();
   modelsModule.init(API_BASE);
   ragModule.init(API_BASE);
   presetsModule.init(API_BASE);

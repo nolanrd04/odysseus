@@ -153,8 +153,12 @@ def test_think_tag_gt_in_mid_reasoning_not_truncated(monkeypatch):
     )
     thinking = [d for d in deltas if d.get("thinking")]
     regular = [d for d in deltas if not d.get("thinking")]
-    # "more c " must survive — must not be truncated at the '>'
-    assert any("more c > d" in d["delta"] for d in thinking), thinking
+    # "more c " must survive — must not be truncated at the '>'. The
+    # </think>-split-across-chunks fix (holding back a short tail while
+    # searching for the close tag) can legitimately land this text across
+    # more than one delta now, so check the joined thinking text rather
+    # than requiring it survive in a single delta.
+    assert "more c > d" in "".join(d["delta"] for d in thinking), thinking
     assert any("answer" in d["delta"] for d in regular), regular
 
 
