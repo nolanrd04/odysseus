@@ -989,10 +989,33 @@ def _normalize_thinking(text: str) -> str:
                 reply = stripped_text[m.start() + 1:].lstrip()
                 return '<think>' + think + '</think>\n' + reply
 
-        # Last resort: find last non-reasoning line
+        # Unspaced sentence-mash split. Local models routinely run the last
+        # sentence of their reasoning straight into the reply with no space:
+        # "...I will provide a concise summary.Since this is not the only
+        # message...". Prose always puts whitespace after a sentence end, so an
+        # UNSPACED boundary is a much stronger signal than the reply_starts
+        # allowlist above — that list only knows greetings, so ordinary openers
+        # ("Since", "Based on", "Your ...") fall through to the last-resort
+        # scan, which then lands somewhere inside the reasoning.
+        for m in re.finditer(r'(?<=[a-z]{2})([.!?])([A-Z][a-z])', stripped_text):
+            cut = m.start() + 1  # keep the sentence-ending punctuation with the thinking
+            if cut < 20 or len(stripped_text) - cut < 20:
+                continue
+            # Never split inside a fenced code block, where `obj.Method` is
+            # ordinary syntax rather than a sentence boundary.
+            if stripped_text.count('```', 0, cut) % 2:
+                continue
+            think = stripped_text[:cut]
+            reply = stripped_text[cut:]
+            return '<think>' + think + '</think>\n' + reply
+
+        # Last resort: find last non-reasoning line. Bullets are skipped because
+        # the reasoning often ends in a "Summary of info:" list — landing on one
+        # would cut mid-list and leak the tail of the thinking into the reply.
+        # Both '-' and '*' markers occur, so skip either.
         for i in range(len(lines) - 1, 0, -1):
             stripped = lines[i].strip()
-            if stripped and not any(stripped.startswith(p) for p in reasoning_starts) and not stripped.startswith('*') and len(stripped) > 3:
+            if stripped and not any(stripped.startswith(p) for p in reasoning_starts) and not stripped.startswith(('*', '-', '•')) and len(stripped) > 3:
                 think = '\n'.join(lines[:i])
                 reply = '\n'.join(lines[i:])
                 return '<think>' + think + '</think>\n' + reply
