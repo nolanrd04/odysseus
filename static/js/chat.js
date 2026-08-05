@@ -349,6 +349,14 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
 
   async function _adoptOpenedSessionBeforeAutoCreate() {
     if (!sessionModule || !sessionModule.getCurrentSessionId || sessionModule.getCurrentSessionId()) return true;
+    // An explicit New Chat must win over the adopt heuristic. createDirectChat
+    // clears the three signals below (active row, hash, last-selected id), but
+    // anything that re-selects the outgoing session after that click — a
+    // late-completing stream, a panel refresh — puts one of them back. Adopting
+    // then silently swallows the new chat: the first message lands in the old
+    // session, no new session row is created, and the user's next reload finds
+    // nothing. A pending chat is an unambiguous user intent; never override it.
+    if (sessionModule.hasPendingChat && sessionModule.hasPendingChat()) return false;
     const activeRowId = document.querySelector('.list-item.active-session[data-session-id], .session-item.active[data-session-id]')?.dataset?.sessionId || '';
     const hashId = _hashSessionCandidate();
     const lastSelectedId = String(window.__odysseusLastSelectedSessionId || '').trim();
