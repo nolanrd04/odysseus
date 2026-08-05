@@ -350,6 +350,14 @@ class TaskScheduler:
         self._run_semaphore = asyncio.Semaphore(1)
         self._concurrency_cap = 1
         self._task_handles = {}
+        # Task IDs the USER explicitly started (Run now), as opposed to ones the
+        # scheduler dispatched on a cron/event. The foreground gate must not
+        # cancel these: the Tasks page polls GET /api/tasks every 3s while a
+        # task shows as running, and that poll is itself foreground activity —
+        # so without this exemption the UI cancels the run it just started, on a
+        # timer. Short built-ins finished inside the first poll window and hid
+        # the bug; anything running longer than ~3s never survived.
+        self._manual_runs = set()
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -748,13 +756,21 @@ class TaskScheduler:
         finally:
             _q_db.close()
 
+        # A user-initiated run must not wait for the UI to go idle. The user is
+        # watching the Tasks page — that browser heartbeat alone keeps the app
+        # "active" (45s TTL) and BACKGROUND_TASK_MAX_WAIT_SECONDS defaults to
+        # "wait forever", so gating a manual run parks it at "waiting for
+        # Odysseus to be idle…" for exactly as long as they're looking at it.
+        # Still waits on _run_semaphore: one-task-at-a-time is a separate
+        # guarantee and a manual run gets its turn normally.
+        gate_foreground = not (bypass_model_slot or task_id in self._manual_runs)
         try:
             if bypass_model_slot or not self._task_needs_model_slot(task_id):
                 await self._execute_task_locked(
                     task_id,
                     run_id,
                     release_executing=release_executing,
-                    gate_foreground=not bypass_model_slot,
+                    gate_foreground=gate_foreground,
                 )
                 return
 
@@ -763,7 +779,7 @@ class TaskScheduler:
                     task_id,
                     run_id,
                     release_executing=release_executing,
-                    gate_foreground=True,
+                    gate_foreground=gate_foreground,
                 )
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
@@ -775,6 +791,10 @@ class TaskScheduler:
             handle = self._task_handles.get(task_id)
             if handle is current:
                 self._task_handles.pop(task_id, None)
+            # Unconditional, unlike the _executing discard below: a force-run
+            # keeps release_executing=False, but its manual exemption must still
+            # end here or the task's next SCHEDULED run would inherit it.
+            self._manual_runs.discard(task_id)
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
@@ -1157,6 +1177,9 @@ class TaskScheduler:
             handle = self._task_handles.get(task_id)
             if handle is asyncio.current_task():
                 self._task_handles.pop(task_id, None)
+            # See the matching discard in _execute_task: unconditional so the
+            # exemption never leaks into a later scheduled run.
+            self._manual_runs.discard(task_id)
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
@@ -2214,12 +2237,31 @@ class TaskScheduler:
             logger.error(f"Task {task.id} MCP delivery failed: {e}")
 
     async def run_task_now(self, task_id: str, *, force: bool = False):
-        """Manually trigger a task execution."""
+        """Manually trigger a task execution.
+
+        Either path marks the task as user-initiated so the foreground gate
+        leaves it alone — see `_manual_runs`. `force` additionally skips the
+        model slot and the already-running guard (that's the "run in parallel"
+        semantic), which is a separate concern from surviving foreground
+        activity.
+        """
         if force:
+            self._manual_runs.add(task_id)
             asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
             return True
+        # Marked BEFORE _executing: the POST that got us here is itself tracked
+        # foreground activity and fires stop_background_tasks_for_foreground
+        # concurrently, so the exemption has to be in place before the task
+        # becomes visible to that sweep.
+        already_manual = task_id in self._manual_runs
+        self._manual_runs.add(task_id)
         async with self._executing_lock:
             if task_id in self._executing:
+                # Already running. Only undo the mark we just added — if the
+                # in-flight run is itself a manual one, clearing it here would
+                # strip its exemption and let the next poll cancel it.
+                if not already_manual:
+                    self._manual_runs.discard(task_id)
                 return False
             self._executing.add(task_id)
         asyncio.create_task(self._execute_task(task_id))
@@ -2245,11 +2287,16 @@ class TaskScheduler:
 
         This is intentionally blunt for scheduled/background work: when the
         user opens or uses Odysseus, foreground interaction wins immediately.
-        Manual force-runs can be restarted by the user; automatic jobs will be
-        deferred by their cancellation path instead of stealing the app.
+        Automatic jobs will be deferred by their cancellation path instead of
+        stealing the app.
+
+        Runs the user started by hand are EXEMPT. "Foreground interaction wins"
+        is about automatic work competing with the user — a run they clicked
+        Run on IS what they want the app doing, and cancelling it makes the
+        button useless for anything that takes longer than one poll interval.
         """
         async with self._executing_lock:
-            task_ids = list(self._executing)
+            task_ids = [t for t in self._executing if t not in self._manual_runs]
         stopped = 0
         for task_id in task_ids:
             handle = self._task_handles.get(task_id)
