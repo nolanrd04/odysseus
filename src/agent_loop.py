@@ -2698,6 +2698,73 @@ def _build_base_prompt(
 
 
 
+_MERGED_PYTHON_TEMPLATE = '''\
+# --- Odysseus: {n} ```python blocks from one reply, run as ONE script ---
+# They share this process's globals, so a name defined in an earlier block is
+# still there in a later one. Each block is still executed on its own: a block
+# that raises does NOT skip the blocks after it (that was the old
+# one-process-per-block behaviour, and losing it would make things worse, not
+# better — see _merge_python_blocks).
+import sys as _ody_sys, traceback as _ody_tb
+_ODY_BLOCKS = [
+{entries}
+]
+for _ody_i, _ody_src in _ODY_BLOCKS:
+    try:
+        exec(compile(_ody_src, "<block %d>" % _ody_i, "exec"), globals())
+    except Exception:
+        print("[block %d raised - continuing with the remaining blocks]" % _ody_i,
+              file=_ody_sys.stderr)
+        _ody_tb.print_exc()
+'''
+
+
+def _merge_python_blocks(blocks):
+    """Run consecutive ```python blocks from one reply as a single script.
+
+    Models routinely split one program across several fenced blocks in the same
+    reply — and the prompt even says "Multiple tool blocks per response OK" —
+    but each block used to be its own `python -I -c` process, so every name
+    defined in one was gone in the next. A live run wrote 31 blocks against a
+    20-round cap and 20 of them referenced names they never defined.
+
+    Only ADJACENT python blocks merge: `python, read_file, python` must keep the
+    file read between them, so a run is broken by any other tool. Native
+    (structured) tool calls are never merged — each carries its own tool_call_id
+    that the API expects an individual result for; this is fenced-path only.
+
+    Blocks are exec'd into shared globals rather than concatenated as text so a
+    failure stays contained. Plain concatenation would let the first error abort
+    every later block, which on the run above (65% of blocks failing) would have
+    been a downgrade from the per-process behaviour it replaces.
+    """
+    out = []
+    run: list = []
+
+    def flush():
+        if not run:
+            return
+        if len(run) == 1:
+            out.append(run[0])          # single block — byte-for-byte unchanged
+        else:
+            entries = "\n".join(
+                f"    ({i}, {b.content!r})," for i, b in enumerate(run, 1)
+            )
+            merged = _MERGED_PYTHON_TEMPLATE.format(n=len(run), entries=entries)
+            out.append(ToolBlock("python", merged))
+            logger.info("[agent] merged %d adjacent python blocks into one script", len(run))
+        run.clear()
+
+    for b in blocks:
+        if b.tool_type == "python":
+            run.append(b)
+            continue
+        flush()
+        out.append(b)
+    flush()
+    return out
+
+
 def _resolve_tool_blocks(
     round_response: str,
     native_tool_calls: list,
@@ -2740,6 +2807,9 @@ def _resolve_tool_blocks(
         tool_blocks = parse_tool_blocks(round_response, skip_fenced=(is_api_model and not allow_fenced_for_api))
         if tool_blocks:
             logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected")
+            # Fenced path only — native calls stay 1:1 with their tool_call_ids
+            # (converted_calls above is ALIGNED with tool_blocks).
+            tool_blocks = _merge_python_blocks(tool_blocks)
 
     resp_preview = round_response[:200].replace('\n', '\\n') if round_response else "(empty)"
     logger.info(f"Agent round {round_num} summary: {len(round_response)} chars, "

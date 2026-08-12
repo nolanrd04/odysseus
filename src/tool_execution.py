@@ -529,6 +529,15 @@ async def _direct_fallback(
         "COLUMNS": "120",
         "LINES": "40",
         "HOME": _AGENT_WORKDIR,
+        # Without this the child's stdout defaults to the Windows locale
+        # encoding (cp1252), so a script that prints a character outside it —
+        # an arrow, an em-dash, a degree sign, all of which models write
+        # constantly — dies with UnicodeEncodeError partway through and loses
+        # everything it had already computed. Observed killing the very first
+        # script of a live agent run on '→'. The readers here already decode
+        # UTF-8 (errors="replace"), so this also stops the reverse mismatch
+        # turning legitimate output into mojibake.
+        "PYTHONIOENCODING": "utf-8",
     }
 
     try:

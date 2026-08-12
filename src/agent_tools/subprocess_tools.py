@@ -356,13 +356,46 @@ class BashTool:
         output = _truncate(output, MAX_OUTPUT_CHARS)
         return {"output": output or "(no output)", "exit_code": rc or 0}
 
+_NAMEERROR_RE = re.compile(r"NameError: name '([^']+)' is not defined")
+
+
+def _stateless_state_hint(stderr: str) -> str:
+    """Explain a NameError caused by assuming state survives between calls.
+
+    Every `python` call is a brand-new process, so a variable defined in an
+    earlier call is gone. Models reliably assume otherwise and then burn rounds
+    retrying the same broken reference — one live run spent seven rounds chasing
+    a single variable that could never exist. A prose rule in the system prompt
+    did not stop it; an error attached to the failure itself, naming the actual
+    variable, is the correction that lands.
+    """
+    names = sorted(set(_NAMEERROR_RE.findall(stderr or "")))
+    if not names:
+        return ""
+    quoted = ", ".join(f"`{n}`" for n in names[:4])
+    hint = (
+        f"\n\n[odysseus] {quoted} is not defined because EVERY `python` call runs in a "
+        "brand-new process — nothing you defined in an earlier call still exists. "
+        "Do not retry the same code. Either (a) put the setup and the code that uses "
+        "it in the SAME block, (b) recompute it at the top of this block, or (c) if it "
+        "is expensive, `write_file` it as JSON and load that file here."
+    )
+    return hint
+
+
 class PythonTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import agent_cwd, _truncate
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
         proc = await asyncio.create_subprocess_exec(
-            (sys.executable or "python"), "-I", "-c", content,
+            # -X utf8, not PYTHONIOENCODING: -I implies -E, so the interpreter
+            # ignores every PYTHON* env var and the child would otherwise fall
+            # back to the Windows locale encoding (cp1252). A model printing an
+            # arrow or an em-dash then dies with UnicodeEncodeError mid-script.
+            # This also makes local Windows runs match the Linux container,
+            # where UTF-8 is already the default.
+            (sys.executable or "python"), "-I", "-X", "utf8", "-c", content,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_subproc_env,
@@ -380,4 +413,7 @@ class PythonTool:
         if err:
             output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
         output = _truncate(output, MAX_OUTPUT_CHARS)
-        return {"output": output or "(no output)", "exit_code": rc or 0}
+        # Appended AFTER truncation so the correction can't be the thing that
+        # gets cut off — a truncated hint teaches nothing.
+        output = (output or "(no output)") + _stateless_state_hint(err)
+        return {"output": output, "exit_code": rc or 0}
