@@ -18,6 +18,29 @@ from src.request_models import ChatRequest
 from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
 from src.agent_loop import stream_agent_loop
 from src import agent_runs
+
+
+def _session_still_exists(session_id: str) -> bool:
+    """Whether the session row is still present.
+
+    Checked against the DB rather than the in-memory cache: delete_session drops
+    the row, and add_message already treats a missing row as authoritative
+    ("Dropping message for deleted session"). Fails OPEN — if the check itself
+    errors we start the run rather than silently dropping a legitimate turn.
+    """
+    if not session_id:
+        return True
+    try:
+        from core.database import SessionLocal, Session as _DbSession
+        db = SessionLocal()
+        try:
+            return db.query(_DbSession.id).filter(_DbSession.id == session_id).first() is not None
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("session-exists check failed for %s; assuming it exists",
+                       session_id, exc_info=True)
+        return True
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
 from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
@@ -702,6 +725,11 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat_stream")
     async def chat_stream(request: Request) -> StreamingResponse:
+        # Stamped before any setup work so agent_runs.start() can tell a Stop
+        # that arrived DURING this request's pre-flight (upload, file
+        # conversion, indexing — seconds to minutes) from a stale one belonging
+        # to an earlier request. See agent_runs._STOP_REQUESTS.
+        _request_started_at = time.monotonic()
         body = None
         try:
             if request.headers.get("content-type", "").startswith("application/json"):
@@ -1866,7 +1894,26 @@ def setup_chat_routes(
         if compare_mode:
             return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
-        agent_runs.start(session, _safe_stream())
+        # The session can be deleted while this handler is still in its
+        # pre-flight. Starting a detached run for it burns the full round budget
+        # against a session nobody can see, whose messages are dropped on write
+        # ("Dropping message for deleted session") and whose Stop button no
+        # longer exists — the only way left to kill it is restarting the server.
+        # Observed live: DELETE at 21:01:12, run started anyway at 21:01:15 and
+        # ran 20 rounds. Setup is done, so this costs one existence check.
+        if not _session_still_exists(session):
+            logger.warning(
+                "[chat_stream] session %s was deleted during setup — not starting a run",
+                session,
+            )
+            async def _deleted_stream():
+                yield f'data: {json.dumps({"type": "error", "error": "Session was deleted."})}\n\n'
+                yield "data: [DONE]\n\n"
+            # _safe_stream() is deliberately never called — an async generator
+            # that is never created has nothing to clean up.
+            return StreamingResponse(_deleted_stream(), media_type="text/event-stream")
+
+        agent_runs.start(session, _safe_stream(), requested_at=_request_started_at)
         return StreamingResponse(agent_runs.subscribe(session), media_type="text/event-stream")
 
     # ------------------------------------------------------------------ #

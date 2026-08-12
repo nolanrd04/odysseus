@@ -570,6 +570,21 @@ class SessionManager:
 
     def delete_session(self, session_id: str) -> bool:
         """Permanently delete a session and all its messages."""
+        # Runs are DETACHED: closing the SSE does not stop them, only an explicit
+        # cancel does. Deleting the session removes the only UI that could issue
+        # that cancel, so without this the run keeps burning its full round budget
+        # against a session nobody can see — and /api/chat/stop can no longer
+        # reach it either (it authorises against the now-missing session), which
+        # leaves restarting the server as the only kill switch. Done here rather
+        # than in the four delete endpoints so no delete path can miss it.
+        try:
+            from src import agent_runs
+            if agent_runs.stop(session_id):
+                logger.info("Cancelled in-flight run for deleted session %s", session_id)
+        except Exception:
+            logger.warning("Failed to cancel run while deleting session %s",
+                           session_id, exc_info=True)
+
         db = SessionLocal()
         try:
             try:

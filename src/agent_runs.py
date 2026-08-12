@@ -17,6 +17,7 @@ close / navigation / refresh). It does NOT survive a server restart.
 import asyncio
 import json
 import logging
+import time
 from typing import AsyncGenerator, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,26 @@ _RUNS: Dict[str, _Run] = {}
 # replay the result. After this, the run is evicted to bound memory — without
 # it, every session that ever streamed kept its entire event log forever.
 _EVICT_GRACE_S = 180
+
+# Stop requests that arrived BEFORE the run existed: {session_id: monotonic ts}.
+#
+# start() is the last line of the chat_stream handler — everything before it
+# (upload, file conversion, indexing, job provisioning) runs inline first, and
+# for a heavy attachment that is seconds to minutes. A Stop clicked in that window
+# found nothing in _RUNS, returned "stopped": false, and the handler then
+# launched the full run anyway. Observed live: Stop at 21:01:04, session DELETEd
+# at 21:01:12, run started regardless at 21:01:15 and billed 20 rounds against
+# a session that no longer existed.
+#
+# So a stop with no run to cancel is remembered instead of dropped, and start()
+# refuses to launch a run the user already cancelled. Compared by timestamp
+# against when the request began, so a stale tombstone can never kill a
+# legitimate LATER run for the same session.
+_STOP_REQUESTS: Dict[str, float] = {}
+
+# Tombstones are consumed by the matching start(); this only bounds the leak
+# from stops whose request died before ever reaching start().
+_STOP_TOMBSTONE_TTL_S = 900
 
 
 def _publish(run: _Run, ev: str) -> None:
@@ -138,9 +159,58 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
         _schedule_evict(session_id)
 
 
-def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
+async def _discard(agen: AsyncGenerator[str, None]) -> None:
+    """Close a generator that will never be drained, so its own cleanup runs."""
+    try:
+        await agen.aclose()
+    except Exception:
+        pass
+
+
+def _prune_stop_requests(now: float) -> None:
+    for sid, ts in list(_STOP_REQUESTS.items()):
+        if now - ts > _STOP_TOMBSTONE_TTL_S:
+            _STOP_REQUESTS.pop(sid, None)
+
+
+def was_stopped_during_setup(session_id: str, requested_at: Optional[float]) -> bool:
+    """True if a Stop landed for this session after its request began.
+
+    Consumes the tombstone. A tombstone older than ``requested_at`` belongs to a
+    previous request and is discarded rather than applied to this one.
+    """
+    ts = _STOP_REQUESTS.pop(session_id, None)
+    if ts is None:
+        return False
+    return requested_at is None or ts >= requested_at
+
+
+def start(session_id: str, agen: AsyncGenerator[str, None],
+          requested_at: Optional[float] = None) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
-    flight for this session (e.g. a rapid double-send), it's cancelled first."""
+    flight for this session (e.g. a rapid double-send), it's cancelled first.
+
+    ``requested_at`` is the monotonic time the originating request began. Pass it
+    so a Stop clicked during a long pre-flight (file conversion/indexing) is honored
+    instead of silently lost — see _STOP_REQUESTS.
+    """
+    if was_stopped_during_setup(session_id, requested_at):
+        logger.info(
+            "[agent-run] %s cancelled during setup — not starting (Stop arrived "
+            "before the run was registered)", session_id,
+        )
+        run = _Run()
+        run.status = "stopped"
+        _RUNS[session_id] = run
+        _publish(run, "data: [DONE]\n\n")
+        # The generator was never iterated; close it so its own cleanup runs.
+        try:
+            run.task = asyncio.create_task(_discard(agen))
+        except RuntimeError:
+            pass
+        _schedule_evict(session_id)
+        return run
+
     prev = _RUNS.get(session_id)
     prev_task: Optional[asyncio.Task] = None
     if prev:
@@ -205,9 +275,24 @@ async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
 
 
 def stop(session_id: str) -> bool:
-    """Cancel an in-flight run (the wrapped generator saves its partial)."""
+    """Cancel an in-flight run (the wrapped generator saves its partial).
+
+    Returns True when a live run was cancelled. When there is nothing to cancel
+    the request is REMEMBERED (see _STOP_REQUESTS) rather than dropped, because
+    the common case is a Stop clicked while the turn is still in its pre-flight
+    and has not registered a run yet. Callers must not read False as "the user's
+    Stop did nothing" — it means "nothing running yet; recorded".
+    """
+    now = time.monotonic()
+    _prune_stop_requests(now)
+    # Recorded unconditionally: a run can be registered moments after a
+    # successful cancel (rapid re-send), and the timestamp check in start()
+    # makes an unused tombstone harmless.
+    _STOP_REQUESTS[session_id] = now
     run = _RUNS.get(session_id)
     if run and run.task and not run.task.done():
         run.task.cancel()
         return True
+    logger.info("[agent-run] stop for %s with no live run — recorded so a run "
+                "still in pre-flight won't start", session_id)
     return False

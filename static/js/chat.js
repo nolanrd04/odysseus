@@ -4331,11 +4331,49 @@ import {
         const _sid = (sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId())
           || _streamSessionId
           || (window.sessionModule && window.sessionModule.getCurrentSessionId && window.sessionModule.getCurrentSessionId());
-        if (_sid) {
-          fetch(`/api/chat/stop/${encodeURIComponent(_sid)}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
-        }
+        if (_sid) _stopServerRun(_sid);
       } catch (_) {}
     }
+  }
+
+  /**
+   * Cancel the detached server run, and CHECK that it took.
+   *
+   * The response used to be discarded (`.catch(() => {})`), so the UI painted
+   * "[Cancelled by user]" whether or not anything was actually cancelled. A
+   * turn still in its pre-flight (upload, file conversion, indexing) has no
+   * run registered yet, so the server answers {"stopped": false} with HTTP 200
+   * — and the run then starts moments later. Observed live: Stop at 21:01:04,
+   * run started anyway at 21:01:15 and billed 20 rounds.
+   *
+   * The server now records that stop and refuses to start the pre-flighting run
+   * (agent_runs._STOP_REQUESTS), so a single call is normally enough. These
+   * retries are belt-and-braces for a run that registers in the gap, and they
+   * make a stop that genuinely didn't take visible instead of silent.
+   */
+  async function _stopServerRun(sid, _attempt = 0) {
+    let stopped = false;
+    try {
+      const r = await fetch(`/api/chat/stop/${encodeURIComponent(sid)}`, {
+        method: 'POST', credentials: 'same-origin',
+      });
+      if (r.ok) stopped = !!(await r.json().catch(() => ({}))).stopped;
+    } catch (_) { /* network error — fall through to the retry */ }
+    if (stopped || _attempt >= 2) {
+      if (!stopped) {
+        console.warn(`[stop] no live run cancelled for ${sid} after ${_attempt + 1} attempts; ` +
+                     `the server recorded the stop, so a run still in setup will not start.`);
+      }
+      return;
+    }
+    // Re-check shortly: if a run registered right after our stop, catch it.
+    setTimeout(() => {
+      try {
+        fetch(`/api/chat/stream_status/${encodeURIComponent(sid)}`, { credentials: 'same-origin' })
+          .then((s) => { if (s.ok) _stopServerRun(sid, _attempt + 1); })
+          .catch(() => {});
+      } catch (_) {}
+    }, 1500 * (_attempt + 1));
   }
 
   // ── Stall watchdog ──────────────────────────────────────────────
