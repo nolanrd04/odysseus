@@ -7,10 +7,11 @@ Provides token estimation for context usage tracking.
 
 import ipaddress
 import logging
+import re
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -46,15 +47,35 @@ def _is_private_ip_literal(host: str) -> bool:
 
 
 def _normalize_base_for_compare(url: str) -> str:
+    """Reduce a chat/base URL to the form a configured endpoint's base_url takes.
+
+    Note ``/messages``, not ``/v1/messages``: stripping the ``/v1`` too turned
+    ``https://api.anthropic.com/v1/messages`` into a bare host, which then failed
+    to match an endpoint stored as ``https://api.anthropic.com/v1`` — so an
+    Anthropic endpoint never found its own row, and its endpoint_kind and API key
+    were both invisible. Keeping the ``/v1`` matches either storage form (exactly,
+    or by prefix when the row omits it).
+    """
     url = (url or "").strip().rstrip("/")
-    for suffix in ("/chat/completions", "/models", "/completions", "/v1/messages"):
+    for suffix in ("/chat/completions", "/models", "/completions", "/messages"):
         if url.endswith(suffix):
             url = url[: -len(suffix)].rstrip("/")
     return url
 
 
-def _configured_endpoint_kind(url: str) -> Optional[str]:
-    """Return configured endpoint kind for a chat/base URL when available."""
+class _EndpointRow(NamedTuple):
+    """Detached snapshot of a ModelEndpoint — safe to read after the session closes."""
+    base_url: str
+    endpoint_kind: str
+    api_key: Optional[str]
+
+
+def _configured_endpoint_row(url: str) -> Optional[_EndpointRow]:
+    """Return the enabled ModelEndpoint whose base_url covers ``url``.
+
+    Snapshots the columns we need instead of handing back a live ORM row, so
+    callers can read them after ``db.close()`` without a DetachedInstanceError.
+    """
     target = _normalize_base_for_compare(url)
     if not target:
         return None
@@ -71,20 +92,61 @@ def _configured_endpoint_kind(url: str) -> Optional[str]:
                     continue
                 if target != base and not target.startswith(base + "/"):
                     continue
-                kind = (getattr(ep, "endpoint_kind", None) or "auto").strip().lower()
-                if kind in ("local", "api", "proxy"):
-                    return kind
-                if getattr(ep, "api_key", None):
-                    parsed = urlparse(base)
-                    host = (parsed.hostname or "").lower()
-                    path = (parsed.path or "").rstrip("/")
-                    if parsed.port != 11434 and "ollama" not in host and (path.endswith("/v1") or "/openai" in path):
-                        return "proxy"
-                return "auto"
+                return _EndpointRow(
+                    base_url=base,
+                    endpoint_kind=(getattr(ep, "endpoint_kind", None) or "auto").strip().lower(),
+                    api_key=getattr(ep, "api_key", None) or None,
+                )
         finally:
             db.close()
     except Exception:
         return None
+    return None
+
+
+def _configured_endpoint_kind(url: str) -> Optional[str]:
+    """Return configured endpoint kind for a chat/base URL when available."""
+    row = _configured_endpoint_row(url)
+    if row is None:
+        return None
+    if row.endpoint_kind in ("local", "api", "proxy"):
+        return row.endpoint_kind
+    if row.api_key:
+        parsed = urlparse(row.base_url)
+        host = (parsed.hostname or "").lower()
+        path = (parsed.path or "").rstrip("/")
+        if parsed.port != 11434 and "ollama" not in host and (path.endswith("/v1") or "/openai" in path):
+            return "proxy"
+    return "auto"
+
+
+def _endpoint_api_key(url: str) -> Optional[str]:
+    """API key configured for ``url``, when one is stored.
+
+    The metadata probes below hit authenticated provider endpoints — Anthropic's
+    /v1/models 401s without ``x-api-key`` — so an unauthenticated probe silently
+    fails and drops the caller back onto the static table.
+    """
+    row = _configured_endpoint_row(url)
+    return row.api_key if row else None
+
+
+def _probe_headers(url: str) -> Dict[str, str]:
+    """Auth headers for a model-metadata probe against ``url``.
+
+    Session-backed providers are skipped: minting/refreshing a token is far too
+    heavy for a metadata probe, and both already return above via their own
+    dedicated paths.
+    """
+    try:
+        from src.llm_core import _detect_provider
+        if _detect_provider(url) in ("copilot", "chatgpt-subscription"):
+            return {}
+        from src.endpoint_resolver import build_headers
+        return build_headers(_endpoint_api_key(url), url)
+    except Exception as e:
+        logger.debug(f"Could not build probe headers for {url}: {e}")
+        return {}
 
 
 def is_local_endpoint(url: str) -> bool:
@@ -111,8 +173,22 @@ REQUEST_TIMEOUT = 5
 # Substring matching — use the shortest unique prefix so variants get caught.
 KNOWN_CONTEXT_WINDOWS = {
     # --- Anthropic ---
+    # A model missing from this table is NOT harmless: get_context_length_known()
+    # returns known=False, budget_context_for_model() then returns 0, and
+    # compute_input_token_budget() falls back to the conservative 6000 default —
+    # so every agent turn is soft-trimmed to ~5K tokens regardless of the real
+    # window. That silently destroyed cross-turn memory for the whole Claude 5
+    # family (a 94K-token history trimmed to 12 messages, so "continue"
+    # restarted the task from scratch). Add new model families here on release.
+    'claude-opus-5': 1000000,
+    'claude-sonnet-5': 1000000,
+    'claude-fable-5': 1000000,
+    'claude-mythos-5': 1000000,
+    'claude-opus-4-8': 1000000,
+    'claude-opus-4-7': 1000000,
+    'claude-opus-4-6': 1000000,
     'claude-sonnet-4-5': 200000,
-    'claude-sonnet-4-6': 200000,
+    'claude-sonnet-4-6': 1000000,
     'claude-sonnet-4': 200000,
     'claude-opus-4': 200000,
     'claude-haiku-4': 200000,
@@ -257,7 +333,20 @@ def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool
     # the same model id, so always re-query them instead of serving stale cache.
     if not is_local and (ctx != DEFAULT_CONTEXT or configured_kind in ("api", "proxy")):
         _context_cache[cache_key] = (ctx, known)
-    logger.info(f"Context length for {model}: {ctx}")
+    if known:
+        logger.info(f"Context length for {model}: {ctx}")
+    else:
+        # A bare fallback used to log identically to a proven window, which is why
+        # the agent silently ran on a ~5K context for an entire run before anyone
+        # noticed. Callers that scale a budget refuse to trust this value.
+        logger.warning(
+            "Context window for %s at %s is UNKNOWN (falling back to %s). The agent "
+            "input budget will NOT scale off this number — it uses the "
+            "'agent_unknown_model_token_budget' setting instead, so long histories "
+            "get trimmed hard. Fix by configuring the endpoint's API key so the "
+            "provider can be queried, or add the model to KNOWN_CONTEXT_WINDOWS.",
+            model, endpoint_url, ctx,
+        )
     return ctx, known
 
 
@@ -325,6 +414,11 @@ def _model_ctx_from_entry(m: dict) -> Optional[int]:
     if not isinstance(m, dict):
         return None
     for field in (
+        # Anthropic's Models API reports the context window as max_input_tokens
+        # (and the output cap separately as max_tokens); it has no
+        # context_length/context_window field at all, so omitting this made every
+        # Anthropic catalog entry read as "no window reported".
+        "max_input_tokens",
         "context_length",
         "context_window",
         "max_model_len",
@@ -341,6 +435,74 @@ def _model_ctx_from_entry(m: dict) -> Optional[int]:
             val = meta.get(field)
             if val and isinstance(val, (int, float)) and val > 0:
                 return int(val)
+    return None
+
+
+_MODEL_VARIANT_SUFFIX = re.compile(r"\[[^\]]*\]$")
+
+
+def _model_id_candidates(model: str) -> List[str]:
+    """Model ids to try against a provider's per-model metadata endpoint.
+
+    A model id stored in a session can carry a routing prefix ("anthropic/…") or
+    a variant suffix ("claude-opus-5[1m]") that the provider's own catalog does
+    not use. Try the literal id first, then the bare provider id.
+    """
+    raw = (model or "").strip()
+    out = [raw] if raw else []
+    bare = _MODEL_VARIANT_SUFFIX.sub("", raw.split("/")[-1]).strip()
+    if bare and bare not in out:
+        out.append(bare)
+    return out
+
+
+def _is_anthropic_endpoint(url: str) -> bool:
+    try:
+        from src.llm_core import _host_match
+        return _host_match(url, "anthropic.com")
+    except Exception:
+        return False
+
+
+def _anthropic_model_context(endpoint_url: str, model: str) -> Optional[int]:
+    """Context window for ``model`` from Anthropic's Models API.
+
+    ``GET /v1/models/{id}`` reports ``max_input_tokens`` (the context window)
+    per model, so the real window comes from the provider rather than from a
+    hand-maintained table that goes stale on every model release — which is what
+    silently capped the whole Claude 5 family at the fallback budget. One small
+    request, not a catalog download; the result is cached per (endpoint, model)
+    by ``_get_context_length_cached``.
+    """
+    try:
+        from src.endpoint_resolver import _anthropic_api_root, _prepare_endpoint_base
+        root = _anthropic_api_root(_prepare_endpoint_base(endpoint_url)).rstrip("/")
+    except Exception as e:
+        logger.debug(f"Could not derive Anthropic API root from {endpoint_url}: {e}")
+        return None
+
+    headers = _probe_headers(endpoint_url)
+    for candidate in _model_id_candidates(model):
+        url = f"{root}/v1/models/{quote(candidate, safe='')}"
+        try:
+            r = httpx.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        except Exception as e:
+            logger.debug(f"Anthropic Models API probe failed for {candidate}: {e}")
+            return None
+        if r.is_success:
+            try:
+                return _model_ctx_from_entry(r.json())
+            except Exception as e:
+                logger.debug(f"Could not parse Anthropic model entry for {candidate}: {e}")
+                return None
+        if r.status_code in (401, 403):
+            logger.debug(
+                "Anthropic Models API rejected the context probe for %s (HTTP %s) — "
+                "no usable API key on this endpoint; falling back to the known table.",
+                candidate, r.status_code,
+            )
+            return None
+        # 404 (unknown id shape) falls through to the next candidate.
     return None
 
 
@@ -364,7 +526,11 @@ def _proxy_catalog_context(endpoint_url: str, model: str) -> Optional[int]:
     if cat is None:
         from src.endpoint_resolver import build_models_url
         try:
-            r = httpx.get(build_models_url(endpoint_url), timeout=REQUEST_TIMEOUT)
+            r = httpx.get(
+                build_models_url(endpoint_url),
+                headers=_probe_headers(endpoint_url),
+                timeout=REQUEST_TIMEOUT,
+            )
         except Exception as e:
             logger.debug(f"Failed to fetch proxy catalog for context length: {e}")
             return None
@@ -399,6 +565,21 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     known = _lookup_known(model)
     api_ctx = None
     configured_kind = _configured_endpoint_kind(endpoint_url)
+
+    # Providers that publish authoritative per-model limits are asked directly,
+    # and their answer OUTRANKS KNOWN_CONTEXT_WINDOWS. The static table is a
+    # maintenance treadmill — it needs an edit on every model release, and a miss
+    # is not a soft failure (see get_context_length_known) — so where the provider
+    # will just tell us, the table drops to an offline fallback.
+    if _is_anthropic_endpoint(endpoint_url):
+        api_ctx = _anthropic_model_context(endpoint_url, model)
+        if api_ctx:
+            logger.info(f"Anthropic Models API reports context window for {model}: {api_ctx}")
+            return api_ctx, True
+        if known:
+            logger.info(f"Using known context window for {model}: {known}")
+            return known, True
+        return DEFAULT_CONTEXT, False
 
     # Large OpenAI-compatible proxies can make /models expensive. If the
     # endpoint is explicitly configured as API/proxy, prefer known context
@@ -447,7 +628,7 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
 
     models_url = build_models_url(endpoint_url)
     try:
-        r = httpx.get(models_url, timeout=REQUEST_TIMEOUT)
+        r = httpx.get(models_url, headers=_probe_headers(endpoint_url), timeout=REQUEST_TIMEOUT)
         if r.is_success:
             data = r.json()
             models_list = data.get("data") or []

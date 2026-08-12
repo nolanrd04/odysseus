@@ -38,7 +38,10 @@ def test_model_context_queries_models_for_v1_base(monkeypatch):
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
     seen = []
 
-    def fake_get(url, timeout=None):
+    # headers=: the model-list probe is authenticated now (Anthropic's /v1/models
+    # 401s without a key), so the fake must accept the kwarg — a local
+    # llama-server just gets an empty header dict.
+    def fake_get(url, headers=None, timeout=None):
         seen.append(url)
         request = httpx.Request("GET", url)
         if url.endswith("/slots"):

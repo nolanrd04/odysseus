@@ -45,6 +45,10 @@ def compute_input_token_budget(
             the "auto" sentinel (scale to the window); any other value is an
             explicit cap. (A deliberately-chosen default can't be distinguished
             from a materialized default by value, so the default reads as auto.)
+        default: the budget to use when the window is unknown. Callers pass the
+            ``agent_unknown_model_token_budget`` setting so "how much context do
+            we give a model we can't measure" is a product decision, not a
+            constant buried here (#4931 follow-up).
 
     Rules:
         - Explicit user budget is honoured exactly, only clamped to the model's
@@ -57,6 +61,7 @@ def compute_input_token_budget(
     """
     configured = _int_or_zero(configured)
     context_length = _int_or_zero(context_length)
+    default = _int_or_zero(default)
 
     if explicit and configured > 0:
         return min(configured, context_length) if context_length > 0 else configured
@@ -65,7 +70,13 @@ def compute_input_token_budget(
         scaled = int(context_length * headroom)
         return max(1, min(scaled, hard_max))
 
-    return configured if configured > 0 else default
+    # Auto + unknown window. ``configured`` is the auto sentinel here, not a
+    # budget, so returning it would pin every unmeasurable model to the sentinel's
+    # numeric value and make ``default`` unreachable — which is exactly what made
+    # the unknown-model budget unconfigurable.
+    if default > 0:
+        return default
+    return configured if configured > 0 else DEFAULT_BUDGET
 
 
 def budget_is_explicit(configured: int, *, default: int = DEFAULT_BUDGET) -> bool:

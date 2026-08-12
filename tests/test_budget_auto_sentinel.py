@@ -109,3 +109,29 @@ def test_no_arg_caller_scales_from_discovered_window_not_6000():
     with patch.object(mc, "get_context_length_known", return_value=(131072, True)):
         ctx = mc.budget_context_for_model("u", "m", fallback=0)
     assert compute_input_token_budget(DEFAULT_BUDGET, ctx, explicit=False) == int(131072 * 0.85)
+
+
+def test_unknown_window_fallback_is_configurable():
+    """The "I don't know this model's window" number is a product decision.
+
+    It used to be unreachable: the auto branch returned `configured` (which IS the
+    6000 sentinel in auto mode), so the `default` parameter was dead code and the
+    penalty for an unmeasurable model was hardcoded. That penalty is not caution —
+    a 94K-token history trimmed to ~5K every turn is amnesia.
+    """
+    assert compute_input_token_budget(DEFAULT_BUDGET, 0, explicit=False, default=64000) == 64000
+    # Unchanged default keeps the historical behaviour for existing callers.
+    assert compute_input_token_budget(DEFAULT_BUDGET, 0, explicit=False) == DEFAULT_BUDGET
+
+
+def test_unknown_window_fallback_never_overrides_a_proven_window():
+    # A discovered window still wins — the fallback only applies when there is none.
+    assert compute_input_token_budget(DEFAULT_BUDGET, 32000, explicit=False, default=64000) == int(32000 * 0.85)
+
+
+def test_unknown_window_fallback_never_overrides_an_explicit_cap():
+    assert compute_input_token_budget(20000, 0, explicit=True, default=64000) == 20000
+
+
+def test_unknown_model_budget_setting_exists_and_defaults_to_the_old_constant():
+    assert settings.DEFAULT_SETTINGS["agent_unknown_model_token_budget"] == DEFAULT_BUDGET

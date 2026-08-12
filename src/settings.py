@@ -124,6 +124,14 @@ DEFAULT_SETTINGS = {
     # want to actually use (e.g. 900_000 to fill a 1M-context model). See
     # `compute_input_token_budget`.
     "agent_input_token_hard_max": 200_000,
+    # Input budget used when the model's context window could NOT be discovered
+    # (no provider report, not in KNOWN_CONTEXT_WINDOWS). Auto-scaling deliberately
+    # refuses to scale off an unproven window, but the penalty for "unknown" used
+    # to be a hardcoded 6000 — not caution, amnesia: a 94K-token history was
+    # trimmed to ~12 messages every turn, so the agent restarted its task from
+    # scratch each round. Raise this if you routinely run models the app can't
+    # measure and would rather risk overflow than lose the conversation.
+    "agent_unknown_model_token_budget": 6000,
     "agent_stream_timeout_seconds": 300,
     # Extra directory roots that read_file / write_file may access, in
     # addition to the built-in project data/ and system temp dirs. Each

@@ -3768,12 +3768,28 @@ async def stream_agent_loop(
             # proves (else 0) — not the passed-in context_length, which can be stale
             # or unset for some callers (#4122 review).
             ctx_for_budget = budget_context_for_model(endpoint_url, model, fallback=context_length)
+            # Budget to use when the window is unmeasurable. Configurable so the
+            # "unknown model" penalty is a product decision rather than a constant
+            # (an unnoticed 6000 here silently erased cross-turn memory).
+            try:
+                unknown_budget = int(get_setting("agent_unknown_model_token_budget", DEFAULT_BUDGET) or 0)
+            except (TypeError, ValueError):
+                unknown_budget = DEFAULT_BUDGET
+            if unknown_budget <= 0:
+                unknown_budget = DEFAULT_BUDGET
             effective_budget = compute_input_token_budget(
                 soft_budget,
                 ctx_for_budget,
                 budget_is_explicit,
+                default=unknown_budget,
                 hard_max=hard_max,
             )
+            if ctx_for_budget <= 0 and not budget_is_explicit:
+                logger.warning(
+                    "[agent] context window for %s is unknown — input budget falls back to "
+                    "%s tokens (agent_unknown_model_token_budget); history above that is trimmed.",
+                    model, effective_budget,
+                )
             trimmed_messages = trim_for_context(
                 messages,
                 effective_budget,
