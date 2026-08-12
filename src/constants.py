@@ -47,6 +47,11 @@ BG_JOBS_DIR = os.path.join(DATA_DIR, "bg_jobs")
 DEEP_RESEARCH_DIR = os.path.join(DATA_DIR, "deep_research")
 MCP_OAUTH_DIR = os.path.join(DATA_DIR, "mcp_oauth")
 GENERATED_IMAGES_DIR = os.path.join(DATA_DIR, "generated_images")
+# Images produced by a TOOL during an agent turn (rendered views, browser
+# screenshots) so they can render in chat and survive a reload.
+# Deliberately NOT chat_attachment_blobs/ — that directory holds the user's
+# own uploaded files, and this one is served over HTTP by filename.
+TOOL_IMAGES_DIR = os.path.join(DATA_DIR, "tool_images")
 TTS_CACHE_DIR = os.path.join(DATA_DIR, "tts_cache")
 EMAIL_URGENCY_CACHE_DIR = os.path.join(DATA_DIR, "email_urgency_cache")
 SKILLS_DIR = os.path.join(DATA_DIR, "skills")

@@ -1414,13 +1414,25 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
         if m.get("role") == "system":
             system_parts.append(m.get("content") or "")
         elif m.get("role") == "tool":
-            # Convert OpenAI tool result to Anthropic format
+            # Convert OpenAI tool result to Anthropic format. A tool result's
+            # content is usually plain text, but an image-producing tool (see
+            # agent_loop.py's _tool_result_content) can hand back an
+            # OpenAI-style multimodal list (text + image_url blocks) --
+            # Anthropic's tool_result "content" field accepts an array of
+            # text/image blocks directly, so reuse the same image_url→image
+            # converter already used for user-message attachments instead of
+            # flattening it to a string.
+            raw_content = m.get("content", "")
+            tool_result_content = (
+                _convert_openai_content_to_anthropic(raw_content)
+                if isinstance(raw_content, list) else raw_content
+            )
             chat_messages.append({
                 "role": "user",
                 "content": [{
                     "type": "tool_result",
                     "tool_use_id": m.get("tool_call_id", ""),
-                    "content": m.get("content", ""),
+                    "content": tool_result_content,
                 }],
             })
         elif m.get("role") == "assistant" and isinstance(m.get("tool_calls"), list):
@@ -1552,7 +1564,36 @@ def _is_untrusted_context_content(content) -> bool:
 _REFERENCE_CONTEXT_BOUNDARY = "Reference context received."
 
 
-def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
+def _flatten_tool_images_for_text_only(messages: List[Dict]) -> List[Dict]:
+    """Drop image_url blocks from tool-role content, keeping the text.
+
+    Only Anthropic's tool_result content field is known to accept an image
+    block here (_build_anthropic_payload converts it directly). A
+    image-producing tool can hand back that same OpenAI-style multimodal
+    list regardless of which backend the turn is actually using —
+    the tool has no way to know. OpenAI/Ollama/other OpenAI-compatible
+    endpoints expect tool-message content to be a plain string and would
+    likely 400 on a list, so flatten defensively for every non-Anthropic
+    provider rather than relying on the tool call site to guess right.
+    """
+    out = []
+    for msg in messages:
+        if msg.get("role") != "tool" or not isinstance(msg.get("content"), list):
+            out.append(msg)
+            continue
+        texts = [b.get("text", "") for b in msg["content"] if isinstance(b, dict) and b.get("type") == "text"]
+        n_images = sum(1 for b in msg["content"] if isinstance(b, dict) and b.get("type") == "image_url")
+        text = "\n".join(t for t in texts if t)
+        if n_images:
+            text = (text + "\n\n" if text else "") + (
+                f"[{n_images} image(s) omitted — this model/endpoint does not support "
+                "images in tool results; switch to a vision-capable Anthropic model to see them]"
+            )
+        out.append({**msg, "content": text})
+    return out
+
+
+def _sanitize_llm_messages(messages: List[Dict], provider: Optional[str] = None) -> List[Dict]:
     """Strip Odysseus-only metadata before sending messages to providers.
 
     Per the OpenAI chat format: user/system messages must have content; a tool
@@ -1562,6 +1603,10 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
     follow-up message _append_tool_results builds for a no-prose native tool call
     (content=None, since Gemini/Ollama reject tool_calls alongside ""). Dropping
     it leaves the tool result dangling and breaks the next round.
+
+    `provider`: when given and not "anthropic", multimodal tool-result content
+    (see _flatten_tool_images_for_text_only) is flattened to text — every other
+    provider's tool-message content must be a plain string.
     """
     allowed = {"role", "content", "name", "tool_call_id", "tool_calls", "function_call", "reasoning_content"}
     cleaned = []
@@ -1692,6 +1737,8 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
         else:
             merged.append(item)
 
+    if provider is not None and provider != "anthropic":
+        merged = _flatten_tool_images_for_text_only(merged)
     return merged
 
 
@@ -1864,7 +1911,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     if isinstance(headers, dict):
         h.update(headers)
 
-    messages_copy = _sanitize_llm_messages(messages)
+    messages_copy = _sanitize_llm_messages(messages, provider=_detect_provider(url))
 
     # Consolidate multiple system messages into one at the start.
     sys_parts = []
@@ -2024,7 +2071,7 @@ async def llm_call_async(
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
-    messages_copy = _sanitize_llm_messages(messages)
+    messages_copy = _sanitize_llm_messages(messages, provider=provider)
 
     # Consolidate multiple system messages into one at the start.
     sys_parts = []
@@ -2238,7 +2285,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
       - data: [DONE]                       — end of stream
     """
     provider = _detect_provider(url)
-    messages_copy = _sanitize_llm_messages(messages)
+    messages_copy = _sanitize_llm_messages(messages, provider=provider)
 
     # Consolidate multiple system messages into one at the start.
     # Some models (e.g. Qwen3.5) reject system messages that aren't first.

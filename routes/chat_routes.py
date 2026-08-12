@@ -588,6 +588,33 @@ def setup_chat_routes(
     router = APIRouter(tags=["chat"])
 
     # ------------------------------------------------------------------ #
+    # GET /api/chat/tool-image/{name} — images a tool produced this turn
+    # ------------------------------------------------------------------ #
+    @router.get("/api/chat/tool-image/{name}")
+    async def get_tool_image(name: str):
+        """Serve a tool-produced image (a rendered view, a browser screenshot).
+
+        `name` is only ever one of our own generated filenames — the agent
+        loop writes the file and hands the chat the URL, nothing here is
+        model- or user-authored. is_safe_name() enforces that shape, so a
+        traversal attempt is rejected before any path is built rather than
+        being caught by a normalization check afterwards.
+        """
+        from fastapi.responses import FileResponse
+
+        from src.constants import TOOL_IMAGES_DIR
+        from src.tool_images import is_safe_name
+
+        if not is_safe_name(name):
+            raise HTTPException(400, "Invalid image name")
+        path = os.path.join(TOOL_IMAGES_DIR, name)
+        if not os.path.isfile(path):
+            raise HTTPException(404, "Tool image not found")
+        ext = name.rsplit(".", 1)[-1].lower()
+        media = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
+        return FileResponse(path, media_type=media)
+
+    # ------------------------------------------------------------------ #
     # POST /api/chat (non-streaming)
     # ------------------------------------------------------------------ #
     @router.post("/api/chat", response_model=Dict[str, str])

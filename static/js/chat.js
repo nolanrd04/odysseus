@@ -3452,23 +3452,41 @@ import {
                   _rememberGeneratedImage(json);
                   _appendGeneratedImageBubble(json);
                 }
-                // --- Render browser screenshots in tool output ---
-                if (json.screenshot && currentToolBubble) {
+                // --- Render images this tool produced (renders, screenshots) ---
+                // One path for every image-producing tool. `tool_images` is a
+                // list of {url, title}; `screenshot` is the older single
+                // base64 field, still handled so nothing that emits it breaks.
+                if ((json.tool_images || json.screenshot) && currentToolBubble) {
                   const contentEl = currentToolBubble.querySelector('.agent-thread-content');
                   if (contentEl) {
-                    const screenshotSrc = chatRenderer.safeToolScreenshotSrc(json.screenshot);
-                    if (screenshotSrc) {
+                    const imgs = Array.isArray(json.tool_images) && json.tool_images.length
+                      ? json.tool_images
+                      : [{ url: json.screenshot, title: 'Screenshot' }];
+                    imgs.forEach((im) => {
+                      const src = chatRenderer.safeToolImageSrc(im && im.url);
+                      if (!src) return;
                       const details = document.createElement('details');
                       details.className = 'agent-tool-output';
+                      details.open = true;
                       const summary = document.createElement('summary');
-                      summary.textContent = 'Screenshot';
+                      summary.textContent = (im && im.title) || 'Image';
                       const img = document.createElement('img');
-                      img.src = screenshotSrc;
-                      img.style.cssText = 'max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)';
+                      img.src = src;
+                      img.alt = (im && im.title) || 'Tool output image';
+                      img.loading = 'lazy';
+                      img.style.cssText = 'max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border);cursor:zoom-in';
+                      img.addEventListener('click', () => window.open(src, '_blank', 'noopener'));
                       details.appendChild(summary);
                       details.appendChild(img);
                       contentEl.appendChild(details);
-                    }
+                      // .agent-thread-content is display:none unless the node
+                      // carries .open — without this the image lands in the DOM
+                      // correctly and is invisible until the user thinks to
+                      // click the tool row. An image is the whole point of the
+                      // call, so expand the node that produced one.
+                      currentToolBubble.classList.add('open');
+                    });
+                    uiModule.scrollHistory();
                   }
                 }
                 // --- Reload sessions after manage_session tool (delete, rename, etc.) ---

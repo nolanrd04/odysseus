@@ -36,6 +36,21 @@ export function safeToolScreenshotSrc(raw) {
   return '';
 }
 
+// Images a tool produced. Accepts the legacy inline base64 form and the
+// disk-backed form the agent loop now emits: a same-origin path under
+// /api/chat/tool-image/ whose filename the server generated. Anything else
+// — absolute URLs, other paths, model-authored strings — is rejected, so a
+// tool result can never point the chat at a third-party host.
+export function safeToolImageSrc(raw) {
+  const src = String(raw || '').trim();
+  const inline = safeToolScreenshotSrc(src);
+  if (inline) return inline;
+  if (/^\/api\/chat\/tool-image\/[A-Za-z0-9_-]{1,120}\.(?:png|jpe?g|gif|webp)$/.test(src)) {
+    return src;
+  }
+  return '';
+}
+
 export function safeDisplayImageSrc(raw) {
   const src = String(raw || '').trim();
   if (!src) return '';
@@ -2393,10 +2408,21 @@ export function addMessage(role, content, modelName, metadata) {
             if (ev.output && ev.output.trim()) {
               outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
             }
-            const screenshotSrc = safeToolScreenshotSrc(ev.screenshot);
-            if (screenshotSrc) {
-              outHtml += `<details class="agent-tool-output"><summary>Screenshot</summary><img src="${esc(screenshotSrc)}" style="max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)" /></details>`;
-            }
+            // Images the tool produced, re-rendered from the persisted event
+            // so they survive a reload instead of only existing in the live
+            // stream. `tool_images` carries URLs; `ev.screenshot` is the
+            // older inline form.
+            const evImages = Array.isArray(ev.tool_images) && ev.tool_images.length
+              ? ev.tool_images
+              : (ev.screenshot ? [{ url: ev.screenshot, title: 'Screenshot' }] : []);
+            let evHasImage = false;
+            evImages.forEach((im) => {
+              const imgSrc = safeToolImageSrc(im && im.url);
+              if (!imgSrc) return;
+              evHasImage = true;
+              const label = esc((im && im.title) || 'Image');
+              outHtml += `<details class="agent-tool-output" open><summary>${label}</summary><img src="${esc(imgSrc)}" alt="${label}" loading="lazy" style="max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)" /></details>`;
+            });
             // File-write/edit diff (persisted in the tool event) \u2014 re-render it
             // so it survives reload, matching the live stream.
             let evDiffHtml = '';
@@ -2420,7 +2446,10 @@ export function addMessage(role, content, modelName, metadata) {
               evDiffHtml = `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
             }
             const node = document.createElement('div');
-            node.className = 'agent-thread-node' + (ok ? '' : ' error');
+            // `.open` so a restored image is visible without a click — the
+            // content div is display:none otherwise (see .agent-thread-content
+            // in style.css). Matches the live path in chat.js.
+            node.className = 'agent-thread-node' + (ok ? '' : ' error') + (evHasImage ? ' open' : '');
             // Hide the raw JSON command when a diff says it better (same as live).
             const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
             node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
@@ -2792,6 +2821,7 @@ const chatRenderer = {
   stripToolBlocks,
   copyMessageText,
   safeToolScreenshotSrc,
+  safeToolImageSrc,
   safeDisplayImageSrc,
   removeAskUserCards,
   renderAskUserCard,

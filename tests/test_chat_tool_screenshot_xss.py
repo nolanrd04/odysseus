@@ -6,21 +6,38 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parent.parent
 
 
-def test_live_tool_screenshot_does_not_template_raw_sse_value():
+def test_live_tool_image_does_not_template_raw_sse_value():
+    """Tool-produced images (rendered views, browser screenshots) all
+    arrive over the same SSE field now — `tool_images` — so the sink to guard
+    is safeToolImageSrc rather than the old screenshot-only helper."""
     chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
 
-    assert "safeToolScreenshotSrc(json.screenshot)" in chat
-    assert 'img.src = screenshotSrc' in chat
+    assert "chatRenderer.safeToolImageSrc(im && im.url)" in chat
+    assert "img.src = src" in chat
     assert 'details.innerHTML = `<summary>Screenshot</summary><img src="${json.screenshot}"' not in chat
+    assert 'img.src = im.url' not in chat
 
 
-def test_restored_tool_screenshot_uses_raster_data_url_whitelist():
+def test_restored_tool_image_uses_raster_url_whitelist():
     renderer = (_REPO / "static" / "js" / "chatRenderer.js").read_text(encoding="utf-8")
 
     assert "export function safeToolScreenshotSrc(raw)" in renderer
+    assert "export function safeToolImageSrc(raw)" in renderer
     assert "(?:png|jpe?g|gif|webp)" in renderer
-    assert "safeToolScreenshotSrc(ev.screenshot)" in renderer
+    assert "safeToolImageSrc(im && im.url)" in renderer
     assert 'src="${esc(ev.screenshot)}"' not in renderer
+    assert 'src="${im.url}"' not in renderer
+
+
+def test_tool_image_url_whitelist_is_same_origin_tool_image_path_only():
+    """A tool result must not be able to point the chat at an arbitrary URL.
+    The non-data branch of safeToolImageSrc accepts only the server-generated
+    /api/chat/tool-image/<name> path, with the filename shape the backend's
+    is_safe_name() produces."""
+    renderer = (_REPO / "static" / "js" / "chatRenderer.js").read_text(encoding="utf-8")
+
+    assert r"/^\/api\/chat\/tool-image\/[A-Za-z0-9_-]{1,120}\.(?:png|jpe?g|gif|webp)$/" in renderer
+    assert "safeToolImageSrc," in renderer
 
 
 def test_streaming_tool_labels_are_escaped_before_inner_html():

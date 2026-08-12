@@ -24,6 +24,7 @@ from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
+from src.tool_images import collect_result_images, save_tool_images
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
 from src.agent_tools import (
@@ -2922,6 +2923,40 @@ _VERIFIER_EFFECTFUL_TOOLS = {
     "create_document", "update_document", "edit_document",
     "bash", "python", "write_file",
 }
+
+# Images a tool returned reach the model as vision input on that tool's
+# result. This began as a narrow per-tool allowlist, so that widening the
+# path could not silently change an already-live tool's token cost. That
+# gate is now open deliberately: an image the agent produced is an image the
+# agent can see, whichever tool made it. Only the per-result cap remains.
+_MAX_VISION_IMAGES_PER_RESULT = 8
+
+
+def _tool_result_content(formatted_text: str, result: Dict) -> "str | list":
+    """Plain text, unless the tool returned images -- then a multimodal
+    content list (text + image_url blocks) in the same OpenAI-style shape
+    _convert_openai_content_to_anthropic already knows how to convert into a
+    real Anthropic tool_result image block.
+
+    Both image fields count. `vision_images` is an explicit "the model
+    should see this" marker; `images` (browser screenshots) predates that
+    marker and used to be human-only. Non-vision providers are unaffected --
+    llm_core's _flatten_tool_images_for_text_only degrades this to a text
+    note rather than sending an image block they'd reject.
+    """
+    from src.tool_images import collect_result_images
+
+    images = collect_result_images(result)
+    if not images:
+        return formatted_text
+    blocks: list = [{"type": "text", "text": formatted_text}]
+    for img in images[:_MAX_VISION_IMAGES_PER_RESULT]:
+        data = img.get("data") if isinstance(img, dict) else None
+        if not data:
+            continue
+        mime = img.get("mimeType") or "image/png"
+        blocks.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
+    return blocks if len(blocks) > 1 else formatted_text
 _VERIFIER_MAX_ROUNDS = 2  # cap re-verify cycles per turn — never loop forever
 
 
@@ -4882,10 +4917,15 @@ async def stream_agent_loop(
             for k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
                 if k in result:
                     tool_output_data[k] = result[k]
-            # Forward screenshots from browser tools (base64 images)
-            if result.get("images"):
-                img = result["images"][0]
-                tool_output_data["screenshot"] = f"data:{img['mimeType']};base64,{img['data']}"
+            # Forward every image this tool produced, from either field, as
+            # short URLs the chat can render inline. Persisted to disk (not
+            # base64-inlined into the event) so a session's history payload
+            # stays small — see src/tool_images.py.
+            _saved_tool_images = save_tool_images(
+                collect_result_images(result), tool=block.tool_type
+            )
+            if _saved_tool_images:
+                tool_output_data["tool_images"] = _saved_tool_images
             # Forward a file-write diff for inline before/after rendering
             if "diff" in result:
                 tool_output_data["diff"] = result["diff"]
@@ -5056,6 +5096,13 @@ async def stream_agent_loop(
             # this the diff shows live but vanishes from saved history.
             if result.get("diff"):
                 tool_event["diff"] = result["diff"]
+            # Same for tool-produced images. These are URLs into
+            # TOOL_IMAGES_DIR, not base64, so persisting them costs the
+            # history payload a few dozen bytes per image instead of tens of
+            # KB. Browser screenshots used to render live and then disappear
+            # on reload purely because this line didn't exist.
+            if _saved_tool_images:
+                tool_event["tool_images"] = _saved_tool_images
             if _pending_ask_user_event:
                 # Persist the structured question with the tool event.  On a
                 # reload, chatRenderer can restore the card; a later user
@@ -5067,7 +5114,13 @@ async def stream_agent_loop(
 
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
-            tool_result_texts.append(formatted)
+            # Native tool-role messages may carry real images back to the model
+            # (see _tool_result_content above); the non-native `tool_results`
+            # join stays plain text since local models without vision can't
+            # use them anyway. No per-tool gate here any more — a tool that
+            # returned images returns them to the model too, whichever tool
+            # it was; _tool_result_content is a no-op when there are none.
+            tool_result_texts.append(_tool_result_content(formatted, result))
             if (
                 _ody_doc_stream_create_mode
                 and block.tool_type == "create_document"
